@@ -28,7 +28,7 @@ export function AspectFrame({ ratio, children, className }: AspectFrameProps) {
     <motion.div
       layout
       className={`overflow-hidden rounded-lg ${ratioClass} ${className ?? ""}`}
-      style={{ background: "oklch(0.16 0.010 265 / 0.5)" }}
+      style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)" }}
     >
       {children}
     </motion.div>

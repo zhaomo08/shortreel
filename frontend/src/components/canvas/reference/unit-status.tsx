@@ -14,7 +14,7 @@ export const STATUS_CONF: Record<UnitStatus, UnitStatusConf> = {
   pending: {
     i18nKey: "reference_status_pending",
     textClass: "text-[var(--color-text-4)]",
-    bgClass: "bg-[oklch(0.30_0.01_250_/_0.4)]",
+    bgClass: "bg-[color-mix(in_oklab,var(--color-surface-2)_40%,transparent)]",
     dotClass: "bg-[var(--color-text-4)]",
     pulse: false,
   },

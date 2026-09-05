@@ -23,8 +23,8 @@ interface PhaseTone {
 
 const PHASE_TONE: Record<Phase, PhaseTone> = {
   preparation: {
-    dot: "oklch(0.64 0.020 265)",
-    text: "oklch(0.78 0.010 265)",
+    dot: "oklch(0.64 0.020 59)",
+    text: "oklch(0.78 0.010 59)",
     glow: "transparent",
   },
   script: {
@@ -33,9 +33,9 @@ const PHASE_TONE: Record<Phase, PhaseTone> = {
     glow: "oklch(0.80 0.12 75 / 0.35)",
   },
   production: {
-    dot: "oklch(0.76 0.09 295)",
-    text: "oklch(0.88 0.05 295)",
-    glow: "oklch(0.76 0.09 295 / 0.40)",
+    dot: "oklch(0.76 0.09 208)",
+    text: "oklch(0.88 0.05 208)",
+    glow: "oklch(0.76 0.09 208 / 0.40)",
   },
   completed: {
     dot: "oklch(0.78 0.10 155)",
@@ -46,14 +46,14 @@ const PHASE_TONE: Record<Phase, PhaseTone> = {
 
 const POSTER_FX_STYLE: CSSProperties = {
   background:
-    "linear-gradient(115deg, oklch(1 0 0 / 0.18) 0%, transparent 30%), linear-gradient(295deg, oklch(0 0 0 / 0.55) 0%, transparent 45%)",
+    "linear-gradient(115deg, color-mix(in oklab, var(--raise) 18%, transparent) 0%, transparent 30%), linear-gradient(295deg, color-mix(in oklab, var(--sink) 55%, transparent) 0%, transparent 45%)",
 };
 
 const POSTER_GRID_STYLE = posterGridStyle();
 
 const POSTER_SPROCKET_STYLE: CSSProperties = {
   background:
-    "repeating-linear-gradient(0deg, oklch(0 0 0 / 0.6) 0 6px, transparent 6px 12px)",
+    "repeating-linear-gradient(0deg, color-mix(in oklab, var(--sink) 60%, transparent) 0 6px, transparent 6px 12px)",
 };
 
 export function asProjectStatus(s: ProjectSummary["status"]): ProjectStatus | null {
@@ -80,8 +80,8 @@ export function Poster({ project, styleLabel, large = false }: PosterProps) {
         width: "100%",
         aspectRatio: aspect,
         borderRadius: radius,
-        background: `radial-gradient(120% 80% at 30% 30%, oklch(0.55 0.15 ${hue1}) 0%, oklch(0.28 0.08 ${(hue1 + 10) % 360}) 45%, oklch(0.14 0.02 265) 100%)`,
-        boxShadow: "inset 0 0 0 1px oklch(1 0 0 / 0.06)",
+        background: `radial-gradient(120% 80% at 30% 30%, oklch(0.55 0.15 ${hue1}) 0%, oklch(0.28 0.08 ${(hue1 + 10) % 360}) 45%, color-mix(in oklab, var(--color-bg-grad-b) 100%, transparent) 100%)`,
+        boxShadow: "inset 0 0 0 1px color-mix(in oklab, var(--raise) 6%, transparent)",
       }}
     >
       {project.thumbnail ? (
@@ -111,7 +111,7 @@ export function Poster({ project, styleLabel, large = false }: PosterProps) {
       />
       <div
         className="absolute left-[18px] top-[14px] font-mono font-bold uppercase tabular-nums"
-        style={{ color: "oklch(0.95 0 0 / 0.78)", fontSize: 9, letterSpacing: "0.14em" }}
+        style={{ color: "color-mix(in oklab, var(--raise) 78%, transparent)", fontSize: 9, letterSpacing: "0.14em" }}
       >
         {styleLabel}
       </div>
@@ -124,7 +124,7 @@ export function Poster({ project, styleLabel, large = false }: PosterProps) {
             lineHeight: 0.95,
             color: "oklch(0.99 0.005 0)",
             letterSpacing: "-0.02em",
-            textShadow: "0 2px 28px oklch(0 0 0 / 0.5)",
+            textShadow: "0 2px 28px color-mix(in oklab, var(--sink) 50%, transparent)",
             wordBreak: "break-word",
             overflowWrap: "anywhere",
           }}
@@ -209,8 +209,8 @@ function episodeDotColor(
   if (i < inProductionEnd) {
     return { bg: "var(--color-accent)", glow: "0 0 6px var(--color-accent-glow)" };
   }
-  if (i < scriptedEnd) return { bg: "oklch(0.55 0.010 265)" };
-  return { bg: "oklch(0.22 0.011 265)" };
+  if (i < scriptedEnd) return { bg: "oklch(0.55 0.010 59)" };
+  return { bg: "color-mix(in oklab, var(--color-bg-grad-a) 100%, transparent)" };
 }
 
 function EpisodeStrip({ summary }: { summary: ProjectStatus["episodes_summary"] }) {
@@ -237,7 +237,7 @@ export function gradientProgressStyles(variant: "accent" | "good"): {
   trackStyle: CSSProperties;
   barStyle: CSSProperties;
 } {
-  const trackStyle: CSSProperties = { background: "oklch(0.16 0.010 265)" };
+  const trackStyle: CSSProperties = { background: "color-mix(in oklab, var(--color-bg-grad-b) 100%, transparent)" };
   if (variant === "good") {
     return {
       trackStyle,
@@ -407,7 +407,7 @@ export function ProjectCard(props: ProjectCardProps) {
 
         <div
           className="mt-3 grid grid-cols-4 overflow-hidden rounded-[7px] border border-hairline-soft"
-          style={{ background: "oklch(0.16 0.010 265 / 0.5)" }}
+          style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)" }}
         >
           {(
             [
@@ -460,7 +460,7 @@ export function ProjectCard(props: ProjectCardProps) {
   );
 
   return (
-    <article className="group relative overflow-hidden rounded-[12px] border border-hairline bg-bg-grad-a/85 transition-[transform,border-color,box-shadow] duration-150 motion-safe:hover:-translate-y-0.5 hover:border-accent/45 hover:shadow-[0_18px_40px_-22px_oklch(0_0_0_/_0.6),0_0_0_1px_var(--color-accent-soft)] focus-within:border-accent/60 focus-within:shadow-[0_0_0_2px_var(--color-accent-soft)]">
+    <article className="group relative overflow-hidden rounded-[12px] border border-hairline bg-bg-grad-a/85 transition-[transform,border-color,box-shadow] duration-150 motion-safe:hover:-translate-y-0.5 hover:border-accent/45 hover:shadow-[0_18px_40px_-22px_color-mix(in_oklab,var(--sink)_60%,transparent),0_0_0_1px_var(--color-accent-soft)] focus-within:border-accent/60 focus-within:shadow-[0_0_0_2px_var(--color-accent-soft)]">
       <Link
         href={`/app/projects/${project.name}`}
         className="block w-full text-left text-text no-underline outline-none"
@@ -493,7 +493,7 @@ export function ProjectCard(props: ProjectCardProps) {
           {menuOpen ? (
             <div
               ref={menuRef}
-              className="absolute right-0 bottom-[calc(100%+6px)] min-w-[148px] overflow-hidden rounded-md border border-hairline bg-bg-grad-a/95 shadow-[0_18px_40px_-22px_oklch(0_0_0_/_0.7)] backdrop-blur"
+              className="absolute right-0 bottom-[calc(100%+6px)] min-w-[148px] overflow-hidden rounded-md border border-hairline bg-bg-grad-a/95 shadow-[0_18px_40px_-22px_color-mix(in_oklab,var(--sink)_70%,transparent)] backdrop-blur"
             >
               <button
                 type="button"

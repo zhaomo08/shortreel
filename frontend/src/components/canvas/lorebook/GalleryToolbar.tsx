@@ -20,7 +20,7 @@ export function GalleryToolbar({ title, count, onAdd, onPickFromLibrary }: Props
       className="sticky top-0 z-10 flex items-center gap-3 px-5 py-3"
       style={{
         background:
-          "linear-gradient(180deg, oklch(0.20 0.012 265 / 0.85), oklch(0.18 0.010 265 / 0.65))",
+          "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 85%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 65%, transparent))",
         backdropFilter: "blur(10px)",
         WebkitBackdropFilter: "blur(10px)",
         borderBottom: "1px solid var(--color-hairline-soft)",
@@ -62,14 +62,14 @@ export function GalleryToolbar({ title, count, onAdd, onPickFromLibrary }: Props
         style={{
           color: "var(--color-text-2)",
           border: "1px solid var(--color-hairline)",
-          background: "oklch(0.22 0.011 265 / 0.5)",
+          background: "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)",
         }}
         onMouseEnter={(e) => {
-          e.currentTarget.style.background = "oklch(0.26 0.013 265 / 0.7)";
+          e.currentTarget.style.background = "color-mix(in oklab, var(--color-surface-2) 70%, transparent)";
           e.currentTarget.style.color = "var(--color-text)";
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.background = "oklch(0.22 0.011 265 / 0.5)";
+          e.currentTarget.style.background = "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)";
           e.currentTarget.style.color = "var(--color-text-2)";
         }}
       >
@@ -83,11 +83,11 @@ export function GalleryToolbar({ title, count, onAdd, onPickFromLibrary }: Props
         onClick={onAdd}
         className="focus-ring inline-flex items-center gap-1.5 rounded-md px-3 py-1 text-[11.5px] font-medium transition-transform"
         style={{
-          color: "oklch(0.14 0 0)",
+          color: "color-mix(in oklab, var(--sink) 100%, transparent)",
           background:
             "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
           boxShadow:
-            "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
+            "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.transform = "translateY(-1px)";

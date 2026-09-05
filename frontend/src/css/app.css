@@ -15,9 +15,9 @@ body {
  * 这里直接在 .app-shell 上落地最终背景，避免歧义。 */
 .app-shell {
     background:
-        radial-gradient(1250px 640px at 4% -14%, oklch(0.50 0.115 62 / 0.42), transparent 62%),
-        radial-gradient(900px 520px at 99% 108%, color-mix(in oklab, var(--color-filter-m) 40%, transparent), transparent 60%),
-        radial-gradient(820px 500px at 86% 4%, oklch(0.44 0.070 208 / 0.26), transparent 62%),
+        radial-gradient(1250px 640px at 4% -14%, var(--glow-a), transparent 62%),
+        radial-gradient(900px 520px at 99% 108%, var(--glow-b), transparent 60%),
+        radial-gradient(820px 500px at 86% 4%, var(--glow-c), transparent 62%),
         linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b));
     background-attachment: fixed;
 }
@@ -36,22 +36,22 @@ body {
 
 .app-sidebar {
     border-right: 1px solid var(--color-hairline);
-    background: linear-gradient(180deg, oklch(0.195 0.011 59 / 0.6), oklch(0.175 0.010 59 / 0.5));
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-b) 60%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent));
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
 }
 
 .app-panel {
     border: 1px solid var(--color-hairline-soft);
-    background: linear-gradient(180deg, oklch(0.22 0.012 59 / 0.72), oklch(0.18 0.010 59 / 0.62));
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 72%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 62%, transparent));
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
 }
 
 .app-panel-strong {
     border: 1px solid var(--color-hairline-strong);
-    background: linear-gradient(180deg, oklch(0.22 0.012 59 / 0.92), oklch(0.16 0.010 59 / 0.84));
-    box-shadow: 0 20px 40px oklch(0 0 0 / 0.45);
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 92%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 84%, transparent));
+    box-shadow: 0 20px 40px color-mix(in oklab, var(--sink) 45%, transparent);
 }
 
 .app-menu-item {
@@ -71,8 +71,8 @@ body {
     position: absolute;
     inset: 0;
     background-image:
-        linear-gradient(to right, oklch(1 0 0 / 0.04) 1px, transparent 1px),
-        linear-gradient(to bottom, oklch(1 0 0 / 0.04) 1px, transparent 1px);
+        linear-gradient(to right, color-mix(in oklab, var(--raise) 4%, transparent) 1px, transparent 1px),
+        linear-gradient(to bottom, color-mix(in oklab, var(--raise) 4%, transparent) 1px, transparent 1px);
     background-size: 28px 28px;
     opacity: 0.25;
     pointer-events: none;
@@ -115,8 +115,8 @@ body {
     position: absolute;
     inset: 0;
     background-image:
-        linear-gradient(to right, oklch(1 0 0 / 0.045) 1px, transparent 1px),
-        linear-gradient(to bottom, oklch(1 0 0 / 0.045) 1px, transparent 1px);
+        linear-gradient(to right, color-mix(in oklab, var(--raise) 4.5%, transparent) 1px, transparent 1px),
+        linear-gradient(to bottom, color-mix(in oklab, var(--raise) 4.5%, transparent) 1px, transparent 1px);
     background-size: 50px 50px;
     mask-image: radial-gradient(circle at 50% 42%, #000 26%, transparent 86%);
     opacity: 0.22;
@@ -126,8 +126,8 @@ body {
     position: absolute;
     inset: 0;
     background-image:
-        linear-gradient(to right, oklch(1 0 0 / 0.06) 1px, transparent 1px),
-        linear-gradient(to bottom, oklch(1 0 0 / 0.06) 1px, transparent 1px);
+        linear-gradient(to right, color-mix(in oklab, var(--raise) 6%, transparent) 1px, transparent 1px),
+        linear-gradient(to bottom, color-mix(in oklab, var(--raise) 6%, transparent) 1px, transparent 1px);
     background-size: 96px 96px;
     transform: perspective(1000px) rotateX(42deg) translateY(42%);
     transform-origin: center bottom;
@@ -140,8 +140,8 @@ body {
     text-wrap: balance;
     color: var(--color-text);
     text-shadow:
-        0 1px 0 oklch(1 0 0 / 0.08),
-        0 14px 32px oklch(0 0 0 / 0.5);
+        0 1px 0 color-mix(in oklab, var(--raise) 8%, transparent),
+        0 14px 32px color-mix(in oklab, var(--sink) 50%, transparent);
 }
 
 .landing-orb {

@@ -1454,6 +1454,11 @@ export default {
 
   // SystemConfigPage - language
   'language_setting': 'Language',
+  'theme_setting': 'Theme',
+  'theme_darkroom': 'Darkroom',
+  'theme_fixer': 'Fixer',
+  'theme_baryta': 'Baryta',
+  'theme_silver': 'Silver',
 
   // ---- Workbench v3 ----
   'project_switcher_current': 'Current project',

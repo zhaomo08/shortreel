@@ -1453,6 +1453,11 @@ export default {
 
   // SystemConfigPage - language
   'language_setting': '语言',
+  'theme_setting': '配色',
+  'theme_darkroom': '暗房',
+  'theme_fixer': '定影',
+  'theme_baryta': '相纸',
+  'theme_silver': '银盐',
 
   // ---- Workbench v3 ----
   'project_switcher_current': '当前项目',

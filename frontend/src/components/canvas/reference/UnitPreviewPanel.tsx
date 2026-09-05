@@ -158,10 +158,10 @@ export function UnitPreviewPanel({
       </div>
 
       <div
-        className={`relative aspect-video w-full overflow-hidden rounded-lg border border-[var(--color-hairline)] shadow-[0_16px_40px_-16px_oklch(0_0_0_/_0.7)] ${
+        className={`relative aspect-video w-full overflow-hidden rounded-lg border border-[var(--color-hairline)] shadow-[0_16px_40px_-16px_color-mix(in_oklab,var(--sink)_70%,transparent)] ${
           ready
-            ? "bg-[linear-gradient(135deg,oklch(0.32_0.04_240),oklch(0.18_0.02_280))]"
-            : "bg-[oklch(0.18_0.010_265_/_0.5)]"
+            ? "bg-[linear-gradient(135deg,color-mix(in_oklab,var(--color-surface-2)_100%,transparent),color-mix(in_oklab,var(--color-bg-grad-b)_100%,transparent))]"
+            : "bg-[color-mix(in_oklab,var(--color-bg-grad-b)_50%,transparent)]"
         }`}
       >
         {ready && videoUrl && projectName && (
@@ -233,8 +233,8 @@ export function UnitPreviewPanel({
           disabled={inFlight || busy || restoring || generationBlocked}
           className={`focus-ring inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2.5 text-sm font-semibold transition-colors ${
             inFlight || busy || restoring || generationBlocked
-              ? "cursor-not-allowed border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.6)] text-[var(--color-text-3)]"
-              : "text-[oklch(0.14_0_0)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_oklch(1_0_0_/_0.3),0_4px_14px_-4px_var(--color-accent-glow)]"
+              ? "cursor-not-allowed border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_60%,transparent)] text-[var(--color-text-3)]"
+              : "text-[color-mix(in_oklab,var(--sink)_100%,transparent)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--raise)_30%,transparent),0_4px_14px_-4px_var(--color-accent-glow)]"
           }`}
         >
           {inFlight ? (
@@ -280,7 +280,7 @@ export function UnitPreviewPanel({
         />
       )}
 
-      <div className="rounded-lg border border-[var(--color-hairline-soft)] bg-[oklch(0.18_0.010_265_/_0.5)] p-3">
+      <div className="rounded-lg border border-[var(--color-hairline-soft)] bg-[color-mix(in_oklab,var(--color-bg-grad-b)_50%,transparent)] p-3">
         <div className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-4)]">
           {t("reference_preview_metadata")}
         </div>

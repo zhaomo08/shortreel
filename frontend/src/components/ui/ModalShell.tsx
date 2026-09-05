@@ -27,7 +27,7 @@ interface ModalShellBaseProps {
   className?: string;
   /** 容器额外 inline style */
   style?: CSSProperties;
-  /** Backdrop（黑底 + blur）的自定义样式，覆盖默认 oklch(0 0 0 / 0.65) + blur(2px) */
+  /** Backdrop（黑底 + blur）的自定义样式，覆盖默认 color-mix(in oklab, var(--sink) 65%, transparent) + blur(2px) */
   backdropStyle?: CSSProperties;
   children: ReactNode;
 }
@@ -41,7 +41,7 @@ type ModalShellA11yProps =
 export type ModalShellProps = ModalShellBaseProps & ModalShellA11yProps;
 
 const DEFAULT_BACKDROP_STYLE: CSSProperties = {
-  background: "oklch(0 0 0 / 0.65)",
+  background: "color-mix(in oklab, var(--sink) 65%, transparent)",
   backdropFilter: "blur(2px)",
   WebkitBackdropFilter: "blur(2px)",
 };

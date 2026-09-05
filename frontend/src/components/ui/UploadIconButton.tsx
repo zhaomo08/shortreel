@@ -39,7 +39,7 @@ export function UploadIconButton({ accept, label, busy, disabled, onSelect }: Up
         disabled={busy || disabled}
         title={label}
         aria-label={label}
-        className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-50"
+        className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
         style={{ color: "var(--color-text-3)" }}
       >
         {busy ? (

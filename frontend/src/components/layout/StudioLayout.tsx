@@ -180,7 +180,7 @@ export function StudioLayout({ children }: StudioLayoutProps) {
             style={{
               width: `min(${ASSISTANT_PANEL_DEFAULT_WIDTH}px, 40vw)`,
               minWidth: 0,
-              background: "oklch(0.19 0.011 250 / 0.5)",
+              background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)",
               borderLeft: "1px solid var(--color-hairline)",
             }}
           >
@@ -195,7 +195,7 @@ export function StudioLayout({ children }: StudioLayoutProps) {
           }`}
           style={{
             width: assistantPanelOpen ? displayedPanelWidth : 0,
-            background: "oklch(0.19 0.011 250 / 0.5)",
+            background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)",
             borderLeft: assistantPanelOpen
               ? "1px solid var(--color-hairline)"
               : "1px solid transparent",
@@ -240,10 +240,10 @@ export function StudioLayout({ children }: StudioLayoutProps) {
         }`}
         style={{
           background:
-            "linear-gradient(135deg, var(--color-accent), oklch(0.60 0.10 280))",
-          color: "oklch(0.12 0 0)",
+            "linear-gradient(135deg, var(--color-accent), oklch(0.60 0.10 59))",
+          color: "color-mix(in oklab, var(--sink) 100%, transparent)",
           boxShadow:
-            "0 0 0 1px oklch(1 0 0 / 0.1), 0 6px 20px -6px var(--color-accent-glow)",
+            "0 0 0 1px color-mix(in oklab, var(--raise) 10%, transparent), 0 6px 20px -6px var(--color-accent-glow)",
           transitionDelay: assistantPanelOpen ? "0ms" : "200ms",
         }}
         title={t("open_assistant_panel")}

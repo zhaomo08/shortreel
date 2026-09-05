@@ -100,10 +100,10 @@ export function ProductsPage({
 
 const FIELD_STYLE: React.CSSProperties = {
   background:
-    "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.6), oklch(0.18 0.010 265 / 0.45))",
+    "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 60%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent))",
   border: "1px solid var(--color-hairline)",
   color: "var(--color-text)",
-  boxShadow: "inset 0 1px 2px oklch(0 0 0 / 0.2)",
+  boxShadow: "inset 0 1px 2px color-mix(in oklab, var(--sink) 20%, transparent)",
 };
 
 function ProductFormModal({

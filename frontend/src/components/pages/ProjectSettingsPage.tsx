@@ -73,9 +73,9 @@ function SectionCard({ kicker, title, description, children, footer }: SectionCa
       className="overflow-hidden rounded-[12px] border border-hairline"
       style={{
         background:
-          "linear-gradient(180deg, oklch(0.20 0.012 270 / 0.55), oklch(0.16 0.010 265 / 0.55))",
+          "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 55%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 55%, transparent))",
         boxShadow:
-          "inset 0 1px 0 oklch(1 0 0 / 0.03), 0 18px 40px -28px oklch(0 0 0 / 0.5)",
+          "inset 0 1px 0 color-mix(in oklab, var(--raise) 3%, transparent), 0 18px 40px -28px color-mix(in oklab, var(--sink) 50%, transparent)",
       }}
     >
       <header className="px-5 pt-4 pb-3 border-b border-hairline-soft">
@@ -91,7 +91,7 @@ function SectionCard({ kicker, title, description, children, footer }: SectionCa
       </header>
       <div className="px-5 py-4">{children}</div>
       {footer ? (
-        <footer className="border-t border-hairline-soft bg-[oklch(0.16_0.010_265_/_0.5)] px-5 py-3">
+        <footer className="border-t border-hairline-soft bg-[color-mix(in_oklab,var(--color-bg-grad-b)_50%,transparent)] px-5 py-3">
           {footer}
         </footer>
       ) : null}
@@ -614,7 +614,7 @@ export function ProjectSettingsPage() {
       style={
         {
           background:
-            "radial-gradient(900px 480px at 8% -10%, oklch(0.32 0.05 295 / 0.22), transparent 55%), radial-gradient(800px 460px at 100% 110%, oklch(0.26 0.04 260 / 0.22), transparent 55%), linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b))",
+            "radial-gradient(900px 480px at 8% -10%, color-mix(in oklab, var(--color-accent) 22%, transparent), transparent 55%), radial-gradient(800px 460px at 100% 110%, color-mix(in oklab, var(--color-surface-2) 22%, transparent), transparent 55%), linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b))",
         }
       }
     >
@@ -623,12 +623,12 @@ export function ProjectSettingsPage() {
         className="sticky top-0 z-30 shrink-0"
         style={{
           background:
-            "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.55), oklch(0.15 0.010 265 / 0.45))",
+            "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 55%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent))",
           backdropFilter: "blur(28px) saturate(1.5)",
           WebkitBackdropFilter: "blur(28px) saturate(1.5)",
           borderBottom: "1px solid var(--color-hairline)",
           boxShadow:
-            "inset 0 1px 0 oklch(1 0 0 / 0.05), 0 6px 24px -12px oklch(0 0 0 / 0.45)",
+            "inset 0 1px 0 color-mix(in oklab, var(--raise) 5%, transparent), 0 6px 24px -12px color-mix(in oklab, var(--sink) 45%, transparent)",
         }}
       >
         <div className="mx-auto flex max-w-3xl items-center gap-4 px-6 py-4">
@@ -1035,11 +1035,11 @@ export function ProjectSettingsPage() {
         className="shrink-0"
         style={{
           background:
-            "linear-gradient(180deg, oklch(0.18 0.011 265 / 0.65), oklch(0.14 0.009 265 / 0.85))",
+            "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-b) 65%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 85%, transparent))",
           backdropFilter: "blur(20px) saturate(1.3)",
           WebkitBackdropFilter: "blur(20px) saturate(1.3)",
           borderTop: "1px solid var(--color-hairline)",
-          boxShadow: "0 -8px 28px -12px oklch(0 0 0 / 0.55)",
+          boxShadow: "0 -8px 28px -12px color-mix(in oklab, var(--sink) 55%, transparent)",
         }}
       >
         <div className="mx-auto flex max-w-3xl items-center justify-between gap-3 px-6 py-3">

@@ -83,7 +83,7 @@ function TaskStatusIcon({ status }: { status: TaskItem["status"] }) {
           className="h-2 w-2 rounded-full"
           style={{
             background: STATUS_COLORS.queued,
-            boxShadow: "0 0 4px oklch(1 0 0 / 0.1)",
+            boxShadow: "0 0 4px color-mix(in oklab, var(--raise) 10%, transparent)",
           }}
         />
       );
@@ -111,7 +111,7 @@ function RunningProgressBar() {
   return (
     <div
       className="relative mt-1 h-0.5 w-full overflow-hidden rounded-full"
-      style={{ background: "oklch(0.16 0.010 265 / 0.7)" }}
+      style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 70%, transparent)" }}
     >
       <motion.div
         className="absolute inset-y-0 left-0 w-1/3 rounded-full"
@@ -172,16 +172,16 @@ function TaskRow({
   // 也须保持红色，否则它在列表里与排队行无从区分。
   const rowBg =
     task.status === "failed"
-      ? "oklch(0.30 0.10 25 / 0.18)"
+      ? "color-mix(in oklab, var(--color-danger) 18%, transparent)"
       : hasWarnings
-        ? "oklch(0.35 0.10 70 / 0.12)"
+        ? "color-mix(in oklab, var(--color-warm) 12%, transparent)"
         : task.status === "succeeded"
-          ? "oklch(0.30 0.10 155 / 0.12)"
+          ? "color-mix(in oklab, var(--color-good) 12%, transparent)"
           : "transparent";
   const rowHoverBg =
     task.status === "failed"
-      ? "oklch(0.30 0.10 25 / 0.28)"
-      : "oklch(0.35 0.10 70 / 0.22)";
+      ? "color-mix(in oklab, var(--color-danger) 28%, transparent)"
+      : "color-mix(in oklab, var(--color-warm) 22%, transparent)";
 
   return (
     <motion.div
@@ -247,7 +247,7 @@ function TaskRow({
             style={{ color: "var(--color-text-4)" }}
             onMouseEnter={(e) => {
               e.currentTarget.style.color = "oklch(0.72 0.18 25)";
-              e.currentTarget.style.background = "oklch(0.30 0.10 25 / 0.18)";
+              e.currentTarget.style.background = "color-mix(in oklab, var(--color-danger) 18%, transparent)";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.color = "var(--color-text-4)";
@@ -270,7 +270,7 @@ function TaskRow({
             style={{ color: "var(--color-text-4)" }}
             onMouseEnter={(e) => {
               e.currentTarget.style.color = "oklch(0.72 0.18 25)";
-              e.currentTarget.style.background = "oklch(0.30 0.10 25 / 0.18)";
+              e.currentTarget.style.background = "color-mix(in oklab, var(--color-danger) 18%, transparent)";
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.color = "var(--color-text-4)";
@@ -361,7 +361,7 @@ function TaskRow({
                 id={`task-detail-${task.task_id}`}
                 className="mx-3 mb-1.5 rounded px-2 py-1.5 text-[10.5px]"
                 style={{
-                  background: "oklch(0.30 0.10 25 / 0.10)",
+                  background: "color-mix(in oklab, var(--color-danger) 10%, transparent)",
                   color: "oklch(0.85 0.10 25)",
                   border: "1px solid oklch(0.45 0.18 25 / 0.30)",
                 }}
@@ -379,7 +379,7 @@ function TaskRow({
                 id={`task-detail-${task.task_id}`}
                 className="mx-3 mb-1.5 space-y-1 rounded px-2 py-1.5 text-[10.5px]"
                 style={{
-                  background: "oklch(0.35 0.10 70 / 0.10)",
+                  background: "color-mix(in oklab, var(--color-warm) 10%, transparent)",
                   color: "oklch(0.86 0.09 70)",
                   border: "1px solid oklch(0.50 0.12 70 / 0.30)",
                 }}
@@ -446,7 +446,7 @@ function ChannelSection({
         style={{
           color: "var(--color-text-4)",
           letterSpacing: "0.8px",
-          background: "oklch(0.18 0.010 265 / 0.6)",
+          background: "color-mix(in oklab, var(--color-bg-grad-b) 60%, transparent)",
         }}
       >
         <Icon className="h-3.5 w-3.5" style={{ color: "var(--color-text-3)" }} />
@@ -719,7 +719,7 @@ export function TaskHud({ anchorRef }: { anchorRef: RefObject<HTMLElement | null
             className="grid h-7 w-7 place-items-center rounded-lg"
             style={{
               background:
-                "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 295 / 0.05))",
+                "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 208 / 0.05))",
               border: "1px solid var(--color-accent-soft)",
               color: "var(--color-accent-2)",
               boxShadow: "0 8px 18px -8px var(--color-accent-glow)",
@@ -852,7 +852,7 @@ export function TaskHud({ anchorRef }: { anchorRef: RefObject<HTMLElement | null
             className="px-4 py-3"
             role="alertdialog"
             aria-label={t("cancel_confirm_aria")}
-            style={{ background: "oklch(0.16 0.010 265 / 0.5)" }}
+            style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)" }}
           >
             <p
               className="text-[12px]"
@@ -889,11 +889,11 @@ export function TaskHud({ anchorRef }: { anchorRef: RefObject<HTMLElement | null
                 disabled={cancelling}
                 className="focus-ring rounded px-2.5 py-1 text-[11px] font-medium transition-transform disabled:opacity-50"
                 style={{
-                  color: "oklch(0.98 0 0)",
+                  color: "color-mix(in oklab, var(--raise) 100%, transparent)",
                   background:
                     "linear-gradient(135deg, oklch(0.55 0.20 25), oklch(0.45 0.18 25))",
                   boxShadow:
-                    "inset 0 1px 0 oklch(1 0 0 / 0.18), 0 4px 14px -4px oklch(0.40 0.18 25 / 0.5)",
+                    "inset 0 1px 0 color-mix(in oklab, var(--raise) 18%, transparent), 0 4px 14px -4px oklch(0.40 0.18 25 / 0.5)",
                 }}
               >
                 {cancelling ? t("cancelling") : t("confirm_cancel")}
@@ -905,15 +905,15 @@ export function TaskHud({ anchorRef }: { anchorRef: RefObject<HTMLElement | null
                 style={{
                   color: "var(--color-text-3)",
                   border: "1px solid var(--color-hairline)",
-                  background: "oklch(0.22 0.011 265 / 0.5)",
+                  background: "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)",
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.color = "var(--color-text)";
-                  e.currentTarget.style.background = "oklch(0.26 0.013 265 / 0.7)";
+                  e.currentTarget.style.background = "color-mix(in oklab, var(--color-surface-2) 70%, transparent)";
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.color = "var(--color-text-3)";
-                  e.currentTarget.style.background = "oklch(0.22 0.011 265 / 0.5)";
+                  e.currentTarget.style.background = "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)";
                 }}
               >
                 {t("go_back")}

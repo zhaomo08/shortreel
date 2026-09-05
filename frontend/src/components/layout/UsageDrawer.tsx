@@ -30,7 +30,7 @@ interface UsageDrawerProps {
 }
 
 const TYPE_TONE: Record<CallType, { color: string; label: string }> = {
-  video: { color: "oklch(0.78 0.13 305)", label: "video_type_label" },
+  video: { color: "oklch(0.78 0.13 208)", label: "video_type_label" },
   text: { color: "oklch(0.78 0.10 155)", label: "text_type_label" },
   image: { color: "oklch(0.80 0.10 230)", label: "image_type_label" },
   audio: { color: "oklch(0.80 0.11 75)", label: "audio_type_label" },
@@ -129,7 +129,7 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
           className="grid h-7 w-7 place-items-center rounded-lg"
           style={{
             background:
-              "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 295 / 0.05))",
+              "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 208 / 0.05))",
             border: "1px solid var(--color-accent-soft)",
             color: "var(--color-accent-2)",
             boxShadow: "0 8px 18px -8px var(--color-accent-glow)",
@@ -247,7 +247,7 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
                     borderTop: "1px solid var(--color-hairline-soft)",
                   }}
                   onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "oklch(0.24 0.012 265 / 0.45)";
+                    e.currentTarget.style.background = "color-mix(in oklab, var(--color-bg-grad-a) 45%, transparent)";
                   }}
                   onMouseLeave={(e) => {
                     e.currentTarget.style.background = "transparent";
@@ -325,7 +325,7 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
                     <div
                       className="mt-1 truncate rounded px-2 py-1 pl-5 text-[10px]"
                       style={{
-                        background: "oklch(0.30 0.10 25 / 0.10)",
+                        background: "color-mix(in oklab, var(--color-danger) 10%, transparent)",
                         color: "oklch(0.85 0.10 25)",
                         border: "1px solid oklch(0.45 0.18 25 / 0.30)",
                       }}
@@ -363,7 +363,7 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
               onMouseEnter={(e) => {
                 if (page > 1) {
                   e.currentTarget.style.color = "var(--color-text)";
-                  e.currentTarget.style.background = "oklch(1 0 0 / 0.05)";
+                  e.currentTarget.style.background = "color-mix(in oklab, var(--raise) 5%, transparent)";
                 }
               }}
               onMouseLeave={(e) => {
@@ -388,7 +388,7 @@ export function UsageDrawer({ open, onClose, projectName, anchorRef }: UsageDraw
               onMouseEnter={(e) => {
                 if (page < totalPages) {
                   e.currentTarget.style.color = "var(--color-text)";
-                  e.currentTarget.style.background = "oklch(1 0 0 / 0.05)";
+                  e.currentTarget.style.background = "color-mix(in oklab, var(--raise) 5%, transparent)";
                 }
               }}
               onMouseLeave={(e) => {
@@ -450,20 +450,20 @@ function StatusBadge({ status }: { status: string }) {
   const config: Record<string, { color: string; bg: string }> = {
     success: {
       color: "var(--color-good)",
-      bg: "oklch(0.30 0.10 155 / 0.18)",
+      bg: "color-mix(in oklab, var(--color-good) 18%, transparent)",
     },
     failed: {
       color: "oklch(0.85 0.10 25)",
-      bg: "oklch(0.30 0.10 25 / 0.18)",
+      bg: "color-mix(in oklab, var(--color-danger) 18%, transparent)",
     },
     pending: {
       color: "oklch(0.85 0.13 75)",
-      bg: "oklch(0.30 0.10 75 / 0.18)",
+      bg: "color-mix(in oklab, var(--color-warm) 18%, transparent)",
     },
   };
   const cfg = config[status] ?? {
     color: "var(--color-text-3)",
-    bg: "oklch(0.24 0.012 265 / 0.45)",
+    bg: "color-mix(in oklab, var(--color-bg-grad-a) 45%, transparent)",
   };
   return (
     <span

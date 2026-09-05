@@ -36,7 +36,7 @@ const TIER_COLOR: Record<VoiceConsistencyTier, { fg: string; bg: string; border:
   },
   none: {
     fg: "var(--color-text-4)",
-    bg: "oklch(1 0 0 / 0.04)",
+    bg: "color-mix(in oklab, var(--raise) 4%, transparent)",
     border: "var(--color-hairline)",
   },
 };
@@ -174,7 +174,7 @@ export function VideoModelSpecBar({ durations, resolutions, tier }: VideoModelSp
   return (
     <div
       className="mt-3 grid grid-cols-2 gap-y-3 rounded-[8px] border border-hairline-soft px-3 py-2.5 sm:grid-cols-4 sm:gap-y-0"
-      style={{ background: "oklch(0.18 0.010 265 / 0.35)" }}
+      style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 35%, transparent)" }}
     >
       {cells.map((c, i) => (
         <div

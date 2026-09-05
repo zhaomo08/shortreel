@@ -20,7 +20,7 @@ const MEDIA_LABELS: Record<string, string> = {
 };
 
 const READY_BADGE_STYLE: CSSProperties = {
-  background: "oklch(0.30 0.10 155 / 0.18)",
+  background: "color-mix(in oklab, var(--color-good) 18%, transparent)",
   color: "var(--color-good)",
   border: "1px solid oklch(0.45 0.10 155 / 0.40)",
   boxShadow: "0 0 14px -6px oklch(0.55 0.10 155 / 0.50)",
@@ -270,7 +270,7 @@ export function CustomProviderDetail({ providerId, initialModelId, onDeleted, on
               style={
                 testResult.success
                   ? {
-                      background: "oklch(0.30 0.10 155 / 0.15)",
+                      background: "color-mix(in oklab, var(--color-good) 15%, transparent)",
                       color: "var(--color-good)",
                       border: "1px solid oklch(0.45 0.10 155 / 0.30)",
                     }
@@ -297,7 +297,7 @@ export function CustomProviderDetail({ providerId, initialModelId, onDeleted, on
         className="sticky bottom-0 z-10 border-t border-hairline px-6 py-3 backdrop-blur"
         style={{
           background:
-            "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.65), oklch(0.15 0.010 265 / 0.85))",
+            "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 65%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 85%, transparent))",
         }}
       >
         <div className="flex items-center gap-3">

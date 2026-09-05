@@ -171,7 +171,7 @@ export function PendingQuestionWizard({
       style={{
         borderTop: "1px solid var(--color-accent-soft)",
         background:
-          "linear-gradient(180deg, oklch(0.76 0.09 295 / 0.10), transparent 60%), oklch(0.18 0.010 265 / 0.6)",
+          "linear-gradient(180deg, oklch(0.76 0.09 208 / 0.10), transparent 60%), color-mix(in oklab, var(--color-bg-grad-b) 60%, transparent)",
         backdropFilter: "blur(10px)",
         WebkitBackdropFilter: "blur(10px)",
       }}
@@ -234,7 +234,7 @@ export function PendingQuestionWizard({
                       ? "var(--color-accent)"
                       : isVisitedStep
                         ? "var(--color-accent-soft)"
-                        : "oklch(0.30 0.012 265 / 0.4)",
+                        : "color-mix(in oklab, var(--color-surface-2) 40%, transparent)",
                     boxShadow: isActiveStep
                       ? "0 0 8px var(--color-accent-glow)"
                       : "none",
@@ -295,7 +295,7 @@ export function PendingQuestionWizard({
               className="mt-3 overflow-hidden rounded-lg"
               style={{
                 border: "1px solid var(--color-hairline-soft)",
-                background: "oklch(0.16 0.010 265 / 0.45)",
+                background: "color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent)",
               }}
             >
               {currentQuestionOptions.map((option, optionIndex) => {
@@ -316,7 +316,7 @@ export function PendingQuestionWizard({
                     }}
                     onMouseEnter={(e) => {
                       if (!checked && !answeringQuestion)
-                        e.currentTarget.style.background = "oklch(1 0 0 / 0.03)";
+                        e.currentTarget.style.background = "color-mix(in oklab, var(--raise) 3%, transparent)";
                     }}
                     onMouseLeave={(e) => {
                       if (!checked && !answeringQuestion)
@@ -355,7 +355,7 @@ export function PendingQuestionWizard({
                               width: currentQuestion.multiSelect ? "8px" : "5px",
                               height: currentQuestion.multiSelect ? "8px" : "5px",
                               borderRadius: currentQuestion.multiSelect ? "1px" : "9999px",
-                              background: "oklch(0.14 0 0)",
+                              background: "color-mix(in oklab, var(--sink) 100%, transparent)",
                             }}
                           />
                         )}
@@ -439,7 +439,7 @@ export function PendingQuestionWizard({
               className="w-full resize-none rounded-md px-3 py-2 text-[12.5px] leading-[1.55] outline-none transition-colors focus-ring"
               style={{
                 border: "1px solid var(--color-accent-soft)",
-                background: "oklch(0.16 0.010 265 / 0.7)",
+                background: "color-mix(in oklab, var(--color-bg-grad-b) 70%, transparent)",
                 color: "var(--color-text)",
                 maxHeight: `${OTHER_TEXTAREA_MAX_PX}px`,
                 overflowY: "hidden",
@@ -491,11 +491,11 @@ export function PendingQuestionWizard({
                 disabled={answeringQuestion || !allQuestionsReady}
                 className="rounded-lg px-4 py-2 text-[12.5px] font-semibold transition-all focus-ring disabled:cursor-not-allowed disabled:opacity-40"
                 style={{
-                  color: "oklch(0.14 0 0)",
+                  color: "color-mix(in oklab, var(--sink) 100%, transparent)",
                   background:
                     "linear-gradient(180deg, var(--color-accent-2), var(--color-accent))",
                   boxShadow:
-                    "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
+                    "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
                   letterSpacing: "0.04em",
                 }}
               >
@@ -510,11 +510,11 @@ export function PendingQuestionWizard({
                 disabled={answeringQuestion || !currentQuestionReady}
                 className="rounded-lg px-4 py-2 text-[12.5px] font-semibold transition-all focus-ring disabled:cursor-not-allowed disabled:opacity-40"
                 style={{
-                  color: "oklch(0.14 0 0)",
+                  color: "color-mix(in oklab, var(--sink) 100%, transparent)",
                   background:
                     "linear-gradient(180deg, var(--color-accent-2), var(--color-accent))",
                   boxShadow:
-                    "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
+                    "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
                   letterSpacing: "0.04em",
                 }}
               >

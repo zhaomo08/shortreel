@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { AppRoutes } from "./router";
 import { useAuthStore } from "@/stores/auth-store";
 import { i18nReady } from "@/i18n";
+import { initTheme } from "@/stores/theme-store";
 import { BRAND, BRAND_DOCUMENT_TITLE } from "@/branding";
 
 import "driver.js/dist/driver.css";
@@ -24,6 +25,9 @@ const metaDescription = document.querySelector<HTMLMetaElement>('meta[name="desc
 if (metaDescription) {
   metaDescription.content = BRAND.description;
 }
+
+// 配色主题先于首帧落到 <html>，避免默认主题闪一下再切过去
+initTheme();
 
 // 从 localStorage 恢复登录状态
 useAuthStore.getState().initialize();

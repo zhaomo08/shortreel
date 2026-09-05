@@ -14,14 +14,14 @@
 
 .driver-popover.arc-tour {
     /* 与 .arc-glass-panel 同源 */
-    background: linear-gradient(180deg, oklch(0.21 0.012 59 / 0.97), oklch(0.18 0.010 59 / 0.97));
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 97%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 97%, transparent));
     border: 1px solid var(--color-hairline);
     border-radius: 16px;
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     box-shadow:
-        0 24px 60px -12px oklch(0 0 0 / 0.6),
-        inset 0 1px 0 oklch(1 0 0 / 0.05);
+        0 24px 60px -12px color-mix(in oklab, var(--sink) 60%, transparent),
+        inset 0 1px 0 color-mix(in oklab, var(--raise) 5%, transparent);
     color: var(--color-text);
     font-family: var(--font-sans);
     min-width: 0;
@@ -80,7 +80,7 @@
 
 .driver-popover.arc-tour .driver-popover-close-btn:hover {
     color: var(--color-text);
-    background: oklch(1 0 0 / 0.05);
+    background: color-mix(in oklab, var(--raise) 5%, transparent);
 }
 
 /* ── 页脚 ─────────────────────────────────────────────────── */
@@ -154,14 +154,14 @@
 .driver-popover.arc-tour .arc-tour-skip-btn {
     color: var(--color-text-3);
     border: 1px solid var(--color-hairline);
-    background: oklch(0.22 0.011 59 / 0.5);
+    background: color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent);
     transition: color 150ms, background 150ms, border-color 150ms;
 }
 
 .driver-popover.arc-tour .driver-popover-prev-btn:hover,
 .driver-popover.arc-tour .arc-tour-skip-btn:hover {
     color: var(--color-text);
-    background: oklch(0.26 0.013 59 / 0.7);
+    background: color-mix(in oklab, var(--color-surface-2) 70%, transparent);
     border-color: var(--color-hairline-strong);
 }
 
@@ -175,12 +175,12 @@
 /* 主按钮：继续 / 完成 —— 与 .arc-btn-primary 一致 */
 .driver-popover.arc-tour .driver-popover-next-btn,
 .driver-popover.arc-tour .driver-popover-done-btn {
-    color: oklch(0.14 0 0);
+    color: color-mix(in oklab, var(--sink) 100%, transparent);
     border: none;
     font-weight: 600;
     background: linear-gradient(135deg, var(--color-accent-2), var(--color-accent));
     box-shadow:
-        inset 0 1px 0 oklch(1 0 0 / 0.35),
+        inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent),
         0 6px 18px -6px var(--color-accent-glow),
         0 0 0 1px var(--color-accent-soft);
     transition: transform 150ms;

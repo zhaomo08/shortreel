@@ -160,7 +160,7 @@ export function ExternalAgentModal({ onClose }: ExternalAgentModalProps) {
               }}
               className={`rounded-[7px] px-3 py-2 text-[12px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                 activeTab === tab
-                  ? "bg-accent-dim text-accent-2 shadow-[inset_0_0_0_1px_oklch(0.76_0.09_295_/_0.28)]"
+                  ? "bg-accent-dim text-accent-2 shadow-[inset_0_0_0_1px_oklch(0.76_0.09_208_/_0.28)]"
                   : "text-text-4 hover:text-text-2"
               }`}
             >

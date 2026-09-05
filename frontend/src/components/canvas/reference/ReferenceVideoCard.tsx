@@ -59,7 +59,7 @@ function renderHighlightedTokens(
       return (
         <span
           key={key}
-          className={`${MENTION_SPAN_CLASS} bg-[oklch(1_0_0_/_0.06)] ${tk.speaker ? palette.textClass : ""}`}
+          className={`${MENTION_SPAN_CLASS} bg-[color-mix(in_oklab,var(--raise)_6%,transparent)] ${tk.speaker ? palette.textClass : ""}`}
           title={tk.speaker || voiceoverLabel}
         >
           {sliceText}

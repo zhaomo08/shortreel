@@ -83,14 +83,159 @@
     --color-accent-end: var(--color-accent-2);
 }
 
-/* 全局 body 背景 — radial+linear 复合梯度 */
-html { color-scheme: dark; }
+/* ===========================================================================
+ * 主题 — 四套配色挂在 <html data-theme>，未设置时等同 darkroom。
+ *
+ * @theme 里的值是 darkroom 的一份，Tailwind 据此生成工具类；换主题只覆盖同名
+ * 自定义属性的取值，工具类本身不重新生成。--raise / --sink 是叠加层的方向：
+ * 深色主题往白里提，浅色主题往墨里压，组件里的半透明叠加因此不必各自判断主题。
+ * ======================================================================== */
+
+:root,
+:root[data-theme="darkroom"] {
+    color-scheme: dark;
+    --raise: oklch(1 0 0);
+    --sink: oklch(0 0 0);
+    --glow-a: oklch(0.50 0.115 62 / 0.42);
+    --glow-b: oklch(0.42 0.105 352 / 0.40);
+    --glow-c: oklch(0.44 0.070 208 / 0.26);
+}
+
+/* 定影 — 深色冷调：定影液的青灰，强调色换到琥珀 */
+:root[data-theme="fixer"] {
+    color-scheme: dark;
+    --raise: oklch(1 0 0);
+    --sink: oklch(0 0 0);
+    --color-bg: oklch(0.192 0.017 228);
+    --color-bg-grad-a: oklch(0.216 0.020 232);
+    --color-bg-grad-b: oklch(0.166 0.015 222);
+    --color-surface-2: oklch(0.282 0.022 230);
+    --color-hairline: oklch(0.48 0.026 230 / 0.40);
+    --color-hairline-strong: oklch(0.54 0.030 230 / 0.60);
+    --color-hairline-soft: oklch(0.48 0.026 230 / 0.22);
+    --color-text: oklch(0.972 0.006 230);
+    --color-text-2: oklch(0.825 0.012 230);
+    --color-text-3: oklch(0.645 0.014 230);
+    --color-text-4: oklch(0.495 0.014 230);
+    --color-accent: oklch(0.84 0.115 78);
+    --color-accent-2: oklch(0.92 0.075 82);
+    --color-accent-soft: oklch(0.84 0.115 78 / 0.22);
+    --color-accent-dim: oklch(0.84 0.115 78 / 0.12);
+    --color-accent-glow: oklch(0.84 0.115 78 / 0.35);
+    --color-filter-m: oklch(0.40 0.095 300);
+    --color-neon-500: oklch(0.84 0.115 78);
+    --color-neon-400: oklch(0.88 0.095 80);
+    --color-neon-300: oklch(0.92 0.075 82);
+    --shadow-glow: 0 0 0 1px oklch(0.84 0.115 78 / 0.28), 0 18px 40px oklch(0 0 0 / 0.45);
+    --glow-a: oklch(0.48 0.090 232 / 0.40);
+    --glow-b: oklch(0.40 0.095 300 / 0.34);
+    --glow-c: oklch(0.46 0.075 78 / 0.22);
+}
+
+/* 相纸 — 浅色暖调：钡地相纸的微黄白，墨色正文 */
+:root[data-theme="baryta"] {
+    color-scheme: light;
+    /* 浅色底下叠加层取贴近底色的中间调：高 alpha 处不叠成实心灰板，
+       低 alpha 处仍能拉开层次。 */
+    --raise: oklch(0.665 0.020 62);
+    --sink: oklch(0.625 0.022 60);
+    --color-bg: oklch(0.972 0.010 82);
+    --color-bg-grad-a: oklch(0.986 0.008 84);
+    --color-bg-grad-b: oklch(0.944 0.014 78);
+    --color-surface-2: oklch(0.918 0.016 78);
+    --color-hairline: oklch(0.55 0.022 70 / 0.30);
+    --color-hairline-strong: oklch(0.44 0.026 70 / 0.46);
+    --color-hairline-soft: oklch(0.55 0.022 70 / 0.16);
+    --color-text: oklch(0.245 0.020 62);
+    --color-text-2: oklch(0.395 0.020 64);
+    --color-text-3: oklch(0.545 0.018 66);
+    --color-text-4: oklch(0.655 0.016 68);
+    --color-accent: oklch(0.545 0.115 212);
+    --color-accent-2: oklch(0.445 0.115 214);
+    --color-accent-soft: oklch(0.545 0.115 212 / 0.18);
+    --color-accent-dim: oklch(0.545 0.115 212 / 0.10);
+    --color-accent-glow: oklch(0.545 0.115 212 / 0.30);
+    --color-filter-m: oklch(0.62 0.115 352);
+    --color-good: oklch(0.545 0.115 158);
+    --color-warn: oklch(0.585 0.125 72);
+    --color-danger: oklch(0.545 0.170 27);
+    --color-warm: oklch(0.585 0.125 72);
+    --color-warm-bright: oklch(0.505 0.125 70);
+    --color-warm-fade: oklch(0.585 0.125 72 / 0.5);
+    --color-warm-soft: oklch(0.72 0.100 75 / 0.28);
+    --color-warm-tint: oklch(0.72 0.100 75 / 0.36);
+    --color-warm-tint-faint: oklch(0.72 0.100 75 / 0.10);
+    --color-danger-2: oklch(0.505 0.150 26);
+    --color-danger-bright: oklch(0.445 0.150 26);
+    --color-danger-soft: oklch(0.70 0.140 27 / 0.26);
+    --color-neon-500: oklch(0.545 0.115 212);
+    --color-neon-400: oklch(0.495 0.115 213);
+    --color-neon-300: oklch(0.445 0.115 214);
+    --color-ink-950: oklch(0.918 0.016 78);
+    --color-ink-900: oklch(0.944 0.014 78);
+    --color-ink-850: oklch(0.960 0.012 80);
+    --color-ink-800: oklch(0.918 0.016 78);
+    --color-ink-700: oklch(0.880 0.018 76);
+    --shadow-glow: 0 0 0 1px oklch(0.545 0.115 212 / 0.24), 0 18px 40px oklch(0.30 0.02 62 / 0.14);
+    --glow-a: oklch(0.90 0.065 78 / 0.55);
+    --glow-b: oklch(0.88 0.055 352 / 0.30);
+    --glow-c: oklch(0.88 0.050 212 / 0.34);
+}
+
+/* 银盐 — 浅色冷调：银灰中性底，品红强调 */
+:root[data-theme="silver"] {
+    color-scheme: light;
+    --raise: oklch(0.665 0.012 248);
+    --sink: oklch(0.625 0.014 246);
+    --color-bg: oklch(0.968 0.005 240);
+    --color-bg-grad-a: oklch(0.986 0.004 240);
+    --color-bg-grad-b: oklch(0.930 0.008 238);
+    --color-surface-2: oklch(0.906 0.010 240);
+    --color-hairline: oklch(0.54 0.014 245 / 0.30);
+    --color-hairline-strong: oklch(0.43 0.018 245 / 0.46);
+    --color-hairline-soft: oklch(0.54 0.014 245 / 0.16);
+    --color-text: oklch(0.235 0.014 250);
+    --color-text-2: oklch(0.385 0.014 250);
+    --color-text-3: oklch(0.535 0.012 250);
+    --color-text-4: oklch(0.645 0.010 250);
+    --color-accent: oklch(0.535 0.145 352);
+    --color-accent-2: oklch(0.435 0.145 354);
+    --color-accent-soft: oklch(0.535 0.145 352 / 0.18);
+    --color-accent-dim: oklch(0.535 0.145 352 / 0.10);
+    --color-accent-glow: oklch(0.535 0.145 352 / 0.30);
+    --color-filter-m: oklch(0.60 0.105 212);
+    --color-good: oklch(0.535 0.115 158);
+    --color-warn: oklch(0.575 0.125 72);
+    --color-danger: oklch(0.535 0.170 27);
+    --color-warm: oklch(0.575 0.125 72);
+    --color-warm-bright: oklch(0.495 0.125 70);
+    --color-warm-fade: oklch(0.575 0.125 72 / 0.5);
+    --color-warm-soft: oklch(0.72 0.100 75 / 0.26);
+    --color-warm-tint: oklch(0.72 0.100 75 / 0.34);
+    --color-warm-tint-faint: oklch(0.72 0.100 75 / 0.10);
+    --color-danger-2: oklch(0.495 0.150 26);
+    --color-danger-bright: oklch(0.435 0.150 26);
+    --color-danger-soft: oklch(0.70 0.140 27 / 0.24);
+    --color-neon-500: oklch(0.535 0.145 352);
+    --color-neon-400: oklch(0.485 0.145 353);
+    --color-neon-300: oklch(0.435 0.145 354);
+    --color-ink-950: oklch(0.906 0.010 240);
+    --color-ink-900: oklch(0.930 0.008 238);
+    --color-ink-850: oklch(0.952 0.006 240);
+    --color-ink-800: oklch(0.906 0.010 240);
+    --color-ink-700: oklch(0.868 0.012 242);
+    --shadow-glow: 0 0 0 1px oklch(0.535 0.145 352 / 0.24), 0 18px 40px oklch(0.28 0.01 250 / 0.14);
+    --glow-a: oklch(0.90 0.045 250 / 0.50);
+    --glow-b: oklch(0.88 0.055 352 / 0.26);
+    --glow-c: oklch(0.89 0.045 212 / 0.34);
+}
+
 
 body {
     background:
-        radial-gradient(1250px 640px at 4% -14%, oklch(0.50 0.115 62 / 0.42), transparent 62%),
-        radial-gradient(900px 520px at 99% 108%, color-mix(in oklab, var(--color-filter-m) 40%, transparent), transparent 60%),
-        radial-gradient(820px 500px at 86% 4%, oklch(0.44 0.070 208 / 0.26), transparent 62%),
+        radial-gradient(1250px 640px at 4% -14%, var(--glow-a), transparent 62%),
+        radial-gradient(900px 520px at 99% 108%, var(--glow-b), transparent 60%),
+        radial-gradient(820px 500px at 86% 4%, var(--glow-c), transparent 62%),
         linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b));
     background-attachment: fixed;
     color: var(--color-text);

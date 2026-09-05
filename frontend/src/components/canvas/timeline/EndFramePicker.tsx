@@ -137,7 +137,7 @@ export function EndFramePicker({
           className="grid h-9 w-9 shrink-0 place-items-center rounded-lg"
           style={{
             background:
-              "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 295 / 0.05))",
+              "linear-gradient(135deg, var(--color-accent-dim), oklch(0.76 0.09 208 / 0.05))",
             border: "1px solid var(--color-accent-soft)",
             color: "var(--color-accent-2)",
             boxShadow: "0 8px 18px -8px var(--color-accent-glow)",
@@ -225,7 +225,7 @@ export function EndFramePicker({
         className="flex items-center gap-2 px-5 py-3"
         style={{
           borderTop: "1px solid var(--color-hairline-soft)",
-          background: "oklch(0.17 0.010 250 / 0.5)",
+          background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)",
         }}
       >
         <span className="flex-1 truncate text-[11px]" style={{ color: "var(--color-text-4)" }}>
@@ -271,7 +271,7 @@ function PickerCell({ projectName, image, aspectRatio, selected, onToggle }: Pic
           : "1px solid var(--color-hairline)",
         boxShadow: selected
           ? "0 6px 18px -6px var(--color-accent-glow)"
-          : "inset 0 1px 0 oklch(1 0 0 / 0.03)",
+          : "inset 0 1px 0 color-mix(in oklab, var(--raise) 3%, transparent)",
       }}
     >
       <AspectFrame ratio={aspectRatio}>
@@ -284,7 +284,7 @@ function PickerCell({ projectName, image, aspectRatio, selected, onToggle }: Pic
       </AspectFrame>
       <div
         className="truncate px-1.5 py-1 text-[10.5px] font-medium"
-        style={{ color: "var(--color-text-2)", background: "oklch(0.16 0.010 265 / 0.85)" }}
+        style={{ color: "var(--color-text-2)", background: "color-mix(in oklab, var(--color-bg-grad-b) 85%, transparent)" }}
       >
         {image.label}
       </div>
@@ -293,10 +293,10 @@ function PickerCell({ projectName, image, aspectRatio, selected, onToggle }: Pic
           aria-hidden
           className="absolute right-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-full"
           style={{
-            color: "oklch(0.14 0 0)",
+            color: "color-mix(in oklab, var(--sink) 100%, transparent)",
             background: "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
             boxShadow:
-              "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 0 0 1px var(--color-accent-soft)",
+              "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 0 0 1px var(--color-accent-soft)",
           }}
         >
           <Check className="h-3 w-3" strokeWidth={3} />

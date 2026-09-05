@@ -25,13 +25,13 @@ interface CharacterDerivativesButtonProps {
 }
 
 const ICON_BTN_CLS =
-  "focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.06)] disabled:cursor-not-allowed disabled:opacity-40";
+  "focus-ring inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_6%,transparent)] disabled:cursor-not-allowed disabled:opacity-40";
 const ROW_BTN_CLS =
   "focus-ring grid h-6 w-6 shrink-0 place-items-center rounded-md transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40";
 const INPUT_CLS =
   "focus-ring w-full rounded-md px-2 py-1 text-[12px] outline-none placeholder:text-[var(--color-text-4)]";
 const INPUT_STYLE: React.CSSProperties = {
-  background: "oklch(0.16 0.010 265 / 0.7)",
+  background: "color-mix(in oklab, var(--color-bg-grad-b) 70%, transparent)",
   border: "1px solid var(--color-hairline)",
   color: "var(--color-text)",
 };
@@ -288,7 +288,7 @@ export function CharacterDerivativesButton({
                 <div className="mt-1.5 flex items-center gap-1">
                   <code
                     className="min-w-0 flex-1 truncate rounded px-1.5 py-0.5 font-mono text-[10px]"
-                    style={{ background: "oklch(0.16 0.010 265 / 0.7)", color: "var(--color-text-3)" }}
+                    style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 70%, transparent)", color: "var(--color-text-3)" }}
                   >
                     {derivativeToken(characterName, name)}
                   </code>

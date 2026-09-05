@@ -76,10 +76,10 @@ function ReferenceAudioSection({
 
 const FIELD_STYLE: React.CSSProperties = {
   background:
-    "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.6), oklch(0.18 0.010 265 / 0.45))",
+    "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 60%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent))",
   border: "1px solid var(--color-hairline)",
   color: "var(--color-text)",
-  boxShadow: "inset 0 1px 2px oklch(0 0 0 / 0.2)",
+  boxShadow: "inset 0 1px 2px color-mix(in oklab, var(--sink) 20%, transparent)",
 };
 
 export function CharacterCard({
@@ -339,10 +339,10 @@ export function CharacterCard({
       }}
       style={{
         background:
-          "linear-gradient(180deg, oklch(0.22 0.012 265 / 0.55), oklch(0.19 0.010 265 / 0.40))",
+          "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 55%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 40%, transparent))",
         border: "1px solid var(--color-hairline-soft)",
         boxShadow:
-          "inset 0 1px 0 oklch(1 0 0 / 0.04), 0 12px 30px -12px oklch(0 0 0 / 0.4)",
+          "inset 0 1px 0 color-mix(in oklab, var(--raise) 4%, transparent), 0 12px 30px -12px color-mix(in oklab, var(--sink) 40%, transparent)",
       }}
     >
       {/* Top accent hairline */}
@@ -385,7 +385,7 @@ export function CharacterCard({
             disabled={uploadingSheet || generating}
             title={t("assets:upload_sheet")}
             aria-label={t("assets:upload_sheet")}
-            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)] disabled:cursor-not-allowed disabled:opacity-40"
             style={{ color: "var(--color-text-3)" }}
           >
             <Upload className="h-3.5 w-3.5" />
@@ -421,7 +421,7 @@ export function CharacterCard({
             initialVoiceStyle={character.voice_style ?? ""}
             sheetPath={character.character_sheet}
             busy={generating || uploadingSheet}
-            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-3)] transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-3)] transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)] disabled:cursor-not-allowed disabled:opacity-40"
           />
           <VersionTimeMachine
             projectName={projectName}
@@ -507,7 +507,7 @@ export function CharacterCard({
                   className="absolute inset-x-0 bottom-0 flex items-center justify-between px-3 py-2"
                   style={{
                     background:
-                      "linear-gradient(180deg, transparent, oklch(0 0 0 / 0.65))",
+                      "linear-gradient(180deg, transparent, color-mix(in oklab, var(--sink) 65%, transparent))",
                   }}
                 >
                   <span
@@ -523,9 +523,9 @@ export function CharacterCard({
                     onClick={() => fileInputRef.current?.click()}
                     className="focus-ring rounded px-2 py-0.5 text-[11px] transition-colors"
                     style={{
-                      background: "oklch(0 0 0 / 0.5)",
+                      background: "color-mix(in oklab, var(--sink) 50%, transparent)",
                       color: "var(--color-text)",
-                      border: "1px solid oklch(1 0 0 / 0.1)",
+                      border: "1px solid color-mix(in oklab, var(--raise) 10%, transparent)",
                     }}
                   >
                     {t("change")}
@@ -539,7 +539,7 @@ export function CharacterCard({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               className="focus-ring mt-1.5 flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--color-hairline)] px-3 py-4 text-sm text-[var(--color-text-4)] transition-colors hover:border-[var(--color-accent-soft)] hover:text-[var(--color-text-2)]"
-              style={{ background: "oklch(0.18 0.010 265 / 0.35)" }}
+              style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 35%, transparent)" }}
             >
               <Upload className="h-4 w-4" />
               {t("upload_reference")}
@@ -648,7 +648,7 @@ export function CharacterCard({
                   onClick={() => audioInputRef.current?.click()}
                   title={t("change")}
                   aria-label={t("upload_character_audio_ref_aria")}
-                  className="focus-ring inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)]"
+                  className="focus-ring inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)]"
                   style={{ color: "var(--color-text-3)" }}
                 >
                   <Upload className="h-3 w-3" />
@@ -659,7 +659,7 @@ export function CharacterCard({
                   disabled={deletingAudio}
                   title={audioFile ? t("cancel_pending") : t("delete_audio_sample")}
                   aria-label={audioFile ? t("cancel_pending") : t("delete_audio_sample")}
-                  className="focus-ring inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)] disabled:cursor-not-allowed disabled:opacity-40"
+                  className="focus-ring inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)] disabled:cursor-not-allowed disabled:opacity-40"
                   style={{ color: "var(--color-text-3)" }}
                 >
                   <X className="h-3 w-3" />
@@ -693,7 +693,7 @@ export function CharacterCard({
                 type="button"
                 onClick={() => audioInputRef.current?.click()}
                 className="focus-ring flex flex-1 items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--color-hairline)] px-3 py-2.5 text-[13px] text-[var(--color-text-4)] transition-colors hover:border-[var(--color-accent-soft)] hover:text-[var(--color-text-2)]"
-                style={{ background: "oklch(0.18 0.010 265 / 0.35)" }}
+                style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 35%, transparent)" }}
               >
                 <Upload className="h-3.5 w-3.5" />
                 {t("upload_reference_audio")}
@@ -733,11 +733,11 @@ export function CharacterCard({
           disabled={saving}
           className="focus-ring mt-3 inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-transform disabled:cursor-not-allowed disabled:opacity-50"
           style={{
-            color: "oklch(0.14 0 0)",
+            color: "color-mix(in oklab, var(--sink) 100%, transparent)",
             background:
               "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
             boxShadow:
-              "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
+              "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
           }}
         >
           {saving ? t("common:saving") : t("common:save")}

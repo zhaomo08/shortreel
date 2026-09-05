@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { Link, useLocation, useSearch } from "wouter";
 import {
   AlertTriangle,
@@ -10,7 +10,9 @@ import {
   Info,
   KeyRound,
   Languages,
+  Moon,
   Plug,
+  Sun,
   Waypoints,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -28,6 +30,13 @@ import {
   LANGUAGE_DISPLAY_LABELS,
   type SupportedLanguage,
 } from "@/i18n";
+import {
+  DARK_THEMES,
+  THEMES,
+  getTheme,
+  setTheme,
+  subscribeTheme,
+} from "@/stores/theme-store";
 
 // 全局设置页 · "Control Booth"
 // 延续 Darkroom 美学：editorial 大标题 + mono kicker + 分组侧栏 + accent 紫色高亮。
@@ -132,6 +141,11 @@ export function SystemConfigPage() {
     void i18n.changeLanguage(SUPPORTED_LANGUAGES[nextIdx]);
   };
 
+  const theme = useSyncExternalStore(subscribeTheme, getTheme, getTheme);
+  const cycleTheme = () => {
+    setTheme(THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]);
+  };
+
   // -------------------------------------------------------------------------
   // Main render
   // -------------------------------------------------------------------------
@@ -142,7 +156,7 @@ export function SystemConfigPage() {
       style={
         {
           background:
-            "radial-gradient(900px 480px at 8% -10%, oklch(0.32 0.05 295 / 0.22), transparent 55%), radial-gradient(800px 460px at 100% 110%, oklch(0.26 0.04 260 / 0.22), transparent 55%), linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b))",
+            "radial-gradient(900px 480px at 8% -10%, color-mix(in oklab, var(--color-accent) 22%, transparent), transparent 55%), radial-gradient(800px 460px at 100% 110%, color-mix(in oklab, var(--color-surface-2) 22%, transparent), transparent 55%), linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b))",
         }
       }
     >
@@ -151,12 +165,12 @@ export function SystemConfigPage() {
         className="shrink-0 sticky top-0 z-30"
         style={{
           background:
-            "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.55), oklch(0.15 0.010 265 / 0.45))",
+            "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 55%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent))",
           backdropFilter: "blur(28px) saturate(1.5)",
           WebkitBackdropFilter: "blur(28px) saturate(1.5)",
           borderBottom: "1px solid var(--color-hairline)",
           boxShadow:
-            "inset 0 1px 0 oklch(1 0 0 / 0.05), 0 6px 24px -12px oklch(0 0 0 / 0.45)",
+            "inset 0 1px 0 color-mix(in oklab, var(--raise) 5%, transparent), 0 6px 24px -12px color-mix(in oklab, var(--sink) 45%, transparent)",
         }}
       >
         <div className="mx-auto flex max-w-[1320px] items-center gap-5 px-6 py-4">
@@ -191,6 +205,20 @@ export function SystemConfigPage() {
           </div>
           <button
             type="button"
+            onClick={cycleTheme}
+            className="inline-flex items-center gap-2 rounded-md border border-hairline-soft bg-bg-grad-a/45 px-2.5 py-1.5 text-[12px] text-text-3 transition-colors hover:border-hairline hover:bg-bg-grad-a hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            title={t(`dashboard:theme_${theme}`)}
+            aria-label={t("dashboard:theme_setting")}
+          >
+            {DARK_THEMES.has(theme) ? (
+              <Moon className="h-3.5 w-3.5" />
+            ) : (
+              <Sun className="h-3.5 w-3.5" />
+            )}
+            <span className="text-[11.5px]">{t(`dashboard:theme_${theme}`)}</span>
+          </button>
+          <button
+            type="button"
             onClick={cycleLang}
             className="inline-flex items-center gap-2 rounded-md border border-hairline-soft bg-bg-grad-a/45 px-2.5 py-1.5 text-[12px] text-text-3 transition-colors hover:border-hairline hover:bg-bg-grad-a hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
             title={langDisplay}
@@ -210,7 +238,7 @@ export function SystemConfigPage() {
         <nav
           aria-label={t("common:settings")}
           className="w-[220px] shrink-0 overflow-y-auto border-r border-hairline-soft px-3 py-5"
-          style={{ background: "oklch(0.16 0.010 265 / 0.45)" }}
+          style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent)" }}
         >
           {SECTION_GROUPS.map((group, gi) => (
             <div key={group.kicker} className={gi > 0 ? "mt-5" : undefined}>
@@ -234,7 +262,7 @@ export function SystemConfigPage() {
                     className={
                       "group relative mb-0.5 flex w-full items-center gap-2.5 rounded-[8px] border px-3 py-2 text-left text-[12.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent " +
                       (isActive
-                        ? "border-accent/35 bg-accent-dim text-text shadow-[inset_0_1px_0_oklch(1_0_0_/_0.04),0_0_22px_-10px_var(--color-accent-glow)]"
+                        ? "border-accent/35 bg-accent-dim text-text shadow-[inset_0_1px_0_color-mix(in_oklab,var(--raise)_4%,transparent),0_0_22px_-10px_var(--color-accent-glow)]"
                         : "border-transparent text-text-3 hover:border-hairline-soft hover:bg-bg-grad-a/55 hover:text-text")
                     }
                   >
@@ -260,7 +288,7 @@ export function SystemConfigPage() {
                         aria-label={t("dashboard:config_incomplete")}
                         className="grid h-4 w-4 place-items-center rounded-full"
                         style={{
-                          background: "oklch(0.30 0.10 25 / 0.22)",
+                          background: "color-mix(in oklab, var(--color-danger) 22%, transparent)",
                           color: "var(--color-warm-bright)",
                         }}
                       >

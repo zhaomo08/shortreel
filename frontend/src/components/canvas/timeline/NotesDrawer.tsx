@@ -51,8 +51,8 @@ export function NotesDrawer({ shotId, value, onCommit }: NotesDrawerProps) {
           background: open
             ? "var(--color-accent-dim)"
             : value
-              ? "oklch(0.24 0.012 265 / 0.7)"
-              : "oklch(0.22 0.011 265 / 0.5)",
+              ? "color-mix(in oklab, var(--color-bg-grad-a) 70%, transparent)"
+              : "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)",
           borderColor: open ? "var(--color-accent-soft)" : "var(--color-hairline)",
         }}
       >
@@ -83,10 +83,10 @@ export function NotesDrawer({ shotId, value, onCommit }: NotesDrawerProps) {
               right: 14,
               width: 340,
               background:
-                "linear-gradient(180deg, oklch(0.21 0.012 265 / 0.98), oklch(0.18 0.010 265 / 0.98))",
+                "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 98%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 98%, transparent))",
               border: "1px solid var(--color-hairline)",
               boxShadow:
-                "0 24px 60px -20px oklch(0 0 0 / 0.7), 0 0 0 1px var(--color-hairline-soft)",
+                "0 24px 60px -20px color-mix(in oklab, var(--sink) 70%, transparent), 0 0 0 1px var(--color-hairline-soft)",
               backdropFilter: "blur(12px)",
               WebkitBackdropFilter: "blur(12px)",
             }}
@@ -136,7 +136,7 @@ export function NotesDrawer({ shotId, value, onCommit }: NotesDrawerProps) {
                 minHeight: 140,
                 lineHeight: 1.55,
                 color: "var(--color-text-2)",
-                background: "oklch(0.16 0.010 265 / 0.6)",
+                background: "color-mix(in oklab, var(--color-bg-grad-b) 60%, transparent)",
                 border: "1px solid var(--color-hairline-soft)",
                 fontFamily: "var(--font-sans)",
               }}

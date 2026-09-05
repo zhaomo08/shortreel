@@ -103,7 +103,7 @@ export function CharacterDerivativeSheet({
         {stale && (
           <span
             className="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium"
-            style={{ background: "oklch(0.24 0.06 60 / 0.9)", color: "oklch(0.86 0.12 75)" }}
+            style={{ background: "color-mix(in oklab, var(--color-warm) 90%, transparent)", color: "oklch(0.86 0.12 75)" }}
             title={t("assets:derivative_stale_hint")}
           >
             <AlertTriangle className="h-3 w-3" />

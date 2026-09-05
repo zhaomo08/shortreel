@@ -161,10 +161,10 @@ export function SourceFileViewer({ projectName, filename }: SourceFileViewerProp
             className="focus-ring h-full w-full resize-none rounded-lg p-4 font-mono text-[13px] leading-[1.7] outline-none"
             style={{
               background:
-                "linear-gradient(180deg, oklch(0.225 0.003 285 / 0.55), oklch(0.195 0.003 285 / 0.4))",
+                "linear-gradient(180deg, color-mix(in oklab, var(--color-accent) 55%, transparent), color-mix(in oklab, var(--color-accent) 40%, transparent))",
               border: "1px solid var(--color-hairline-soft)",
               color: "var(--color-text)",
-              boxShadow: "inset 0 1px 0 oklch(1 0 0 / 0.03)",
+              boxShadow: "inset 0 1px 0 color-mix(in oklab, var(--raise) 3%, transparent)",
             }}
           />
         ) : (
@@ -172,10 +172,10 @@ export function SourceFileViewer({ projectName, filename }: SourceFileViewerProp
             className="whitespace-pre-wrap rounded-lg p-4 font-mono text-[13px] leading-[1.7]"
             style={{
               background:
-                "linear-gradient(180deg, oklch(0.20 0.011 265 / 0.5), oklch(0.18 0.010 265 / 0.35))",
+                "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 35%, transparent))",
               border: "1px solid var(--color-hairline-soft)",
               color: "var(--color-text-2)",
-              boxShadow: "inset 0 1px 0 oklch(1 0 0 / 0.03)",
+              boxShadow: "inset 0 1px 0 color-mix(in oklab, var(--raise) 3%, transparent)",
             }}
           >
             {content}
@@ -208,7 +208,7 @@ function ViewerToolbar({
       className="sticky top-0 z-10 flex items-center gap-3 px-5 py-3"
       style={{
         background:
-          "linear-gradient(180deg, oklch(0.20 0.012 265 / 0.85), oklch(0.18 0.010 265 / 0.65))",
+          "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 85%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 65%, transparent))",
         backdropFilter: "blur(10px)",
         WebkitBackdropFilter: "blur(10px)",
         borderBottom: "1px solid var(--color-hairline-soft)",
@@ -221,16 +221,16 @@ function ViewerToolbar({
         style={{
           color: "var(--color-text-3)",
           border: "1px solid var(--color-hairline)",
-          background: "oklch(0.22 0.011 265 / 0.5)",
+          background: "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)",
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.color = "var(--color-text)";
-          e.currentTarget.style.background = "oklch(0.26 0.013 265 / 0.7)";
+          e.currentTarget.style.background = "color-mix(in oklab, var(--color-surface-2) 70%, transparent)";
           e.currentTarget.style.borderColor = "var(--color-accent-soft)";
         }}
         onMouseLeave={(e) => {
           e.currentTarget.style.color = "var(--color-text-3)";
-          e.currentTarget.style.background = "oklch(0.22 0.011 265 / 0.5)";
+          e.currentTarget.style.background = "color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent)";
           e.currentTarget.style.borderColor = "var(--color-hairline)";
         }}
       >
@@ -286,11 +286,11 @@ function ToolbarButton({
         disabled={disabled}
         className="focus-ring inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-transform disabled:cursor-not-allowed disabled:opacity-50"
         style={{
-          color: "oklch(0.14 0 0)",
+          color: "color-mix(in oklab, var(--sink) 100%, transparent)",
           background:
             "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))",
           boxShadow:
-            "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 4px 14px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
+            "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 4px 14px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)",
         }}
         onMouseEnter={(e) => {
           if (!disabled) e.currentTarget.style.transform = "translateY(-1px)";
@@ -316,10 +316,10 @@ function ToolbarButton({
         if (!disabled) {
           if (tone === "danger") {
             e.currentTarget.style.color = dangerColor;
-            e.currentTarget.style.background = "oklch(0.30 0.10 25 / 0.18)";
+            e.currentTarget.style.background = "color-mix(in oklab, var(--color-danger) 18%, transparent)";
           } else {
             e.currentTarget.style.color = "var(--color-text)";
-            e.currentTarget.style.background = "oklch(1 0 0 / 0.05)";
+            e.currentTarget.style.background = "color-mix(in oklab, var(--raise) 5%, transparent)";
           }
         }
       }}

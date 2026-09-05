@@ -31,7 +31,7 @@ export function NarrationDeliveryChoice({ value, onChange, disabled, compact = f
             className={`focus-ring px-2 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
               value === choice
                 ? "bg-[var(--color-accent-dim)] text-[var(--color-accent-2)]"
-                : "bg-[oklch(0.22_0.011_265_/_0.7)] text-[var(--color-text-3)]"
+                : "bg-[color-mix(in_oklab,var(--color-bg-grad-a)_70%,transparent)] text-[var(--color-text-3)]"
             }`}
           >
             {t(

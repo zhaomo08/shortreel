@@ -239,7 +239,7 @@ export function VersionTimeMachine({
           aria-label={t("version_mgmt")}
           aria-haspopup="dialog"
           aria-expanded={open}
-          className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[oklch(1_0_0_/_0.05)]"
+          className="focus-ring inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_5%,transparent)]"
           style={{ color: "var(--color-text-3)" }}
         >
           <History className="h-3.5 w-3.5" />

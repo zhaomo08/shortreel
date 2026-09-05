@@ -1428,6 +1428,11 @@ export default {
 
   // SystemConfigPage - language
   'language_setting': 'Ngôn ngữ',
+  'theme_setting': 'Giao diện',
+  'theme_darkroom': 'Buồng tối',
+  'theme_fixer': 'Thuốc hãm',
+  'theme_baryta': 'Giấy ảnh',
+  'theme_silver': 'Bạc',
 
   // Tab labels (timeline / grid canvas)
   'tab_grid_preview': 'Phân cảnh đa lưới',

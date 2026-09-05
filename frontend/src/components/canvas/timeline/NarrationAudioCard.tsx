@@ -76,7 +76,7 @@ export function NarrationAudioCard({
         className="rounded-[10px] px-3 py-2.5"
         style={{
           background:
-            "linear-gradient(180deg, oklch(0.22 0.012 265 / 0.5), oklch(0.20 0.012 265 / 0.35))",
+            "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 50%, transparent), color-mix(in oklab, var(--color-bg-grad-a) 35%, transparent))",
           border: "1px solid var(--color-hairline-soft)",
           borderLeft: "3px solid var(--color-accent-soft)",
         }}
@@ -102,7 +102,7 @@ export function NarrationAudioCard({
             className="mt-2.5 flex items-center justify-center gap-2 rounded-[8px] py-2.5 text-[11.5px]"
             style={{
               border: "1px dashed var(--color-hairline)",
-              background: "oklch(0.18 0.010 265 / 0.4)",
+              background: "color-mix(in oklab, var(--color-bg-grad-b) 40%, transparent)",
               color: "var(--color-text-4)",
             }}
           >
@@ -121,10 +121,10 @@ export function NarrationAudioCard({
           title={generateDisabled ? generateDisabledHint : undefined}
           className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-[10px] px-3.5 py-2.5 text-[13px] font-semibold transition-opacity focus-ring disabled:cursor-not-allowed disabled:opacity-50"
           style={{
-            color: "oklch(0.14 0 0)",
+            color: "color-mix(in oklab, var(--sink) 100%, transparent)",
             background: "linear-gradient(180deg, var(--color-accent-2), var(--color-accent))",
             boxShadow:
-              "inset 0 1px 0 oklch(1 0 0 / 0.3), 0 4px 14px -4px var(--color-accent-glow)",
+              "inset 0 1px 0 color-mix(in oklab, var(--raise) 30%, transparent), 0 4px 14px -4px var(--color-accent-glow)",
           }}
         >
           <Sparkles className="h-3.5 w-3.5" />

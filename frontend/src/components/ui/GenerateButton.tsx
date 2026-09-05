@@ -17,9 +17,9 @@ interface GenerateButtonProps {
 const ACTIVE_BG =
   "linear-gradient(135deg, var(--color-accent-2), var(--color-accent))";
 const LOADING_BG =
-  "linear-gradient(135deg, oklch(0.66 0.08 295), oklch(0.58 0.07 295))";
+  "linear-gradient(135deg, oklch(0.66 0.08 208), oklch(0.58 0.07 208))";
 const ACTIVE_SHADOW =
-  "inset 0 1px 0 oklch(1 0 0 / 0.35), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)";
+  "inset 0 1px 0 color-mix(in oklab, var(--raise) 35%, transparent), 0 6px 18px -4px var(--color-accent-glow), 0 0 0 1px var(--color-accent-soft)";
 
 export function GenerateButton({
   onClick,
@@ -42,7 +42,7 @@ export function GenerateButton({
         isDisabled ? "cursor-not-allowed opacity-60" : ""
       } ${className ?? ""}`}
       style={{
-        color: "oklch(0.14 0 0)",
+        color: "color-mix(in oklab, var(--sink) 100%, transparent)",
         background: loading ? LOADING_BG : ACTIVE_BG,
         boxShadow: ACTIVE_SHADOW,
       }}

@@ -272,7 +272,7 @@ export function EndpointsSection() {
       <nav
         aria-label={t("ce_section_title")}
         className="sticky top-0 max-h-screen w-60 shrink-0 self-start overflow-y-auto border-r border-hairline-soft px-3 py-5"
-        style={{ background: "oklch(0.16 0.010 265 / 0.45)" }}
+        style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent)" }}
       >
         <div className="mb-3 flex items-center gap-1.5 px-1">
           <button
@@ -330,7 +330,7 @@ export function EndpointsSection() {
                     className={
                       "group relative mb-0.5 flex w-full items-center gap-2 rounded-[8px] border px-3 py-2 text-left text-[12.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent " +
                       (isActive
-                        ? "border-accent/35 bg-accent-dim text-text shadow-[inset_0_1px_0_oklch(1_0_0_/_0.04),0_0_22px_-10px_var(--color-accent-glow)]"
+                        ? "border-accent/35 bg-accent-dim text-text shadow-[inset_0_1px_0_color-mix(in_oklab,var(--raise)_4%,transparent),0_0_22px_-10px_var(--color-accent-glow)]"
                         : "border-transparent text-text-3 hover:border-hairline-soft hover:bg-bg-grad-a/55 hover:text-text")
                     }
                   >

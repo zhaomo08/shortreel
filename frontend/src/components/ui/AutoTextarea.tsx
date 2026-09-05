@@ -43,10 +43,10 @@ export function AutoTextarea({
       className={`focus-ring w-full resize-none overflow-hidden rounded-lg px-2.5 py-2 font-mono text-xs outline-none disabled:cursor-not-allowed disabled:opacity-60 ${className ?? ""}`}
       style={{
         background:
-          "linear-gradient(180deg, oklch(0.225 0.003 285 / 0.55), oklch(0.195 0.003 285 / 0.4))",
+          "linear-gradient(180deg, color-mix(in oklab, var(--color-accent) 55%, transparent), color-mix(in oklab, var(--color-accent) 40%, transparent))",
         border: "1px solid var(--color-hairline-soft)",
         color: "var(--color-text)",
-        boxShadow: "inset 0 1px 0 oklch(1 0 0 / 0.03)",
+        boxShadow: "inset 0 1px 0 color-mix(in oklab, var(--raise) 3%, transparent)",
       }}
     />
   );

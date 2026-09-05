@@ -140,7 +140,7 @@ export function ScriptPreviewPanel({ projectName, episode, text, lookup }: Scrip
       <ScriptHighlight
         text={text}
         lookup={lookup}
-        className="rounded-md border border-[var(--color-hairline-soft)] bg-[oklch(0.16_0.010_265_/_0.6)] p-3"
+        className="rounded-md border border-[var(--color-hairline-soft)] bg-[color-mix(in_oklab,var(--color-bg-grad-b)_60%,transparent)] p-3"
       />
 
       <dl
