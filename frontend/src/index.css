@@ -3,33 +3,36 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-    /* 工作台基础色 — oklch 系 */
-    --color-bg: oklch(0.168 0.009 265);
-    --color-bg-grad-a: oklch(0.182 0.011 270);
-    --color-bg-grad-b: oklch(0.148 0.009 260);
-    --color-surface-2: oklch(0.250 0.012 265);
+    /* 工作台基础色 — 安全灯照亮的暗房，暖石墨而非中性黑 */
+    --color-bg: oklch(0.196 0.019 58);
+    --color-bg-grad-a: oklch(0.222 0.022 62);
+    --color-bg-grad-b: oklch(0.170 0.017 46);
+    --color-surface-2: oklch(0.288 0.022 60);
 
     /* 描边 */
-    --color-hairline: oklch(0.40 0.012 265 / 0.35);
-    --color-hairline-strong: oklch(0.45 0.014 265 / 0.55);
-    --color-hairline-soft: oklch(0.40 0.012 265 / 0.18);
+    --color-hairline: oklch(0.48 0.024 60 / 0.40);
+    --color-hairline-strong: oklch(0.54 0.028 60 / 0.60);
+    --color-hairline-soft: oklch(0.48 0.024 60 / 0.22);
 
-    /* 文字四档 */
-    --color-text: oklch(0.975 0.004 265);
-    --color-text-2: oklch(0.820 0.008 265);
-    --color-text-3: oklch(0.640 0.010 265);
-    --color-text-4: oklch(0.490 0.010 265);
+    /* 文字四档 — 相纸白，微暖 */
+    --color-text: oklch(0.972 0.006 75);
+    --color-text-2: oklch(0.825 0.010 70);
+    --color-text-3: oklch(0.645 0.012 68);
+    --color-text-4: oklch(0.495 0.012 65);
 
-    /* Accent — 紫色 */
-    --color-accent: oklch(0.76 0.09 295);
-    --color-accent-2: oklch(0.88 0.05 295);
-    --color-accent-soft: oklch(0.76 0.09 295 / 0.22);
-    --color-accent-dim: oklch(0.76 0.09 295 / 0.12);
-    --color-accent-glow: oklch(0.76 0.09 295 / 0.35);
+    /* Accent — 放大机分色头的青档，与暖底互补 */
+    --color-accent: oklch(0.80 0.095 208);
+    --color-accent-2: oklch(0.90 0.062 205);
+    --color-accent-soft: oklch(0.80 0.095 208 / 0.22);
+    --color-accent-dim: oklch(0.80 0.095 208 / 0.12);
+    --color-accent-glow: oklch(0.80 0.095 208 / 0.35);
+
+    /* 分色头品红档 — 第三色相，落在页面底部的辉光上 */
+    --color-filter-m: oklch(0.42 0.105 352);
 
     /* 状态色 */
-    --color-good: oklch(0.78 0.10 155);
-    --color-warn: oklch(0.80 0.12 70);
+    --color-good: oklch(0.80 0.105 158);
+    --color-warn: oklch(0.83 0.125 82);
     --color-danger: oklch(0.70 0.18 25);
 
     /* 暖色调 — 警告 / stale / 暖系强调（琥珀） */
@@ -57,17 +60,17 @@
     --font-editorial: "Instrument Serif", "Songti SC", "Noto Serif SC", Georgia, serif;
 
     /* 阴影 */
-    --shadow-glow: 0 0 0 1px oklch(0.76 0.09 295 / 0.28), 0 18px 40px oklch(0 0 0 / 0.45);
+    --shadow-glow: 0 0 0 1px oklch(0.80 0.095 208 / 0.28), 0 18px 40px oklch(0 0 0 / 0.45);
 
     /* ---- Legacy aliases — 旧组件继续可用，逐步迁移 ---- */
-    --color-ink-950: oklch(0.148 0.009 260);
-    --color-ink-900: oklch(0.168 0.009 265);
-    --color-ink-850: oklch(0.182 0.011 270);
-    --color-ink-800: oklch(0.250 0.012 265);
-    --color-ink-700: oklch(0.310 0.013 265);
-    --color-neon-500: oklch(0.76 0.09 295);
-    --color-neon-400: oklch(0.82 0.07 295);
-    --color-neon-300: oklch(0.88 0.05 295);
+    --color-ink-950: oklch(0.152 0.012 52);
+    --color-ink-900: oklch(0.176 0.013 58);
+    --color-ink-850: oklch(0.196 0.015 62);
+    --color-ink-800: oklch(0.262 0.016 60);
+    --color-ink-700: oklch(0.322 0.017 60);
+    --color-neon-500: oklch(0.80 0.095 208);
+    --color-neon-400: oklch(0.85 0.078 206);
+    --color-neon-300: oklch(0.90 0.062 205);
     --color-amberx-500: oklch(0.78 0.13 70);
     --color-amberx-400: oklch(0.84 0.10 70);
     --color-amberx-300: oklch(0.90 0.08 75);
@@ -85,8 +88,9 @@ html { color-scheme: dark; }
 
 body {
     background:
-        radial-gradient(1000px 500px at 8% -10%, oklch(0.32 0.05 295 / 0.28), transparent 55%),
-        radial-gradient(900px 500px at 98% 110%, oklch(0.26 0.04 260 / 0.25), transparent 55%),
+        radial-gradient(1250px 640px at 4% -14%, oklch(0.50 0.115 62 / 0.42), transparent 62%),
+        radial-gradient(900px 520px at 99% 108%, color-mix(in oklab, var(--color-filter-m) 40%, transparent), transparent 60%),
+        radial-gradient(820px 500px at 86% 4%, oklch(0.44 0.070 208 / 0.26), transparent 62%),
         linear-gradient(180deg, var(--color-bg-grad-a), var(--color-bg-grad-b));
     background-attachment: fixed;
     color: var(--color-text);
@@ -121,13 +125,13 @@ body {
 /* 滚动条 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb {
-    background: oklch(0.42 0.010 265 / 0.35);
+    background: oklch(0.42 0.010 59 / 0.35);
     border-radius: 10px;
     border: 2px solid transparent;
     background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-    background: oklch(0.55 0.012 265 / 0.55);
+    background: oklch(0.55 0.012 59 / 0.55);
     border: 2px solid transparent;
     background-clip: padding-box;
 }
@@ -160,7 +164,7 @@ body {
 
 /* 玻璃面板 — GlassModal / GlassPopover 的内容容器样式 */
 .arc-glass-panel {
-    background: linear-gradient(180deg, oklch(0.21 0.012 265 / 0.96), oklch(0.18 0.010 265 / 0.96));
+    background: linear-gradient(180deg, oklch(0.21 0.012 59 / 0.96), oklch(0.18 0.010 59 / 0.96));
     border: 1px solid var(--color-hairline);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
@@ -196,12 +200,12 @@ body {
 .arc-btn-secondary {
     color: var(--color-text-3);
     border: 1px solid var(--color-hairline);
-    background: oklch(0.22 0.011 265 / 0.5);
+    background: oklch(0.22 0.011 59 / 0.5);
     transition: color 150ms, background 150ms, border-color 150ms;
 }
 .arc-btn-secondary:hover:not(:disabled) {
     color: var(--color-text);
-    background: oklch(0.26 0.013 265 / 0.7);
+    background: oklch(0.26 0.013 59 / 0.7);
     border-color: var(--color-hairline-strong);
 }
 .arc-btn-secondary:disabled {
