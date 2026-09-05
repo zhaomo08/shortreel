@@ -162,6 +162,29 @@ MIGRATION_BLOCKED_TOOL_IDS: frozenset[str] = frozenset(
 )
 
 
+def _drop_noarg_placeholder(sdk_tool: Any) -> Any:
+    """Wrap one tool so a no-argument placeholder key never reaches its schema.
+
+    Some models emit ``{"_": true}`` instead of ``{}`` when a tool takes no
+    arguments. Request models declared ``extra="forbid"`` reject the whole call,
+    so the tool never runs and the model is told its arguments were invalid.
+    Stripping happens at registration for every tool rather than per handler:
+    the placeholder can arrive at any tool, and no request model carries a
+    meaningful ``_`` field.
+    """
+
+    inner = sdk_tool.handler
+
+    async def _stripped(args: Any) -> dict[str, Any]:
+        # ponytail: only the bare `_` placeholder is dropped; other unknown keys
+        # still surface as validation errors, which is what should happen.
+        if isinstance(args, dict) and isinstance(args.get("_"), bool):
+            args = {key: value for key, value in args.items() if key != "_"}
+        return await inner(args)
+
+    return replace(sdk_tool, handler=_stripped)
+
+
 def _refuse_while_migration_failed(sdk_tool: Any, ctx: ToolContext) -> Any:
     """Wrap one tool so it reports the migration verdict instead of running.
 
@@ -234,7 +257,11 @@ def build_arcreel_mcp_server(*, project_name: str, projects_root: Path, user_id:
         name="arcreel",
         version="1.0.0",
         tools=[
-            _refuse_while_migration_failed(sdk_tool, ctx) if sdk_tool.name in MIGRATION_BLOCKED_TOOL_IDS else sdk_tool
+            _drop_noarg_placeholder(
+                _refuse_while_migration_failed(sdk_tool, ctx)
+                if sdk_tool.name in MIGRATION_BLOCKED_TOOL_IDS
+                else sdk_tool
+            )
             for sdk_tool in tools
         ],
     )
