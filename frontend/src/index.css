@@ -27,6 +27,10 @@
     --color-accent-dim: oklch(0.80 0.095 208 / 0.12);
     --color-accent-glow: oklch(0.80 0.095 208 / 0.35);
 
+    /* 强调色之上的前景色：强调色够亮时用近黑字，够暗时用近白字。
+       按主题翻转，否则浅色主题的深青按钮上会压一层黑字，读不出来。 */
+    --color-on-accent: oklch(0.14 0 0);
+
     /* 分色头品红档 — 第三色相，落在页面底部的辉光上 */
     --color-filter-m: oklch(0.42 0.105 352);
 
@@ -155,6 +159,7 @@
     --color-accent-soft: oklch(0.545 0.115 212 / 0.18);
     --color-accent-dim: oklch(0.545 0.115 212 / 0.10);
     --color-accent-glow: oklch(0.545 0.115 212 / 0.30);
+    --color-on-accent: oklch(0.985 0.004 84);
     --color-filter-m: oklch(0.62 0.115 352);
     --color-good: oklch(0.545 0.115 158);
     --color-warn: oklch(0.585 0.125 72);
@@ -203,6 +208,7 @@
     --color-accent-soft: oklch(0.535 0.145 352 / 0.18);
     --color-accent-dim: oklch(0.535 0.145 352 / 0.10);
     --color-accent-glow: oklch(0.535 0.145 352 / 0.30);
+    --color-on-accent: oklch(0.985 0.004 84);
     --color-filter-m: oklch(0.60 0.105 212);
     --color-good: oklch(0.535 0.115 158);
     --color-warn: oklch(0.575 0.125 72);
@@ -360,7 +366,7 @@ body {
 
 /* 主按钮 CTA — accent 默认，warm/danger 用 data-tone */
 .arc-btn-primary {
-    color: oklch(0.14 0 0);
+    color: var(--color-on-accent);
     background: linear-gradient(135deg, var(--color-accent-2), var(--color-accent));
     box-shadow:
         inset 0 1px 0 oklch(1 0 0 / 0.35),

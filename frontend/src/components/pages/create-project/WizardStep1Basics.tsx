@@ -12,12 +12,18 @@ import { ACCENT_BTN_CLS, ACCENT_BUTTON_STYLE, radioCardClass } from "@/component
 import { FieldLabel } from "@/components/ui/FieldLabel";
 import type { GenerationRoute } from "@/utils/generation-mode";
 
+/** 成片语言取值域，与后端 ``lib/output_language.py`` 的 SUPPORTED_LANGUAGE_CODES 同一套。 */
+export const OUTPUT_LANGUAGES = ["en", "zh", "vi"] as const;
+export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
+
 export interface WizardStep1Value {
   title: string;
   contentMode: "narration" | "drama" | "ad";
   /** 源文件性质：novel（默认）/ screenplay。仅 drama 暴露，创建即定、不可变。 */
   sourceKind: "novel" | "screenplay";
   aspectRatio: "9:16" | "16:9";
+  /** 成片语言：剧本、口播、字幕与视觉提示词都按它产出，与梗概原文语言无关。 */
+  outputLanguage: OutputLanguage;
   /** 生成模式，创建时锁定。null = 未选：必选，未选不放行。 */
   generationRoute: GenerationRoute | null;
   /** 多宫格分镜装配开关，随创建写入；仅分镜图生视频有意义，ad 不支持。 */
@@ -237,11 +243,38 @@ export function WizardStep1Basics({
         />
       )}
 
-      {/* 口播语速估算：项目还没有语言事实（source_language 由内容分析写入），单位按未知语言呈现 */}
+      {/* 口播语速估算：留空则按下方选定的成片语言取默认语速（中文按字 / 秒，英文按词 / 秒） */}
       <SpeechRateField
         value={value.speechRate}
         onChange={(next) => onChange({ ...value, speechRate: next })}
       />
+
+      {/* 成片语言：与梗概语言解耦——中文梗概做英文片是常态，所以这里选的是产出语言 */}
+      <div>
+        <FieldLabel>{t("dashboard:output_language")}</FieldLabel>
+        <div
+          className="flex gap-2.5"
+          role="radiogroup"
+          aria-label={t("dashboard:output_language")}
+        >
+          {OUTPUT_LANGUAGES.map((lang) => (
+            <label key={lang} className={radioCardClass(value.outputLanguage === lang)}>
+              <input
+                type="radio"
+                name="outputLanguage"
+                value={lang}
+                checked={value.outputLanguage === lang}
+                onChange={() => onChange({ ...value, outputLanguage: lang })}
+                className="sr-only"
+              />
+              <span>{t(`dashboard:output_language_${lang}`)}</span>
+            </label>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11.5px] text-text-3">
+          {t("dashboard:output_language_hint")}
+        </p>
+      </div>
 
       {/* Aspect Ratio */}
       <div>

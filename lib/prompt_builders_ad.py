@@ -11,7 +11,7 @@
 - 字段说明给写作指引而非"必须/禁止"清单。
 """
 
-from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
+from lib.output_language import DEFAULT_LANGUAGE_CODE, language_display_name
 from lib.prompt_builders_script import (
     _ACTION_WRITING_GUIDE,
     _AMBIANCE_AUDIO_WRITING_GUIDE,
@@ -28,6 +28,8 @@ from lib.schema_guards import is_int
 from lib.script_models import REFERENCE_UNIT_DURATION_RANGE
 from lib.speech_rate import speech_rate_units_per_second
 from lib.text_metrics import reading_unit_noun
+
+_DEFAULT_LANGUAGE_NAME = language_display_name(DEFAULT_LANGUAGE_CODE)
 
 # ---------------------------------------------------------------------------
 # 审定配比表（数字真相源，逐字照搬，不得修改）
@@ -187,8 +189,8 @@ def build_ad_prompt(
     supported_durations: list[int] | None,
     episode: int = 1,
     aspect_ratio: str = "9:16",
-    target_language: str = OUTPUT_LANGUAGE_NAME,
-    source_language: str = OUTPUT_LANGUAGE_CODE,
+    target_language: str = _DEFAULT_LANGUAGE_NAME,
+    source_language: str = DEFAULT_LANGUAGE_CODE,
     speech_rate_override: float | None = None,
 ) -> str:
     """构建广告/短片剧本生成 prompt。
@@ -359,7 +361,7 @@ def build_ad_reference_prompt(
     target_duration: int,
     episode: int = 1,
     aspect_ratio: str = "9:16",
-    target_language: str = OUTPUT_LANGUAGE_NAME,
+    target_language: str = _DEFAULT_LANGUAGE_NAME,
 ) -> str:
     """广告/短片的参考生视频单阶段生成 prompt；直接输出含引用语法正文的扁平 unit。"""
     if not is_int(target_duration, minimum=1):

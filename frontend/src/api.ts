@@ -448,6 +448,8 @@ export interface CreateProjectPayload {
   /** 源文件性质：novel（默认）/ screenplay。仅 drama 暴露，创建即定、不可变。 */
   source_kind?: "novel" | "screenplay";
   aspect_ratio?: "9:16" | "16:9";
+  /** 成片语言：剧本 / 口播 / 字幕 / 画面提示词的产出语言，与梗概原文语言无关。 */
+  source_language?: "zh" | "en" | "vi";
   /** 生成模式，创建时必填二选一、无默认值（后端缺失即 422）。 */
   generation_mode: GenerationRoute;
   /** 多宫格分镜装配开关，可随创建写入；仅分镜图生视频有意义。 */

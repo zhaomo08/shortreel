@@ -3,7 +3,7 @@
 import pytest
 
 from lib import prompt_builders_ad as ad_prompts
-from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
+from lib.output_language import DEFAULT_LANGUAGE_CODE, language_display_name
 from lib.prompt_builders_ad import _shot_duration_constraint, build_ad_prompt, nearest_ad_tier
 from lib.speech_rate import speech_rate_units_per_second
 
@@ -78,7 +78,7 @@ class TestProductsInjection:
     def test_voiceover_rate_injected_from_single_source(self):
         """口播字数→时长折算语速由 lib.speech_rate 注入，不写死数字；带货与通用短片两分支同源。"""
         # 默认成片语言为英文 → 语速取 en 档、量词「词」
-        en_rate = speech_rate_units_per_second(OUTPUT_LANGUAGE_CODE)
+        en_rate = speech_rate_units_per_second(DEFAULT_LANGUAGE_CODE)
         for prompt in (_build(), _build(products={})):
             assert f"约 {en_rate:g} 词/秒" in prompt
         # 语速与量词随 source_language 切换（zh 计字），证明是注入而非写死
@@ -91,9 +91,11 @@ class TestProductsInjection:
 
         两者混用时 speech_rate_units_per_second("English") 查不中 en 档、静默回退中文语速，
         提示词里的口播折算会偏出一倍，而且不报错。"""
-        prompt = _build(target_language=OUTPUT_LANGUAGE_NAME, source_language=OUTPUT_LANGUAGE_CODE)
-        assert f"必须使用 {OUTPUT_LANGUAGE_NAME}" in prompt
-        assert f"约 {speech_rate_units_per_second(OUTPUT_LANGUAGE_CODE):g} 词/秒" in prompt
+        prompt = _build(
+            target_language=language_display_name(DEFAULT_LANGUAGE_CODE), source_language=DEFAULT_LANGUAGE_CODE
+        )
+        assert f"必须使用 {language_display_name(DEFAULT_LANGUAGE_CODE)}" in prompt
+        assert f"约 {speech_rate_units_per_second(DEFAULT_LANGUAGE_CODE):g} 词/秒" in prompt
 
     def test_project_override_wins_over_language_default(self):
         """项目级语速覆盖生效时注入覆盖值；量词仍随语言。"""

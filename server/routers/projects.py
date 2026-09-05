@@ -51,6 +51,7 @@ from lib.episode_target_duration import (
 )
 from lib.i18n import Translator
 from lib.json_io import domain_error_on_value_error
+from lib.output_language import DEFAULT_LANGUAGE_CODE
 from lib.profile_manifest import ContentMode
 from lib.project_change_hints import project_change_source
 from lib.project_manager import EmptySourceError, EpisodeScriptReboundError, SourceKind, get_project_manager
@@ -173,6 +174,11 @@ def _reject_bool_speech_rate(value: object) -> object:
 #: 创建 / PATCH 请求上的口播语速估算字段类型，两个模型共用同一把布尔守卫。
 SpeechRateOverride = Annotated[float | None, BeforeValidator(_reject_bool_speech_rate)]
 
+#: 创建 / PATCH 请求上的成片语言字段类型。取值域与 ``server.tool_runtime`` 的
+#: ``patch_project`` 校验、``lib.speech_rate`` 的语速表同一套；None 表示不改动
+#: （创建时落 ``DEFAULT_LANGUAGE_CODE``）。
+SourceLanguage = Literal["zh", "en", "vi"] | None
+
 
 def _validated_episode_target_duration(value: int, _t: Translator) -> int:
     """把创建 / PATCH 传入的单集目标时长收进硬区间，越界即 422。
@@ -222,6 +228,9 @@ class CreateProjectRequest(BaseModel):
     target_duration: int | None = Field(default=None, gt=0)
     # 仅 content_mode=ad：创作诉求短文本（可空，不走 source_loader）
     brief: str | None = None
+    # 成片语言：剧本、口播、字幕与视觉提示词都按它产出；不填按 DEFAULT_LANGUAGE_CODE。
+    # 与梗概原文语言无关——中文梗概做英文片是常态。
+    source_language: SourceLanguage = None
     # 生成模式：创建时必须显式选择 storyboard 或 reference_video；缺失或旧 grid 值由
     # Pydantic 校验返回 422。创建后不可更改（PATCH 模型结构上无此字段）。
     generation_mode: Literal["storyboard", "reference_video"]
@@ -270,6 +279,8 @@ class UpdateProjectRequest(BaseModel):
     brief: str | None = None
     # 生成模式创建即定、不可变，PATCH 结构上无 generation_mode 字段；宫格开关随时可切
     grid_storyboard: bool | None = None
+    # 成片语言：改后只影响之后生成的内容，已生成的剧本 / 配音不会自动翻译。
+    source_language: SourceLanguage = None
     video_backend: str | None = None
     video_provider_i2v: str | None = None
     video_provider_r2v: str | None = None
@@ -696,6 +707,8 @@ async def create_project(
             # 两字段恒写显式值（grid_storyboard 默认 false 也落盘），新项目即 v5 完整形态
             extras["generation_mode"] = req.generation_mode
             extras["grid_storyboard"] = req.grid_storyboard
+            # 恒写显式值：缺失字段会在下游被回退成默认语言，落盘反而看不出项目选了什么。
+            extras["source_language"] = req.source_language or DEFAULT_LANGUAGE_CODE
             if speech_rate is not None:
                 extras[SPEECH_RATE_FIELD] = speech_rate
             with project_change_source("webui"):
@@ -1041,6 +1054,9 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
                     # 显式清除自定义参考图，用于"取消风格"流程
                     project.pop("style_image", None)
                     project.pop("style_description", None)
+
+                if "source_language" in req.model_fields_set and req.source_language is not None:
+                    project["source_language"] = req.source_language
 
                 if "model_settings" in req.model_fields_set:
                     if req.model_settings is None:

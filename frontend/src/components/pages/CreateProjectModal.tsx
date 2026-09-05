@@ -150,6 +150,7 @@ export function CreateProjectModal() {
     contentMode: "narration",
     sourceKind: "novel",
     aspectRatio: "9:16",
+    outputLanguage: "en",
     generationRoute: null,
     gridStoryboard: false,
     targetDuration: 60,
@@ -310,6 +311,7 @@ export function CreateProjectModal() {
         // source_kind 仅 drama 暴露与生效；其余模式由服务端缺省 novel
         ...(basics.contentMode === "drama" ? { source_kind: basics.sourceKind } : {}),
         aspect_ratio: basics.aspectRatio,
+        source_language: basics.outputLanguage,
         generation_mode: basics.generationRoute,
         grid_storyboard: basics.gridStoryboard,
         // 口播语速估算未填即不传（服务端不落盘，回退语言默认）

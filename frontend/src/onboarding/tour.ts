@@ -62,7 +62,7 @@ export interface TourHandle {
 }
 
 /** 遮罩墨色 —— body 背景同色系的冷紫墨，而不是 driver 默认纯黑 */
-const OVERLAY_INK = "oklch(0.10 0.012 265)";
+const OVERLAY_INK = "color-mix(in oklab, var(--color-bg-grad-b) 100%, transparent)";
 
 /**
  * 锚点缺席时的等待上限（毫秒）。driver 在这段时间里挂 MutationObserver 等元素出现，

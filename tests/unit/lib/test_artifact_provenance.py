@@ -9,7 +9,7 @@ from lib.artifact_provenance import (
     build_script_plan_basis,
     decode_script_plan_source,
 )
-from lib.output_language import OUTPUT_LANGUAGE_CODE
+from lib.output_language import DEFAULT_LANGUAGE_CODE
 
 
 def test_artifact_basis_has_deterministic_canonical_json() -> None:
@@ -401,7 +401,7 @@ def test_script_plan_basis_canonicalizes_default_source_language(source_language
 
     defaulted = build_script_plan_basis("source", episode=1, project=project)
     explicit = build_script_plan_basis(
-        "source", episode=1, project={**project, "source_language": OUTPUT_LANGUAGE_CODE}
+        "source", episode=1, project={**project, "source_language": DEFAULT_LANGUAGE_CODE}
     )
 
     assert defaulted.digest == explicit.digest
