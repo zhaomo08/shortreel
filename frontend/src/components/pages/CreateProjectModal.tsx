@@ -150,7 +150,7 @@ export function CreateProjectModal() {
     contentMode: "narration",
     sourceKind: "novel",
     aspectRatio: "9:16",
-    outputLanguage: "en",
+    outputLanguage: "auto",
     generationRoute: null,
     gridStoryboard: false,
     targetDuration: 60,

@@ -8,7 +8,7 @@ const baseValue = {
   contentMode: "narration" as const,
   sourceKind: "novel" as const,
   aspectRatio: "9:16" as const,
-  outputLanguage: "en" as const,
+  outputLanguage: "auto" as const,
   generationRoute: "storyboard" as const,
   gridStoryboard: false,
   targetDuration: 60,
@@ -446,8 +446,8 @@ describe("WizardStep1Basics", () => {
     );
     expect(screen.getByRole("switch", { name: "多宫格分镜" })).toBeInTheDocument();
   });
-  it("lets the reel be made in a language the outline is not written in", () => {
-    // 中文梗概做英文片是常态，所以成片语言是用户选的，不是从素材推断的。
+  it("lets the reel be locked to a language the outline is not written in", () => {
+    // 默认跟随源文；锁定语言是为了中文梗概做英文片这类跨语言场景。
     const onChange = vi.fn();
     render(
       <WizardStep1Basics
@@ -464,7 +464,7 @@ describe("WizardStep1Basics", () => {
     );
   });
 
-  it("starts on English", () => {
+  it("starts on follow-the-source", () => {
     render(
       <WizardStep1Basics
         value={baseValue}
@@ -474,7 +474,7 @@ describe("WizardStep1Basics", () => {
       />,
     );
     const group = screen.getByRole("radiogroup", { name: "成片语言" });
-    expect(within(group).getByRole("radio", { name: "English" })).toBeChecked();
+    expect(within(group).getByRole("radio", { name: "跟随源文" })).toBeChecked();
   });
 
 });

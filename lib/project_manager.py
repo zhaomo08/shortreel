@@ -68,7 +68,12 @@ from lib.episode_target_duration import (
 )
 from lib.formal_write import FormalWriteReceipt, formal_write_transaction, project_metadata_lock
 from lib.json_io import atomic_write_bytes, atomic_write_json, load_json, load_json_or_none
-from lib.output_language import language_display_name, resolve_language_code
+from lib.output_language import (
+    FOLLOW_SOURCE_INSTRUCTION,
+    language_display_name,
+    language_follows_source,
+    resolve_language_code,
+)
 from lib.path_safety import PathTraversalError, safe_join
 from lib.profile_manifest import (
     VALID_CONTENT_MODES,
@@ -3792,12 +3797,13 @@ class ProjectManager:
         # 作者写下的创作方案前言优先照用，缺失才退回从正文归纳（novel 行为不变）。
         project_data = self.load_project(project_name)
         source_kind = resolve_source_kind(project_data)
-        # 成片语言由项目声明（建项目时选定），不从源文推断：中文梗概做英文片是常态。
-        prompt = build_overview_prompt(
-            source_content,
-            source_kind=source_kind,
-            target_language=language_display_name(project_data.get("source_language")),
+        # 跟随源文时还没有语言事实——识别正是这次调用要做的事，所以下的是相对指令；
+        # 选定了固定语言的项目直接给语言名，中文梗概做英文片走这条。
+        follows_source = language_follows_source(project_data)
+        target_language = (
+            FOLLOW_SOURCE_INSTRUCTION if follows_source else language_display_name(project_data.get("source_language"))
         )
+        prompt = build_overview_prompt(source_content, source_kind=source_kind, target_language=target_language)
 
         result = await generator.generate(
             TextGenerationRequest(
@@ -3816,9 +3822,12 @@ class ProjectManager:
         # 保存到 project.json（RMW 在单一 _project_lock 内完成，避免并发覆盖其它字段）
         def _mutate(project: dict) -> None:
             project["overview"] = overview_dict
-            # 识别结果只留在 overview 存档里：source_language 是用户选定的成片语言，
-            # 不能被源文语言覆盖，否则中文梗概会把英文项目拖回中文。缺失时补默认值。
-            project["source_language"] = resolve_language_code(project.get("source_language"))
+            # 跟随源文的项目把识别结果落成语言事实，后续剧本 / 口播 / 字幕据它产出；
+            # 选定了固定语言的项目不被覆盖，否则中文梗概会把英文项目拖回中文。
+            if language_follows_source(project):
+                project["source_language"] = resolve_language_code(overview_dict["language"])
+            else:
+                project["source_language"] = resolve_language_code(project.get("source_language"))
 
         self.update_project(project_name, _mutate)
 

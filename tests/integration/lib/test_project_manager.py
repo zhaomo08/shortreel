@@ -7,7 +7,12 @@ from threading import Event
 import pytest
 
 from lib.artifact_manifest import ArtifactKey, ArtifactManifestEntry, ProjectArtifactManifestAdapter
-from lib.output_language import DEFAULT_LANGUAGE_CODE, language_display_name
+from lib.output_language import (
+    DEFAULT_LANGUAGE_CODE,
+    FOLLOW_SOURCE_INSTRUCTION,
+    LANGUAGE_FOLLOWS_SOURCE_FIELD,
+    language_display_name,
+)
 from lib.project_manager import EmptySourceError, ProjectManager
 
 
@@ -720,6 +725,10 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
+        pm.update_project(
+            "demo",
+            lambda project: project.__setitem__(LANGUAGE_FOLLOWS_SOURCE_FIELD, False),
+        )
 
         pm.add_character("demo", "Alice", "hero")
         pm.add_props_batch("demo", {"玉佩": {"description": "古玉"}})
@@ -779,6 +788,10 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
+        pm.update_project(
+            "demo",
+            lambda project: project.__setitem__(LANGUAGE_FOLLOWS_SOURCE_FIELD, False),
+        )
         _write(pm.get_project_path("demo") / "source" / "1.txt", "source body")
 
         async def _fake_create_backend(*args, **kwargs):
@@ -817,6 +830,10 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo", source_kind=source_kind)
+        pm.update_project(
+            "demo",
+            lambda project: project.__setitem__(LANGUAGE_FOLLOWS_SOURCE_FIELD, False),
+        )
         _write(pm.get_project_path("demo") / "source" / "1.txt", "源文本内容")
 
         backend = _FakeTextBackend()
@@ -834,6 +851,44 @@ class TestProjectManager:
             source_content, source_kind=expected_kind, target_language=language_display_name(DEFAULT_LANGUAGE_CODE)
         )
 
+    @pytest.mark.parametrize("detected", ["zh", "en", "vi"])
+    @pytest.mark.asyncio
+    async def test_generate_overview_adopts_the_source_language_when_following(self, tmp_path, monkeypatch, detected):
+        """跟随源文的项目把识别结果落成语言事实，后续剧本 / 口播 / 字幕据它产出。"""
+        pm = ProjectManager(tmp_path / "projects")
+        pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo")
+        _write(pm.get_project_path("demo") / "source" / "1.txt", "source body")
+
+        async def _fake_create_backend(*args, **kwargs):
+            return _FakeTextBackend(language=detected), "gemini-aistudio"
+
+        monkeypatch.setattr("lib.text_generator.create_text_backend_for_task", _fake_create_backend)
+        await pm.generate_overview("demo")
+
+        assert pm.load_project("demo")["source_language"] == detected
+
+    @pytest.mark.asyncio
+    async def test_generate_overview_asks_for_the_source_language_when_following(self, tmp_path, monkeypatch):
+        """跟随源文时提示词下的是相对指令：此刻还没有语言事实，识别正是这次调用要做的事。"""
+        pm = ProjectManager(tmp_path / "projects")
+        pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo")
+        _write(pm.get_project_path("demo") / "source" / "1.txt", "源文本内容")
+
+        backend = _FakeTextBackend()
+
+        async def _fake_create_backend(*args, **kwargs):
+            return backend, "gemini-aistudio"
+
+        monkeypatch.setattr("lib.text_generator.create_text_backend_for_task", _fake_create_backend)
+        await pm.generate_overview("demo")
+
+        assert backend.last_request is not None
+        assert FOLLOW_SOURCE_INSTRUCTION in backend.last_request.prompt
+        for name in ("English", "中文", "Tiếng Việt"):
+            assert f"必须使用 {name}" not in backend.last_request.prompt
+
     @pytest.mark.parametrize("chosen", ["zh", "en", "vi"])
     @pytest.mark.asyncio
     async def test_generate_overview_honours_the_chosen_language(self, tmp_path, monkeypatch, chosen):
@@ -846,7 +901,9 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
-        pm.update_project("demo", lambda project: project.__setitem__("source_language", chosen))
+        pm.update_project(
+            "demo", lambda project: project.update({"source_language": chosen, LANGUAGE_FOLLOWS_SOURCE_FIELD: False})
+        )
         _write(pm.get_project_path("demo") / "source" / "1.txt", "源文本内容")
 
         backend = _FakeTextBackend(language="zh")
@@ -876,6 +933,10 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
+        pm.update_project(
+            "demo",
+            lambda project: project.__setitem__(LANGUAGE_FOLLOWS_SOURCE_FIELD, False),
+        )
         pm.update_project("demo", lambda project: project.__setitem__("source_language", stale_source_language))
         _write(pm.get_project_path("demo") / "source" / "1.txt", "源文本内容")
 
@@ -903,6 +964,10 @@ class TestProjectManager:
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo", source_kind="screenplay")
+        pm.update_project(
+            "demo",
+            lambda project: project.__setitem__(LANGUAGE_FOLLOWS_SOURCE_FIELD, False),
+        )
         # 模拟遗留项目：移除 source_kind 字段
         pm.update_project("demo", lambda project: project.pop("source_kind", None))
         assert "source_kind" not in pm.load_project("demo")

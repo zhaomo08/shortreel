@@ -27,6 +27,25 @@ _DISPLAY_NAMES: dict[str, str] = {
     "vi": "Tiếng Việt",
 }
 
+#: ``project.json`` 里标记「成片语言跟随源文」的布尔字段。缺失按 True，与上游行为一致。
+LANGUAGE_FOLLOWS_SOURCE_FIELD = "language_follows_source"
+
+#: 跟随源文时写进概述提示词的语言指令。此时还没有语言事实——识别正是这次调用要做的事，
+#: 所以给的是相对指令而非某个具体语言名。
+FOLLOW_SOURCE_INSTRUCTION = "与源文本相同的语言"
+
+
+def language_follows_source(project: object) -> bool:
+    """项目是否让成片语言跟随源文。
+
+    缺字段按 True：这是上游行为，也是存量项目的既有预期。只有用户在建项目时显式选定
+    某个语言，才会写 False 并锁住 ``source_language``。
+    """
+    if not isinstance(project, dict):
+        return True
+    value = project.get(LANGUAGE_FOLLOWS_SOURCE_FIELD)
+    return True if value is None else bool(value)
+
 
 def is_supported_language(value: object) -> bool:
     return isinstance(value, str) and value in SUPPORTED_LANGUAGE_CODES

@@ -12,8 +12,11 @@ import { ACCENT_BTN_CLS, ACCENT_BUTTON_STYLE, radioCardClass } from "@/component
 import { FieldLabel } from "@/components/ui/FieldLabel";
 import type { GenerationRoute } from "@/utils/generation-mode";
 
-/** 成片语言取值域，与后端 ``lib/output_language.py`` 的 SUPPORTED_LANGUAGE_CODES 同一套。 */
-export const OUTPUT_LANGUAGES = ["en", "zh", "vi"] as const;
+/**
+ * 成片语言。``auto`` 跟随源文——语言事实由概述生成时的识别结果补上；三个语言码锁定语言，
+ * 取值域与后端 ``lib/output_language.py`` 的 SUPPORTED_LANGUAGE_CODES 同一套。
+ */
+export const OUTPUT_LANGUAGES = ["auto", "en", "zh", "vi"] as const;
 export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
 
 export interface WizardStep1Value {
@@ -249,7 +252,7 @@ export function WizardStep1Basics({
         onChange={(next) => onChange({ ...value, speechRate: next })}
       />
 
-      {/* 成片语言：与梗概语言解耦——中文梗概做英文片是常态，所以这里选的是产出语言 */}
+      {/* 成片语言：默认跟随源文；锁定某个语言是为了跨语言场景——中文梗概做英文片 */}
       <div>
         <FieldLabel>{t("dashboard:output_language")}</FieldLabel>
         <div

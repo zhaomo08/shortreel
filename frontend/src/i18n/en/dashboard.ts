@@ -403,10 +403,11 @@ export default {
   // CreateProjectModal
   'aspect_ratio': 'Aspect Ratio',
   'output_language': 'Output language',
+  'output_language_auto': 'Follow the source',
   'output_language_en': 'English',
   'output_language_zh': 'Chinese',
   'output_language_vi': 'Vietnamese',
-  'output_language_hint': 'The script, voiceover, subtitles and image prompts are all written in this language, whatever the outline is written in.',
+  'output_language_hint': 'By default the script, voiceover, subtitles and image prompts follow the language of the file you upload; lock a language to make, say, an English reel from a Chinese outline.',
   'portrait_9_16': 'Portrait 9:16',
   'landscape_16_9': 'Landscape 16:9',
   'default_duration': 'Default Duration',

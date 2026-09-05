@@ -396,10 +396,11 @@ export default {
   // CreateProjectModal
   'aspect_ratio': 'Tỉ lệ khung hình',
   'output_language': 'Ngôn ngữ thành phẩm',
+  'output_language_auto': 'Theo ngôn ngữ nguồn',
   'output_language_en': 'English',
   'output_language_zh': 'Tiếng Trung',
   'output_language_vi': 'Tiếng Việt',
-  'output_language_hint': 'Kịch bản, lời thoại, phụ đề và prompt hình ảnh đều dùng ngôn ngữ này, bất kể tóm tắt viết bằng ngôn ngữ nào.',
+  'output_language_hint': 'Mặc định kịch bản, lời thoại, phụ đề và prompt hình ảnh theo ngôn ngữ tệp bạn tải lên; khoá một ngôn ngữ để làm video tiếng Anh từ tóm tắt tiếng Trung.',
   'portrait_9_16': 'Dọc 9:16',
   'landscape_16_9': 'Ngang 16:9',
   'default_duration': 'Thời lượng mặc định',

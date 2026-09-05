@@ -403,10 +403,11 @@ export default {
   // CreateProjectModal
   'aspect_ratio': '画面比例',
   'output_language': '成片语言',
+  'output_language_auto': '跟随源文',
   'output_language_en': 'English',
   'output_language_zh': '中文',
   'output_language_vi': 'Tiếng Việt',
-  'output_language_hint': '剧本、口播、字幕与画面提示词都按这个语言产出；梗概用哪种语言写不影响它。',
+  'output_language_hint': '默认按你上传的源文语言产出剧本、口播、字幕与画面提示词；锁定某个语言可以用中文梗概做英文片。',
   'portrait_9_16': '竖屏 9:16',
   'landscape_16_9': '横屏 16:9',
   'default_duration': '默认时长',
