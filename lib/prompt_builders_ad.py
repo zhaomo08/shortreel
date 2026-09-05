@@ -11,6 +11,7 @@
 - 字段说明给写作指引而非"必须/禁止"清单。
 """
 
+from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
 from lib.prompt_builders_script import (
     _ACTION_WRITING_GUIDE,
     _AMBIANCE_AUDIO_WRITING_GUIDE,
@@ -186,7 +187,8 @@ def build_ad_prompt(
     supported_durations: list[int] | None,
     episode: int = 1,
     aspect_ratio: str = "9:16",
-    target_language: str = "中文",
+    target_language: str = OUTPUT_LANGUAGE_NAME,
+    source_language: str = OUTPUT_LANGUAGE_CODE,
     speech_rate_override: float | None = None,
 ) -> str:
     """构建广告/短片剧本生成 prompt。
@@ -200,11 +202,10 @@ def build_ad_prompt(
 
     duration_constraint = _shot_duration_constraint(generation_mode, supported_durations)
     # 口播字数→时长折算从 lib.speech_rate 单一真相源取（与 drama script_plan 下界、字幕派生同口径）：
-    # 项目级覆盖优先，否则按语言默认。语速表按语言代码（zh / en / vi）登记；target_language 是
-    # 自由文本（默认「中文」），未登记值回退默认语速（zh 口径），量词（字 / 词）由
-    # reading_unit_noun 同源派生。
-    speech_rate = speech_rate_units_per_second(target_language, speech_rate_override)
-    unit_label = reading_unit_noun(target_language)
+    # 项目级覆盖优先，否则按语言默认。查表走 source_language 而非 target_language：后者是写进
+    # 提示词的语言名（"English"），拿它查 zh / en / vi 的语速表会查不中、静默回退成中文语速。
+    speech_rate = speech_rate_units_per_second(source_language, speech_rate_override)
+    unit_label = reading_unit_noun(source_language)
     voiceover_rate_note = f"口播长度按约 {speech_rate:g} {unit_label}/秒折算"
     character_names = asset_reference_names("character", characters)
     scene_names = asset_reference_names("scene", scenes)
@@ -358,7 +359,7 @@ def build_ad_reference_prompt(
     target_duration: int,
     episode: int = 1,
     aspect_ratio: str = "9:16",
-    target_language: str = "中文",
+    target_language: str = OUTPUT_LANGUAGE_NAME,
 ) -> str:
     """广告/短片的参考生视频单阶段生成 prompt；直接输出含引用语法正文的扁平 unit。"""
     if not is_int(target_duration, minimum=1):

@@ -13,6 +13,7 @@ from typing import Literal
 from lib.artifact_manifest import ArtifactBasis
 from lib.episode_ledger import episode_outline_context
 from lib.episode_target_duration import project_episode_target_duration
+from lib.output_language import OUTPUT_LANGUAGE_CODE
 from lib.speech_rate import project_speech_rate_override, speech_rate_units_per_second
 from lib.text_metrics import reading_unit_noun
 from lib.text_utils import normalize_newlines
@@ -20,7 +21,7 @@ from lib.text_utils import normalize_newlines
 _STRUCTURED_CONTENT_MODES = frozenset({"narration", "drama"})
 _GENERATION_MODES = frozenset({"storyboard", "reference_video"})
 _SOURCE_KINDS = frozenset({"novel", "screenplay"})
-_DEFAULT_SOURCE_LANGUAGE = "中文"
+_DEFAULT_SOURCE_LANGUAGE = OUTPUT_LANGUAGE_CODE
 _AD_OVERVIEW_FIELDS = ("synopsis", "genre", "theme")
 
 ScriptPlanPromptVariant = Literal["drama", "narration", "reference_video"]

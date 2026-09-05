@@ -68,6 +68,7 @@ from lib.episode_target_duration import (
 )
 from lib.formal_write import FormalWriteReceipt, formal_write_transaction, project_metadata_lock
 from lib.json_io import atomic_write_bytes, atomic_write_json, load_json, load_json_or_none
+from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
 from lib.path_safety import PathTraversalError, safe_join
 from lib.profile_manifest import (
     VALID_CONTENT_MODES,
@@ -3791,12 +3792,8 @@ class ProjectManager:
         # 作者写下的创作方案前言优先照用，缺失才退回从正文归纳（novel 行为不变）。
         project_data = self.load_project(project_name)
         source_kind = resolve_source_kind(project_data)
-        # source_language 来自 project.json，可能是非字符串脏数据；非字符串或空串回退默认语言
-        raw_source_language = project_data.get("source_language")
-        target_language = (
-            raw_source_language if isinstance(raw_source_language, str) and raw_source_language.strip() else "中文"
-        )
-        prompt = build_overview_prompt(source_content, source_kind=source_kind, target_language=target_language)
+        # 输出语言固定，不从源文推断：梗概可以是中文，成片一律英文。
+        prompt = build_overview_prompt(source_content, source_kind=source_kind, target_language=OUTPUT_LANGUAGE_NAME)
 
         result = await generator.generate(
             TextGenerationRequest(
@@ -3815,7 +3812,8 @@ class ProjectManager:
         # 保存到 project.json（RMW 在单一 _project_lock 内完成，避免并发覆盖其它字段）
         def _mutate(project: dict) -> None:
             project["overview"] = overview_dict
-            project["source_language"] = overview_dict["language"]
+            # 存语言码而非 LLM 识别结果：语速与阅读单位按它取，成片恒为英文。
+            project["source_language"] = OUTPUT_LANGUAGE_CODE
 
         self.update_project(project_name, _mutate)
 

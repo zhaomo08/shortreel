@@ -3,6 +3,7 @@
 import pytest
 
 from lib import prompt_builders_ad as ad_prompts
+from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
 from lib.prompt_builders_ad import _shot_duration_constraint, build_ad_prompt, nearest_ad_tier
 from lib.speech_rate import speech_rate_units_per_second
 
@@ -76,19 +77,28 @@ class TestProductsInjection:
 
     def test_voiceover_rate_injected_from_single_source(self):
         """口播字数→时长折算语速由 lib.speech_rate 注入，不写死数字；带货与通用短片两分支同源。"""
-        # 默认 target_language「中文」不在语言代码表内 → 回退默认语速（zh 口径，量词「字」）
-        default_rate = speech_rate_units_per_second(None)
+        # 默认成片语言为英文 → 语速取 en 档、量词「词」
+        en_rate = speech_rate_units_per_second(OUTPUT_LANGUAGE_CODE)
         for prompt in (_build(), _build(products={})):
-            assert f"约 {default_rate:g} 字/秒" in prompt
-        # 语速与量词随 target_language 切换（en 计词），证明是注入而非写死
-        en_rate = speech_rate_units_per_second("en")
-        assert en_rate != default_rate
-        assert f"约 {en_rate:g} 词/秒" in _build(target_language="en")
+            assert f"约 {en_rate:g} 词/秒" in prompt
+        # 语速与量词随 source_language 切换（zh 计字），证明是注入而非写死
+        zh_rate = speech_rate_units_per_second("zh")
+        assert zh_rate != en_rate
+        assert f"约 {zh_rate:g} 字/秒" in _build(source_language="zh")
+
+    def test_speech_rate_reads_the_language_code_not_the_prompt_language_name(self):
+        """target_language 是写进提示词的语言名，查语速表要用语言码。
+
+        两者混用时 speech_rate_units_per_second("English") 查不中 en 档、静默回退中文语速，
+        提示词里的口播折算会偏出一倍，而且不报错。"""
+        prompt = _build(target_language=OUTPUT_LANGUAGE_NAME, source_language=OUTPUT_LANGUAGE_CODE)
+        assert f"必须使用 {OUTPUT_LANGUAGE_NAME}" in prompt
+        assert f"约 {speech_rate_units_per_second(OUTPUT_LANGUAGE_CODE):g} 词/秒" in prompt
 
     def test_project_override_wins_over_language_default(self):
         """项目级语速覆盖生效时注入覆盖值；量词仍随语言。"""
-        assert "约 7.5 字/秒" in _build(speech_rate_override=7.5)
-        assert "约 7.5 词/秒" in _build(target_language="en", speech_rate_override=7.5)
+        assert "约 7.5 词/秒" in _build(speech_rate_override=7.5)
+        assert "约 7.5 字/秒" in _build(source_language="zh", speech_rate_override=7.5)
 
 
 class TestGenericFallback:

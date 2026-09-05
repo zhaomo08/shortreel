@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 
 from lib.artifact_manifest import ArtifactKey, ArtifactManifestEntry, ProjectArtifactManifestAdapter
+from lib.output_language import OUTPUT_LANGUAGE_CODE, OUTPUT_LANGUAGE_NAME
 from lib.project_manager import EmptySourceError, ProjectManager
 
 
@@ -752,8 +753,9 @@ class TestProjectManager:
         assert overview["genre"] == "悬疑"
         assert "generated_at" in overview
         assert overview["language"] == "zh"
-        # 顶层 source_language 必须由 generate_overview 写入,与 overview.language 同源
-        assert pm.load_project("demo")["source_language"] == "zh"
+        # overview.language 是模型对源文的识别结果，只作存档；顶层 source_language 是
+        # 后续生成的取语言处，恒为成片语言，不跟着源文走。
+        assert pm.load_project("demo")["source_language"] == OUTPUT_LANGUAGE_CODE
 
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
@@ -767,21 +769,25 @@ class TestProjectManager:
         with pytest.raises(EmptySourceError, match=r"source 目录为空"):
             await pm_empty.generate_overview("demo")
 
-    @pytest.mark.parametrize("lang", ["zh", "en", "vi"])
+    @pytest.mark.parametrize("detected", ["zh", "en", "vi"])
     @pytest.mark.asyncio
-    async def test_generate_overview_source_language_synced(self, tmp_path, monkeypatch, lang):
+    async def test_generate_overview_pins_output_language(self, tmp_path, monkeypatch, detected):
+        """成片语言固定为英文：模型识别出的源文语言只留在 overview 存档里，不进 source_language。
+
+        source_language 是语速、阅读单位与后续所有生成的取语言处，跟着源文走就会把
+        中文梗概的项目拖回中文成片。"""
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
         _write(pm.get_project_path("demo") / "source" / "1.txt", "source body")
 
         async def _fake_create_backend(*args, **kwargs):
-            return _FakeTextBackend(language=lang), "gemini-aistudio"
+            return _FakeTextBackend(language=detected), "gemini-aistudio"
 
         monkeypatch.setattr("lib.text_generator.create_text_backend_for_task", _fake_create_backend)
         overview = await pm.generate_overview("demo")
-        assert overview["language"] == lang
-        assert pm.load_project("demo")["source_language"] == lang
+        assert overview["language"] == detected
+        assert pm.load_project("demo")["source_language"] == OUTPUT_LANGUAGE_CODE
 
     @pytest.mark.asyncio
     async def test_generate_overview_invalid_language_raises(self, tmp_path, monkeypatch):
@@ -824,21 +830,20 @@ class TestProjectManager:
         source_content = pm._read_source_files("demo")
         expected_kind = source_kind or "novel"
         assert backend.last_request is not None
-        assert backend.last_request.prompt == build_overview_prompt(source_content, source_kind=expected_kind)
+        assert backend.last_request.prompt == build_overview_prompt(
+            source_content, source_kind=expected_kind, target_language=OUTPUT_LANGUAGE_NAME
+        )
 
-    @pytest.mark.parametrize("dirty_source_language", [123, ["zh"], {}, "", "   "])
+    @pytest.mark.parametrize("stale_source_language", [123, ["zh"], {}, "", "   ", "zh"])
     @pytest.mark.asyncio
-    async def test_generate_overview_dirty_source_language_falls_back_to_default(
-        self, tmp_path, monkeypatch, dirty_source_language
-    ):
-        """project.json 的 source_language 是非字符串或空白脏数据时，target_language 回退默认值，
-        不把脏对象直接传入 prompt 文本。"""
+    async def test_generate_overview_ignores_stored_source_language(self, tmp_path, monkeypatch, stale_source_language):
+        """概述提示词的目标语言不再读 project.json：存量项目里的旧值（含脏数据）都不影响输出语言。"""
         from lib.prompt_builders_script import build_overview_prompt
 
         pm = ProjectManager(tmp_path / "projects")
         pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo")
-        pm.update_project("demo", lambda project: project.__setitem__("source_language", dirty_source_language))
+        pm.update_project("demo", lambda project: project.__setitem__("source_language", stale_source_language))
         _write(pm.get_project_path("demo") / "source" / "1.txt", "源文本内容")
 
         backend = _FakeTextBackend()
@@ -852,7 +857,7 @@ class TestProjectManager:
         source_content = pm._read_source_files("demo")
         assert backend.last_request is not None
         assert backend.last_request.prompt == build_overview_prompt(
-            source_content, source_kind="novel", target_language="中文"
+            source_content, source_kind="novel", target_language=OUTPUT_LANGUAGE_NAME
         )
 
     @pytest.mark.asyncio
@@ -880,7 +885,9 @@ class TestProjectManager:
 
         source_content = pm._read_source_files("demo")
         assert backend.last_request is not None
-        assert backend.last_request.prompt == build_overview_prompt(source_content, source_kind="novel")
+        assert backend.last_request.prompt == build_overview_prompt(
+            source_content, source_kind="novel", target_language=OUTPUT_LANGUAGE_NAME
+        )
 
 
 class TestFromCwd:

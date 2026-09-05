@@ -2102,7 +2102,7 @@ class TestAdScriptGeneration:
         generator._fetch_video_capabilities = _fixed_caps_468
         prompt = await generator.build_prompt(1)
 
-        assert "口播长度按约 7.5 字/秒折算" in prompt
+        assert "口播长度按约 7.5 词/秒折算" in prompt
 
     async def test_build_prompt_tolerates_null_project_fields(self, tmp_path):
         """project.json 手工编辑后字段显式为 null：prompt 构建按空值归一化，不抛 AttributeError。"""

@@ -64,6 +64,7 @@ from lib.episode_paths import (
     episode_script_filename,
 )
 from lib.formal_write import FormalWriteReceipt
+from lib.output_language import OUTPUT_LANGUAGE_NAME
 from lib.project_manager import ProjectManager, ScriptWriteConflict
 from lib.prompt_builders_ad import build_ad_prompt, build_ad_reference_prompt
 from lib.prompt_builders_reference import build_reference_video_prompt
@@ -593,7 +594,7 @@ class ScriptGenerator:
                 max_refs=self._resolve_max_refs(caps),
                 aspect_ratio=self._resolve_aspect_ratio(),
                 episode=episode,
-                target_language=self.project_json.get("source_language") or "中文",
+                target_language=OUTPUT_LANGUAGE_NAME,
             )
             # prompt_authoring 只产引用语法正文：unit_id / 时长机械沿用 script_plan，参考图执行期从正文派生，
             # 不进 LLM 输出——没让模型写的字段就没有漂移可校验，故此处无需按能力收窄的动态 schema。
@@ -627,7 +628,7 @@ class ScriptGenerator:
                 aspect_ratio=self._resolve_aspect_ratio(),
                 episode=episode,
                 # 输出语言与 script_plan 同取项目 source_language，避免非中文项目 script_plan 透传内容与 prompt_authoring 视觉割裂（同 drama）
-                target_language=self.project_json.get("source_language") or "中文",
+                target_language=OUTPUT_LANGUAGE_NAME,
             )
             # prompt_authoring 只产视觉层（image_prompt/video_prompt），按 segment_id 对齐 script_plan 合并；
             # novel_text/时长/break 由 script_plan 透传，不进 LLM 输出，从工程上根除扩写漂移。
@@ -804,7 +805,7 @@ class ScriptGenerator:
             episode=episode,
             aspect_ratio=self._resolve_aspect_ratio(),
             # 输出语言与 script_plan（normalize）同取项目 source_language，避免非中文项目 script_plan 内容与 prompt_authoring 视觉割裂
-            target_language=self.project_json.get("source_language") or "中文",
+            target_language=OUTPUT_LANGUAGE_NAME,
             characters=characters,
             scenes=scenes,
             props=props,
@@ -1102,7 +1103,7 @@ class ScriptGenerator:
                 max_refs=self._resolve_max_refs(caps),
                 aspect_ratio=self._resolve_aspect_ratio(),
                 episode=episode,
-                target_language=self.project_json.get("source_language") or "中文",
+                target_language=OUTPUT_LANGUAGE_NAME,
             )
             return append_user_instructions(prompt, instructions)
         # narration 两段式：script_plan 透传内容层（novel_text 等），prompt_authoring 仅产视觉层。
@@ -1127,7 +1128,7 @@ class ScriptGenerator:
             script_plan_segments=narration_entries,
             aspect_ratio=self._resolve_aspect_ratio(),
             episode=episode,
-            target_language=self.project_json.get("source_language") or "中文",
+            target_language=OUTPUT_LANGUAGE_NAME,
         )
         return append_user_instructions(prompt, instructions)
 
