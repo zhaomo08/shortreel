@@ -282,6 +282,12 @@ def _dashscope_video_pricing(model_id: str, rates: dict[str, float]) -> PerSecon
 
 
 # DashScope 语音合成费率（元/万字符）。
+# OpenAI TTS 按字符计费（美元/百万字符）；PerCharacter 的费率单位是「每万字符」，
+# 官方定价按百万字符标价，故此处折算后登记，保持与 DashScope 同一计价类型。
+def _openai_audio_pricing(model_id: str, per_1m_chars_usd: float) -> PerCharacter:
+    return PerCharacter(rates={model_id: per_1m_chars_usd / 100}, default_model=model_id, currency="USD")
+
+
 def _dashscope_audio_pricing(model_id: str, per_10k_chars: float) -> PerCharacter:
     return PerCharacter(rates={model_id: per_10k_chars}, default_model=model_id, currency="CNY")
 
@@ -824,9 +830,9 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
     ),
     "openai": ProviderMeta(
         display_name="OpenAI",
-        description="OpenAI 官方平台，支持 GPT-5.5 / GPT-5.4 文本、GPT Image 2 图片和 Sora 视频生成。",
+        description="OpenAI 官方平台，支持 GPT-5.5 / GPT-5.4 文本、GPT Image 2 图片、Sora 视频与 TTS 语音合成。",
         required_keys=["api_key"],
-        optional_keys=["base_url", "image_max_workers", "video_max_workers"],
+        optional_keys=["base_url", "image_max_workers", "video_max_workers", "audio_max_workers"],
         secret_keys=["api_key"],
         models={
             # --- text ---
@@ -902,6 +908,29 @@ PROVIDER_REGISTRY: dict[str, ProviderMeta] = {
                 supported_durations=[4, 8, 12],
                 resolutions=["720p", "1080p"],
                 pricing=_sora_video_pricing("sora-2-pro", {"720p": 0.30, "1024p": 0.50, "1080p": 0.70}),
+            ),
+            # --- audio ---
+            # /v1/audio/speech 同步合成，后端见 lib/audio_backends/openai.py（音色目录与
+            # legacy 模型的音色收窄都在那里）。gpt-4o-mini-tts 支持全部音色，tts-1 系列不支持
+            # ballad / verse / marin / cedar 四个。
+            "gpt-4o-mini-tts": ModelInfo(
+                display_name="GPT-4o mini TTS",
+                media_type="audio",
+                capabilities=["text_to_speech"],
+                default=True,
+                pricing=_openai_audio_pricing("gpt-4o-mini-tts", 12.0),
+            ),
+            "tts-1": ModelInfo(
+                display_name="TTS-1",
+                media_type="audio",
+                capabilities=["text_to_speech"],
+                pricing=_openai_audio_pricing("tts-1", 15.0),
+            ),
+            "tts-1-hd": ModelInfo(
+                display_name="TTS-1 HD",
+                media_type="audio",
+                capabilities=["text_to_speech"],
+                pricing=_openai_audio_pricing("tts-1-hd", 30.0),
             ),
         },
     ),
