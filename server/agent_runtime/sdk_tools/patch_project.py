@@ -43,6 +43,26 @@ from server.tool_runtime import (
 # narration_voice / narration_speed: 项目级旁白音色与语速覆盖项,null 时回退全局配置。
 # episode_target_duration: 单集目标时长(秒)软偏好,注入三条脚本规划提示词决定拆多少个单元;
 # 区间校验取 lib.episode_target_duration 的同一把尺,ad 项目拒写。
+def _without_narration_entries(args: dict[str, Any]) -> dict[str, Any]:
+    """把模型混进 ``entries`` 的说明文本剔掉。
+
+    ``entries`` 的键是资产名、值是该资产的字段对象。模型写入时习惯附一句说明，有时会把
+    它当成同级条目塞进来——实际遇到的是 ``{"手机": {...}, "reason": "Add missing props"}``。
+    整批因此被拒，三个道具一个都没写进去，模型收到的却是「'reason' 的内容必须是对象」。
+
+    判据取值的形状而非键名：资产条目的值恒是对象，说明是字符串。按名字剥离会误伤真叫
+    ``reason`` 的资产——资产名是用户自由命名的，而值不是对象的条目本来也不可能落盘。
+    """
+    entries = args.get("entries")
+    if not isinstance(entries, dict):
+        return args
+    kept = {name: value for name, value in entries.items() if isinstance(value, dict)}
+    if len(kept) == len(entries) or not kept:
+        # 一个没剔，或者全是非对象——后者不是说明混入，交给下游报错，别把空 entries 递下去。
+        return args
+    return {**args, "entries": kept}
+
+
 def patch_project_tool(ctx: ToolContext):
     @tool(
         "patch_project",
@@ -85,6 +105,7 @@ def patch_project_tool(ctx: ToolContext):
         },
     )
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
+        args = _without_narration_entries(args)
         try:
             request = PatchProjectRequest.model_validate(args)
         except ValueError as exc:

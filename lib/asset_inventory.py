@@ -135,9 +135,15 @@ def _prepare_entries(entries: object) -> dict[str, dict[str, dict[str, Any]]]:
     if not isinstance(entries, Mapping):
         raise AssetInventoryInvalidRequest("entries must be an object")
     allowed_buckets = {spec.bucket_key: spec for kind, spec in ASSET_SPECS.items() if kind != "product"}
-    unknown = sorted(str(key) for key in entries if key not in allowed_buckets)
-    if unknown:
-        raise AssetInventoryInvalidRequest(f"entries contains unsupported buckets: {unknown}")
+    # 桶名是闭集，非桶名的键只可能是模型附带的说明（实际遇到的是 "reason"）。整批因此
+    # 被拒时一个资产都写不进去，而说明本身不承载业务语义——按名字剥掉是安全的，这里的
+    # 键空间不含用户自由命名的部分（资产名在下一层）。
+    kept = {key: value for key, value in entries.items() if key in allowed_buckets}
+    if entries and not kept:
+        # 传了东西却一个已知桶都没有，是拼错桶名而不是附说明；静默返回空会让 Agent
+        # 以为写入成功了。空 entries 本身合法（这次没有资产要写），照旧放行。
+        raise AssetInventoryInvalidRequest(f"entries contains no known bucket: {sorted(allowed_buckets)}")
+    entries = kept
 
     prepared: dict[str, dict[str, dict[str, Any]]] = {}
     for bucket_name, raw_entries in entries.items():

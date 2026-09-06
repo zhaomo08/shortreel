@@ -162,24 +162,32 @@ MIGRATION_BLOCKED_TOOL_IDS: frozenset[str] = frozenset(
 )
 
 
-def _drop_noarg_placeholder(sdk_tool: Any) -> Any:
-    """Wrap one tool so a no-argument placeholder key never reaches its schema.
+#: 模型习惯附在写入调用上的说明性键。工具的请求模型都声明了 ``extra="forbid"``，
+#: 这些键会让整个调用被拒——写入不发生，模型收到的却是「参数非法」。它们不承载业务
+#: 语义，剥掉即可；真正的未知键仍会照常报错。
+_ADVISORY_KEYS = frozenset({"_", "reason", "rationale", "explanation", "note", "comment"})
 
-    Some models emit ``{"_": true}`` instead of ``{}`` when a tool takes no
-    arguments. Request models declared ``extra="forbid"`` reject the whole call,
-    so the tool never runs and the model is told its arguments were invalid.
-    Stripping happens at registration for every tool rather than per handler:
-    the placeholder can arrive at any tool, and no request model carries a
-    meaningful ``_`` field.
+
+def _drop_advisory_keys(sdk_tool: Any) -> Any:
+    """Wrap one tool so keys the model adds for its own narration never reach the schema.
+
+    Two habits produce them. A tool that takes no arguments gets a placeholder —
+    ``{"_": true}``, ``{"_": {}}`` — instead of ``{}``; the value's type varies by
+    model and by call, so the key alone identifies it. A tool that writes gets a
+    ``reason`` alongside the payload, explaining the write to a reader that does
+    not exist. Either one is rejected wholesale by ``extra="forbid"``, and the
+    model is told its arguments were invalid rather than that one word was
+    unwelcome.
+
+    Stripping happens once at registration rather than per handler: the keys can
+    arrive at any tool, and no request model carries a field by these names.
     """
 
     inner = sdk_tool.handler
 
     async def _stripped(args: Any) -> dict[str, Any]:
-        # ponytail: only the bare `_` placeholder is dropped; other unknown keys
-        # still surface as validation errors, which is what should happen.
-        if isinstance(args, dict) and isinstance(args.get("_"), bool):
-            args = {key: value for key, value in args.items() if key != "_"}
+        if isinstance(args, dict) and not _ADVISORY_KEYS.isdisjoint(args):
+            args = {key: value for key, value in args.items() if key not in _ADVISORY_KEYS}
         return await inner(args)
 
     return replace(sdk_tool, handler=_stripped)
@@ -257,7 +265,7 @@ def build_arcreel_mcp_server(*, project_name: str, projects_root: Path, user_id:
         name="arcreel",
         version="1.0.0",
         tools=[
-            _drop_noarg_placeholder(
+            _drop_advisory_keys(
                 _refuse_while_migration_failed(sdk_tool, ctx)
                 if sdk_tool.name in MIGRATION_BLOCKED_TOOL_IDS
                 else sdk_tool
