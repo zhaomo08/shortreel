@@ -1068,4 +1068,67 @@ describe("useProjectEventsSSE", () => {
       });
     });
   });
+
+  describe("记账结算事件", () => {
+    function usageRecordChange(overrides: Partial<ProjectChange> = {}): ProjectChange {
+      return {
+        entity_type: "usage_record",
+        action: "recorded",
+        entity_id: "1",
+        label: "1",
+        focus: null,
+        important: false,
+        status: "success",
+        ...overrides,
+      };
+    }
+
+    function emitUsage(
+      stream: ReturnType<typeof mockProjectEventStream>,
+      changes: ProjectChange[],
+    ) {
+      act(() => {
+        stream.options?.onChanges?.(
+          {
+            project_name: "demo",
+            batch_id: "batch-usage",
+            fingerprint: "fp-usage",
+            generated_at: "2026-03-01T00:00:00Z",
+            source: "worker",
+            changes,
+          },
+        );
+      });
+    }
+
+    it("结算事件不写实体版本表（entity_id 是一次性调用 id，无人消费）", () => {
+      const stream = mockProjectEventStream();
+
+      renderHarness("/");
+      emitUsage(stream, [usageRecordChange(), usageRecordChange({ entity_id: "2", status: "failed" })]);
+
+      expect(Object.keys(useAppStore.getState().entityRevisions)).toHaveLength(0);
+    });
+
+    it("仅含结算事件的批次也刷新成本（无任务的调用只有这一个费用变动信号）", () => {
+      const stream = mockProjectEventStream();
+      const debouncedFetchSpy = vi.spyOn(useCostStore.getState(), "debouncedFetch");
+
+      renderHarness("/");
+      emitUsage(stream, [usageRecordChange({ status: "failed" })]);
+
+      expect(debouncedFetchSpy).toHaveBeenCalledWith("demo");
+    });
+
+    it("结算事件不弹通知、不触发聚焦跳转（important=false / focus=null）", () => {
+      const stream = mockProjectEventStream();
+
+      renderHarness("/");
+      emitUsage(stream, [usageRecordChange()]);
+
+      expect(useAppStore.getState().toast).toBeNull();
+      expect(useAppStore.getState().workspaceNotifications).toHaveLength(0);
+      expect(screen.getByTestId("location")).toHaveTextContent("/");
+    });
+  });
 });

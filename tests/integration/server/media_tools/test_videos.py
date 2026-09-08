@@ -1920,6 +1920,52 @@ async def test_generate_videos_episode_scope_storyboard_batch_blocks_on_mixed_sp
     assert codes["E1S02"] == "generation_batch_admission_withheld"
 
 
+async def test_generate_videos_episode_scope_storyboard_batch_blocks_when_a_video_prompt_is_pending(
+    fake_ctx: ToolContext, monkeypatch
+) -> None:
+    """机械转换出的条目 video_prompt 为 None：整批受阻、零任务入队，回执点名待生成的条目。"""
+    from server.media_tools import videos as mod
+
+    project_dir = fake_ctx.pm.get_project_path("demo")
+    for segment_id in ("E1S01", "E1S02"):
+        (project_dir / "storyboards" / f"scene_{segment_id}.png").write_bytes(b"png")
+    fake_ctx.pm.script_payload["segments"] = [
+        {
+            "segment_id": "E1S01",
+            "novel_text": "风吹过旷野。",
+            "image_prompt": None,
+            "video_prompt": None,
+            "generated_assets": {"storyboard_image": "storyboards/scene_E1S01.png"},
+        },
+        {
+            "segment_id": "E1S02",
+            "novel_text": "他停下脚步。",
+            "video_prompt": "第二镜",
+            "generated_assets": {"storyboard_image": "storyboards/scene_E1S02.png"},
+        },
+    ]
+
+    enqueued: list[str] = []
+
+    async def fake_batch(*, project_name, specs, on_success=None, on_failure=None, **_batch_kwargs):
+        enqueued.extend(spec.resource_id for spec in specs)
+        return [], []
+
+    monkeypatch.setattr(mod, "batch_enqueue_and_wait", fake_batch)
+    monkeypatch.setattr(
+        "server.services.video_batch_admission.get_active_tasks_for_resources", AsyncMock(return_value=[])
+    )
+
+    out = await call(_episode_scope(fake_ctx), {"script": "episode_1.json"})
+
+    assert enqueued == []
+    assert out["is_error"] is True
+    result = read_generation_result(out)
+    codes = {item.unit_id: item.problem.code for item in result.items if item.problem is not None}
+    assert codes["E1S01"] == "generation_unit_request_invalid"
+    assert codes["E1S02"] == "generation_batch_admission_withheld"
+
+
 @pytest.mark.parametrize("case", SPEECH_CONTRACT_CASES, ids=lambda case: case.route_id)
 async def test_six_route_agent_single_video_generation_returns_structured_admission_without_enqueuing(
     fake_ctx: ToolContext,
@@ -2265,18 +2311,15 @@ async def test_generate_videos_scene_scope_generated_assets_non_dict_readable_re
 
 
 def _admitted_video_yaml(item: dict, **kwargs) -> dict:
-    """准入渲染出口产出的 YAML 段。
+    """准入渲染出口产出的 YAML 文档。
 
-    该出口与执行路径共用 ``render_storyboard_video_prompt``，尾部统一追加的反向约束不是
-    YAML，解析前剥离。
+    该出口与执行路径共用 ``render_storyboard_video_prompt``，反向约束是其中的 ``Avoid`` 键。
     """
     import yaml
 
-    from lib.prompt_builders import append_video_negative_tail
     from server.services.video_batch_admission import storyboard_video_prompt
 
-    rendered = storyboard_video_prompt(item, **kwargs)
-    return yaml.safe_load(rendered.removesuffix(append_video_negative_tail("")).rstrip())
+    return yaml.safe_load(storyboard_video_prompt(item, **kwargs))
 
 
 def test_storyboard_video_prompt_drama_sources_dialogue_from_utterances() -> None:

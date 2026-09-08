@@ -65,27 +65,27 @@ export interface ProbeResult {
 }
 
 export type DiagnosisCode =
-  | "missing_anthropic_suffix"
   | "openai_compat_only"
   | "auth_failed"
   | "model_not_found"
+  | "model_required"
   | "rate_limited"
   | "network"
+  | "timeout"
   | "unknown";
 
 export interface SuggestionAction {
-  kind: "replace_base_url" | "check_api_key" | "run_discovery" | "see_docs";
+  kind: "check_api_key" | "run_discovery" | "see_docs";
   suggested_value: string | null;
 }
 
 export interface TestConnectionResponse {
-  overall: "ok" | "warn" | "fail";
+  overall: "ok" | "fail";
   messages_probe: ProbeResult;
-  discovery_probe: ProbeResult | null;
   diagnosis: DiagnosisCode | null;
   suggestion: SuggestionAction | null;
-  derived_messages_root: string;
-  derived_discovery_root: string;
+  /** 本次实际请求的完整地址；与输入框下方的预览同值。 */
+  messages_url: string;
 }
 
 export interface TestConnectionRequest {

@@ -21,6 +21,11 @@ MESSAGES = {
     "script_item_not_found": "Không có phân cảnh '{id}' trong kịch bản này",
     "prompt_preview_missing": "Phân cảnh này chưa có lời nhắc",
     "prompt_preview_invalid": "Không thể kết xuất lời nhắc, hãy kiểm tra định dạng",
+    "prompt_preview_pending": "Lời nhắc của phân cảnh này đang chờ tạo: để Agent viết, hoặc tự điền trong trình soạn",
+    "script_prompt_pending": "Lời nhắc của phân cảnh '{segment_id}' đang chờ tạo; hãy để Agent viết hoặc tự điền trước khi tạo",
+    "script_conversion_refused": "Tập này chưa thể chuyển thành kịch bản chính thức: hãy xác nhận nội dung và xử lý bản nháp chờ sửa trước",
+    "script_conversion_conflict": "Kịch bản chính thức đã bị bên khác sửa trong lúc chuyển đổi, lần này không ghi đè; hãy tải lại rồi thử lại",
+    "script_conversion_invalid_entries": "Chỉ phân cảnh đã lỗi thời mới có thể áp dụng nội dung mới; hãy kiểm tra các phân cảnh đã chọn",
     "scene_not_found": "Cảnh '{id}' không tồn tại",
     "segment_not_found": "Đoạn '{id}' không tồn tại",
     "script_missing": "Kịch bản không tồn tại",
@@ -233,6 +238,11 @@ MESSAGES = {
     "model_not_found": "Không tìm thấy mô hình",
     "trial_run_already_running": "Đã có một lần chạy thử đang diễn ra, hãy đợi nó kết thúc hoặc hủy trước",
     "trial_run_not_found": "Không tìm thấy bản ghi chạy thử hoặc bản ghi đã hết hạn",
+    "usage_record_not_found": "Không tìm thấy bản ghi sử dụng",
+    "usage_cursor_invalid": "Con trỏ phân trang không hợp lệ, hãy quay lại trang đầu và duyệt lại",
+    "usage_range_too_wide": "Khoảng thời gian thống kê quá rộng, hãy thu hẹp mốc bắt đầu và kết thúc rồi thử lại",
+    "usage_time_out_of_range": "Mốc bắt đầu hoặc kết thúc nằm ngoài phạm vi thời gian biểu diễn được, hãy kiểm tra lại rồi thử lại",
+    "usage_timezone_invalid": "Tên múi giờ IANA không hợp lệ, hãy kiểm tra tham số tz",
     "trial_run_artifact_not_found": "Lần chạy thử này không có sản phẩm để phát",
     "at_least_one_field_required": "Phải cung cấp ít nhất một trường để cập nhật",
     "discovery_failed": "Phát hiện mô hình thất bại: {err_msg}",
@@ -369,6 +379,12 @@ MESSAGES = {
         "không có hiệu lực, lời thoại chỉ dùng làm gợi ý cho prompt; video hoàn chỉnh có tiếng hay không "
         "tùy thuộc vào mô hình đã chọn"
     ),
+    # Mô tả khung hình phân cảnh nhắc tới @[tên] chưa gắn với ảnh tham chiếu
+    "storyboard_warn_mention_unbound": (
+        "Mô tả khung hình của {unit_id} nhắc tới @[{name}], nhưng tên này chưa được đăng ký là tài sản hoặc "
+        "không nằm trong các trường tham chiếu của phân cảnh đó: sẽ không được đánh số thành ảnh N mà gửi "
+        "nguyên tên"
+    ),
     # Episode meta
     "episode_not_found": "Không tìm thấy tập {episode} hoặc tập chưa có tệp kịch bản",
     "episode_title_empty": "Tiêu đề tập không được để trống",
@@ -420,6 +436,7 @@ MESSAGES = {
     # Agent credentials
     "agent_preset_unknown": "Nhà cung cấp đặt sẵn không xác định: {preset_id}",
     "agent_base_url_required_custom": "Cấu hình tuỳ chỉnh yêu cầu base_url",
+    "agent_base_url_invalid": "Địa chỉ chứng thực Agent không hỗ trợ tham số truy vấn, fragment hay tên người dùng/mật khẩu; hãy dùng dạng https://host/path",
     "agent_no_fields_to_update": "Không có trường nào để cập nhật",
     "agent_credential_not_found": "Không tìm thấy xác thực",
     "agent_cannot_delete_active": "Không thể xóa xác thực đang hoạt động; hãy kích hoạt xác thực khác trước",

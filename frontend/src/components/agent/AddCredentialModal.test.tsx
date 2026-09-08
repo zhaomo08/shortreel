@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { API } from "@/api";
@@ -119,6 +119,75 @@ describe("AddCredentialModal", () => {
         api_key: "sk-test",
         base_url: "https://api.deepseek.com/anthropic",
       }),
+    );
+  });
+
+  it("preset chip prefill is not an override: discovery uses the preset discovery_url", async () => {
+    const discover = vi.spyOn(API, "discoverAnthropicModels").mockResolvedValue({ models: [] });
+    render(
+      <AddCredentialModal
+        open
+        presets={presets}
+        customSentinelId="__custom__"
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/i }));
+    fireEvent.change(screen.getByLabelText(/anthropic[_ ]?api[_ ]?key|Anthropic API 密钥/i), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /获取模型列表|discover/i }));
+    await waitFor(() =>
+      expect(discover).toHaveBeenCalledWith({ base_url: "https://api.deepseek.com", api_key: "sk-test" }),
+    );
+  });
+
+  it("a preset messages_url with only a trailing slash is still the preset default", async () => {
+    const discover = vi.spyOn(API, "discoverAnthropicModels").mockResolvedValue({ models: [] });
+    render(
+      <AddCredentialModal
+        open
+        presets={presets}
+        customSentinelId="__custom__"
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/i }));
+    fireEvent.change(screen.getByLabelText(/anthropic[_ ]?api[_ ]?key|Anthropic API 密钥/i), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.change(screen.getByLabelText(/base[_ ]url|代理地址/i), {
+      target: { value: "https://api.deepseek.com/anthropic/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /获取模型列表|discover/i }));
+    await waitFor(() =>
+      expect(discover).toHaveBeenCalledWith({ base_url: "https://api.deepseek.com", api_key: "sk-test" }),
+    );
+  });
+
+  it("a base_url the user edited overrides the preset discovery_url", async () => {
+    const discover = vi.spyOn(API, "discoverAnthropicModels").mockResolvedValue({ models: [] });
+    render(
+      <AddCredentialModal
+        open
+        presets={presets}
+        customSentinelId="__custom__"
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /DeepSeek/i }));
+    fireEvent.change(screen.getByLabelText(/anthropic[_ ]?api[_ ]?key|Anthropic API 密钥/i), {
+      target: { value: "sk-test" },
+    });
+    fireEvent.change(screen.getByLabelText(/base[_ ]url|代理地址/i), {
+      target: { value: "https://proxy.internal/anthropic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /获取模型列表|discover/i }));
+    await waitFor(() =>
+      expect(discover).toHaveBeenCalledWith({ base_url: "https://proxy.internal/anthropic", api_key: "sk-test" }),
     );
   });
 
@@ -414,11 +483,9 @@ describe("AddCredentialModal", () => {
     const okResult = {
       overall: "ok" as const,
       messages_probe: { success: true, status_code: 200, latency_ms: 123, error: null },
-      discovery_probe: null,
       diagnosis: null,
       suggestion: null,
-      derived_messages_root: "https://api.deepseek.com/anthropic",
-      derived_discovery_root: "",
+      messages_url: "https://api.deepseek.com/anthropic/v1/messages",
     };
 
     it("disabled until both base_url and api_key filled", () => {
@@ -464,6 +531,61 @@ describe("AddCredentialModal", () => {
       });
       // TestResultPanel headline 渲染（test_ok 文案三语 OR-match）
       await screen.findByText(/test[_ ]ok|连通正常|Kết nối/i);
+      // 结果面板只剩调用地址，没有发现端点行
+      const panel = within(screen.getByRole("status"));
+      expect(panel.getByText("https://api.deepseek.com/anthropic/v1/messages")).toBeInTheDocument();
+      expect(panel.queryByText(/发现端点|Discovery endpoint|Endpoint discovery/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("base_url 预览与拦截", () => {
+    const fillBaseUrl = (value: string) => {
+      fireEvent.change(screen.getByLabelText(/api[_ ]base[_ ]url|API 代理地址|Địa chỉ/i), {
+        target: { value },
+      });
+    };
+
+    const renderModal = () =>
+      render(
+        <AddCredentialModal
+          open
+          presets={presets}
+          customSentinelId="__custom__"
+          onSubmit={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+
+    it("预览拼出的地址与运行时调用一致，不剥版本段", () => {
+      renderModal();
+      fillBaseUrl("https://api.deepseek.com/anthropic/v1");
+      expect(
+        screen.getByText("https://api.deepseek.com/anthropic/v1/v1/messages"),
+      ).toBeInTheDocument();
+    });
+
+    it("带 query 的地址拦下测试与保存", () => {
+      const testSpy = vi.spyOn(API, "testAgentConnectionDraft");
+      const onSubmit = vi.fn();
+      render(
+        <AddCredentialModal
+          open
+          presets={presets}
+          customSentinelId="__custom__"
+          onSubmit={onSubmit}
+          onClose={vi.fn()}
+        />,
+      );
+      fillBaseUrl("https://relay.example.com/anthropic?api_key=sk-x");
+      fireEvent.change(
+        screen.getByLabelText(/anthropic[_ ]?api[_ ]?key|Anthropic API 密钥/i),
+        { target: { value: "sk-test" } },
+      );
+
+      expect(screen.getByTestId("test-connection")).toBeDisabled();
+      expect(screen.getByRole("button", { name: /common:add|添加|Add|Thêm/i })).toBeDisabled();
+      expect(testSpy).not.toHaveBeenCalled();
+      expect(onSubmit).not.toHaveBeenCalled();
     });
   });
 
@@ -486,5 +608,45 @@ describe("AddCredentialModal", () => {
     for (const chip of chips) {
       expect(chip).toBeDisabled();
     }
+  });
+});
+
+describe("AddCredentialModal 模型下拉回退", () => {
+  const arkPreset: PresetProvider[] = [
+    {
+      id: "ark-agent-plan",
+      display_name: "Volcengine Ark Agent Plan",
+      icon_key: "Volcengine",
+      messages_url: "https://ark.cn-beijing.volces.com/api/plan",
+      discovery_url: null,
+      default_model: "doubao-seed-evolving",
+      suggested_models: ["doubao-seed-evolving", "kimi-k3"],
+      docs_url: null,
+      api_key_url: "https://console.volcengine.com/ark",
+      notes: null,
+      api_key_pattern: null,
+      is_recommended: false,
+    },
+  ];
+
+  it("未发现模型时用预设的 suggested_models 作为候选", async () => {
+    render(
+      <AddCredentialModal
+        open
+        presets={arkPreset}
+        customSentinelId="__custom__"
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Volcengine Ark Agent Plan/i }));
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /toggle options|切换选项|Bật\/tắt tùy chọn/i })[0],
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "kimi-k3" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("option", { name: "doubao-seed-evolving" })).toBeInTheDocument();
   });
 });

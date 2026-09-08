@@ -18,6 +18,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,7 +39,7 @@ from lib.db.base import DEFAULT_USER_ID
 from lib.gemini_shared import RateLimiter
 from lib.ledger import Ledger
 from lib.path_safety import PathTraversalError, safe_join
-from lib.providers import CallType, require_provider_pair
+from lib.providers import CallPurpose, CallType, require_provider_pair
 from lib.resource_paths import resource_relative_path
 from lib.version_manager import PaidVersionCommit, VersionManager
 
@@ -154,6 +155,29 @@ def segment_id_for(call_type: CallType, resource_type: str, resource_id: str) ->
     return resource_id if resource_type in allowed else None
 
 
+def _input_path(project_path: Path, value: object) -> str | None:
+    """把一份输入素材的路径归一为项目内相对路径（POSIX 分隔符）。
+
+    落库的是「这次调用喂进去的是哪份素材」，读侧要拿它在项目里定位文件，故一律相对项目根；
+    项目外的路径（临时素材、绝对路径引用）保留原样。非路径值（PIL Image 等）返回 None，
+    由调用点决定是否记这一项。
+    """
+    if not isinstance(value, (str, Path)):
+        return None
+    path = Path(value)
+    try:
+        # 两边都取绝对路径再求相对：项目根或素材路径任一为相对路径（本地调试、CLI）时同样能归一。
+        return path.absolute().relative_to(project_path.absolute()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _ledger_inputs(**sections: object) -> dict[str, Any] | None:
+    """丢掉空分组后的 ``inputs`` 值；全空时给 None，让记账列留空而不是写一个空对象。"""
+    kept = {key: value for key, value in sections.items() if value not in (None, [], {})}
+    return kept or None
+
+
 class MediaGenerator:
     """
     媒体生成器中间层
@@ -242,9 +266,10 @@ class MediaGenerator:
 
         if not formal_output:
             return None, output_path
-        if task_id is None:
-            raise ValueError("formal image output requires a task_id")
-        staged_output_path = task_image_staging_path(output_path, task_id)
+        # 直接调用（非队列任务）没有队列身份：给一次性 staging 身份，不伪造一个 task_id
+        # ——记账写的 task_id 必须能在 tasks 里查到，编不出来就留空。
+        staging_token = task_id or f"inline-{uuid.uuid4().hex}"
+        staged_output_path = task_image_staging_path(output_path, staging_token)
         _remove_task_staging_path(staged_output_path)
         return staged_output_path, staged_output_path
 
@@ -584,13 +609,7 @@ class MediaGenerator:
         if reference_images:
             for ref in reference_images:
                 if isinstance(ref, dict):
-                    img_val = ref.get("image", "")
-                    ref_images.append(
-                        ReferenceImage(
-                            path=str(img_val),
-                            label=str(ref.get("label", "")),
-                        )
-                    )
+                    ref_images.append(ReferenceImage(path=str(ref.get("image", ""))))
                 elif hasattr(ref, "__fspath__") or isinstance(ref, (str, Path)):
                     ref_images.append(ReferenceImage(path=str(ref)))
                 # PIL Image 等不支持的类型忽略
@@ -608,7 +627,7 @@ class MediaGenerator:
             )
 
         # 2. 记账括号：进入落 pending，成功以 call.success(result) 递交 backend 结果对象，
-        #    Exception 自动翻 failed 后重抛，CancelledError 穿透留 pending。
+        #    Exception 自动翻 failed 后重抛，CancelledError 结算 cancelled 后重抛。
         async with _remove_staged_output_on_error(staged_output_path):
             async with self.ledger.record(
                 project_name=self.project_name,
@@ -622,19 +641,28 @@ class MediaGenerator:
                 user_id=self._user_id,
                 segment_id=segment_id_for("image", resource_type, resource_id),
                 output_path=str(output_path),
+                task_id=task_id,
+                purpose=CallPurpose.GENERATION_TASK,
+                inputs=_ledger_inputs(
+                    reference_images=[
+                        {"path": rel, "label": None, "role": "array"}
+                        for ref in ref_images
+                        if (rel := _input_path(self.project_path, ref.path)) is not None
+                    ]
+                ),
             ) as call:
                 from lib.reference_compression import ReferenceSpec, RefRole
 
                 image_backend = self._image_backend
                 # 所有图像参考图都走数组角色（完整基线 + 降档梯子 + 字节预算）。
-                specs = [ReferenceSpec(source=Path(r.path), label=r.label, role=RefRole.ARRAY) for r in ref_images]
+                specs = [ReferenceSpec(source=Path(r.path), role=RefRole.ARRAY) for r in ref_images]
 
                 def _call_image(compressed: "list[CompressedRef]"):
                     return image_backend.generate(
                         ImageGenerationRequest(
                             prompt=prompt,
                             output_path=backend_output_path,
-                            reference_images=[ReferenceImage(path=str(c.path), label=c.label) for c in compressed],
+                            reference_images=[ReferenceImage(path=str(c.path)) for c in compressed],
                             aspect_ratio=aspect_ratio,
                             image_size=image_size,
                             project_name=self.project_name,
@@ -681,6 +709,7 @@ class MediaGenerator:
         voice: str,
         language_type: str = "Chinese",
         speed: float | None = None,
+        task_id: str | None = None,
         before_submit: Callable[[], Awaitable[None]] | None = None,
         before_commit: Callable[[Path], Awaitable[None]] | None = None,
         commit_staged: Callable[[Path, Path], int | PaidVersionCommit] | None = None,
@@ -697,6 +726,7 @@ class MediaGenerator:
             voice: 音色（如 Cherry）
             language_type: 语种，默认 Chinese
             speed: 语速预留（同步模型忽略）
+            task_id: 本次合成所属的生成任务；记账据此回指任务，直接调用（无队列任务）留空
             before_submit: 首次 provider 提交紧前执行一次的异步准入钩子
             **version_metadata: 额外元数据
 
@@ -736,6 +766,12 @@ class MediaGenerator:
                 user_id=self._user_id,
                 segment_id=segment_id_for("audio", resource_type, resource_id),
                 output_path=str(output_path),
+                task_id=task_id,
+                purpose=CallPurpose.GENERATION_TASK,
+                inputs=_ledger_inputs(
+                    voice=voice,
+                    parameters=_ledger_inputs(language_type=language_type, speed=speed),
+                ),
             ) as call:
                 request = AudioSynthesisRequest(
                     text=text,
@@ -848,7 +884,7 @@ class MediaGenerator:
         resolution: str | None = None,
         poll_timeout_seconds: int = DEFAULT_VIDEO_POLL_TIMEOUT_SECONDS,
         task_id: str | None = None,
-        before_submit: Callable[[int], Awaitable[Mapping[str, object] | None]] | None = None,
+        before_submit: Callable[[], Awaitable[Mapping[str, object] | None]] | None = None,
         formal_output: bool = False,
         before_formal_commit: Callable[[Path, int, Mapping[str, Any]], Awaitable[None]] | None = None,
         commit_formal_output: Callable[[Path, Path, int, Mapping[str, Any]], PaidVersionCommit] | None = None,
@@ -1002,17 +1038,25 @@ class MediaGenerator:
                 segment_id=segment_id_for("video", resource_type, resource_id),
                 service_tier=version_metadata.get("service_tier", "default"),
                 output_path=str(output_path),
+                task_id=task_id,
+                purpose=CallPurpose.GENERATION_TASK,
+                inputs=_ledger_inputs(
+                    reference_images=[
+                        {"path": rel, "label": None, "role": "array"}
+                        for ref in (reference_images or [])
+                        if (rel := _input_path(self.project_path, ref)) is not None
+                    ],
+                    start_image=_input_path(self.project_path, start_image),
+                    end_image=_input_path(self.project_path, end_image),
+                    reference_audio=[
+                        rel
+                        for audio in (reference_audio_files or [])
+                        if (rel := _input_path(self.project_path, audio)) is not None
+                    ],
+                    parameters=_ledger_inputs(service_tier=version_metadata.get("service_tier")),
+                ),
             ) as call,
         ):
-            # 拿到 call_id 后立即写入 task.payload["api_call_id"]，让 worker 崩溃重启后 resume
-            # 路径能精准翻这条 pending ApiCall 行（而不是按 segment_id+LIMIT 1 模糊匹配）。
-            # fail-fast 抛异常会被记账括号翻 pending → failed 后再重抛，避免留下永久 pending
-            # 账目（ADR 0007）；放在 backend 调用前是必须的。
-            if task_id is not None:
-                from lib.video_backends.base import persist_api_call_id
-
-                await persist_api_call_id(task_id, call.call_id)
-
             from lib.video_backends.base import VideoGenerationRequest
 
             video_backend = self._video_backend
@@ -1067,7 +1111,7 @@ class MediaGenerator:
 
             async def _before_first_submit() -> None:
                 if before_submit is not None:
-                    checkpoint_metadata = await before_submit(call.call_id)
+                    checkpoint_metadata = await before_submit()
                     if checkpoint_metadata is not None:
                         version_metadata.update(checkpoint_metadata)
 
@@ -1122,7 +1166,6 @@ class MediaGenerator:
         duration_seconds: str | int = "8",
         resolution: str | None = None,
         task_id: str | None = None,
-        api_call_id: int | None = None,
         submitted_base_url: str | None = None,
         poll_timeout_seconds: int = DEFAULT_VIDEO_POLL_TIMEOUT_SECONDS,
         formal_output: bool = False,
@@ -1134,8 +1177,9 @@ class MediaGenerator:
 
         与 generate_video_async 的差异：
         - 不开记账括号（不落新 pending 行）—— 首次 submit 已记账；ResumeExpired / crash window
-          都不应再写 ApiCall（防双重扣费）。caller 透传 ``api_call_id`` 时经 ledger.resume_success
-          / resume_failed 按 call_id 精准翻 pending → success/failed；不透传则 logger.warning 不阻断。
+          都不应再写 ApiCall（防双重扣费）。待结算的调用行按 ``api_calls.task_id`` 反查，
+          经 ledger.resume_success / resume_failed 精准翻 pending → success/failed；
+          反查不到（无任务身份或该调用已结算）则 logger.warning 不阻断。
         - resume 成功后总是记录新版本；``formal_output=True`` 时先下载到
           同目录临时文件，再与版本历史一起提交，不提前覆盖 current。
         - prompt / start_image / reference_images 仅用于日志/版本元数据，不影响 provider 端结果。
@@ -1158,6 +1202,9 @@ class MediaGenerator:
 
         if self._video_backend is None:
             raise RuntimeError("video_backend not configured")
+
+        # 待结算的调用行按任务身份反查——任务与调用的关联只有 ``api_calls.task_id`` 一个真相源。
+        api_call_id = await self.ledger.pending_call_id_for_task(task_id) if task_id is not None else None
 
         if self._config is not None:
             configured_generate_audio = await self._config.video_generate_audio(self.project_name)
@@ -1203,7 +1250,7 @@ class MediaGenerator:
             # Pending ApiCall 翻 failed 而不是留 pending：让 /api/v1/usage 报表不堆积无终态行；
             # cost_amount=0 不增加计费（resume 不重扣，符合 "不主动扣费" 红线）。
             # finalize 失败时不吞异常，让 worker finally 走 mark_failed 兜底，避免 ApiCall
-            # 永久卡 pending 导致 usage 报表/补账缺口（与 persist_api_call_id 的 fail-fast 一致）。
+            # 永久卡 pending 导致 usage 报表/补账缺口。
             async with _remove_staged_output_on_error(staged_output_path):
                 if api_call_id is not None:
                     await self.ledger.resume_failed(call_id=api_call_id)
@@ -1235,7 +1282,7 @@ class MediaGenerator:
                 )
         else:
             logger.warning(
-                "resume 缺 api_call_id task_id=%s job_id=%s (旧任务未持久化 payload)",
+                "resume 未反查到待结算调用行 task_id=%s job_id=%s",
                 task_id,
                 job_id,
             )

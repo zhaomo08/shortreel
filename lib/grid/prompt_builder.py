@@ -1,14 +1,41 @@
-"""Grid prompt builder for grid-image-to-video feature."""
+"""Grid prompt builder for grid-image-to-video feature.
+
+参考图与分镜图同一口径：prompt 首行为 ``Reference_Images`` 类型声明，各格正文里的 ``@[登记名]``
+按最终参考图列表的序位换成「图N」（见 :mod:`lib.reference_image_numbering`）。
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from math import gcd
+
+from lib.reference_image_numbering import (
+    REFERENCE_IMAGES_KEY,
+    ReferenceImageSlot,
+    reference_images_declaration,
+    render_reference_mentions,
+)
+
+
+def pending_grid_prompt_ids(scenes: Sequence[Mapping[str, object]], id_field: str) -> list[str]:
+    """一张联合图里提示词待生成（``None``）或为空的格子 id，按剧本顺序。
+
+    联合图的提示词由每格的 ``image_prompt`` 拼成，任一格缺失整张图都出不了；REST 路由与
+    Agent 工具在入队计费前共用这一判定。
+    """
+
+    return [str(scene.get(id_field)) for scene in scenes if not scene.get("image_prompt")]
 
 
 def project_grid_image_prompt(image_prompt: object) -> str | dict[str, object]:
-    """Project grid image semantics into the canonical provider/basis shape."""
+    """Project grid image semantics into the canonical provider/basis shape.
 
+    ``None`` 是机械转换后的待生成态，没有可渲染、可取证的内容，与
+    :func:`lib.prompt_utils.project_storyboard_image_prompt` 同样拒绝，不能变成字面量 ``"None"``。
+    """
+
+    if image_prompt is None:
+        raise ValueError("grid image_prompt is pending; the cell has no prompt to render")
     if not isinstance(image_prompt, Mapping):
         return str(image_prompt)
     scene = image_prompt.get("scene")
@@ -34,19 +61,19 @@ def project_grid_image_prompt(image_prompt: object) -> str | dict[str, object]:
     return {"scene": scene, "composition": composition}
 
 
-def _extract_image_desc(scene: dict) -> str:
+def _extract_image_desc(scene: dict, references: Sequence[ReferenceImageSlot] = ()) -> str:
     """Extract image description from a scene.
 
     If image_prompt is a dict, join scene + composition fields.
-    If string, return as-is.
+    If string, return as-is. ``@[登记名]`` in the scene text is rendered against *references*.
     """
     image_prompt = project_grid_image_prompt(scene.get("image_prompt", ""))
     if isinstance(image_prompt, str):
-        return image_prompt
+        return render_reference_mentions(image_prompt, references)
     parts: list[str] = []
     scene_text = image_prompt["scene"]
     if scene_text:
-        parts.append(str(scene_text))
+        parts.append(render_reference_mentions(str(scene_text), references))
     composition = image_prompt["composition"]
     if isinstance(composition, Mapping):
         comp_parts = [f"{key}: {value}" for key, value in composition.items()]
@@ -60,7 +87,9 @@ def _extract_action(scene: dict) -> str:
 
     If dict, return action field. If string, return as-is.
     """
-    video_prompt = scene.get("video_prompt", "")
+    video_prompt = scene.get("video_prompt")
+    if video_prompt is None:
+        return ""
     if isinstance(video_prompt, dict):
         return str(video_prompt.get("action", ""))
     return str(video_prompt)
@@ -87,7 +116,7 @@ def build_grid_prompt(
     style: str,
     aspect_ratio: str = "16:9",
     grid_aspect_ratio: str | None = None,
-    reference_image_mapping: dict[str, str] | None = None,
+    references: Sequence[ReferenceImageSlot] = (),
 ) -> str:
     """Assemble a grid image generation prompt with first-last frame chain structure.
 
@@ -98,7 +127,8 @@ def build_grid_prompt(
         cols: Number of columns in the grid.
         style: Style description for the grid.
         aspect_ratio: Aspect ratio for each cell (default "16:9").
-        reference_image_mapping: Optional mapping of image labels to character names.
+        references: The reference images sent with the request, in array order; they are
+            declared as 图N on the first line and addressed as such in the cell texts.
 
     Returns:
         Assembled prompt string.
@@ -121,6 +151,11 @@ def build_grid_prompt(
     panel_ar = _compute_panel_aspect(effective_grid_ar, rows, cols)
 
     lines: list[str] = []
+
+    declaration = reference_images_declaration(references)
+    if declaration:
+        lines.append(f"{REFERENCE_IMAGES_KEY}: {declaration}")
+        lines.append("")
 
     # Header
     lines.append(
@@ -146,13 +181,6 @@ def build_grid_prompt(
     lines.append("- 相邻格之间应体现画面的自然过渡和动作延续")
     lines.append("")
 
-    # Reference images (optional)
-    if reference_image_mapping:
-        lines.append("【参考图说明】")
-        for label, character in reference_image_mapping.items():
-            lines.append(f"- {label}：{character}")
-        lines.append("")
-
     # Cell contents
     lines.append("【各格内容】")
 
@@ -165,7 +193,7 @@ def build_grid_prompt(
             # First scene opening
             scene = scenes[0]
             scene_id = scene.get(id_field, "")
-            image_desc = _extract_image_desc(scene)
+            image_desc = _extract_image_desc(scene, references)
             lines.append(f"格{cell_idx}（{position}）— {scene_id}开场：")
             lines.append(f"  {image_desc}")
 
@@ -176,7 +204,7 @@ def build_grid_prompt(
             prev_scene_id = prev_scene.get(id_field, "")
             next_scene_id = next_scene.get(id_field, "")
             prev_action = _extract_action(prev_scene)
-            next_image_desc = _extract_image_desc(next_scene)
+            next_image_desc = _extract_image_desc(next_scene, references)
             lines.append(f"格{cell_idx}（{position}）— {prev_scene_id}→{next_scene_id}过渡：")
             lines.append(f"  {prev_action}，过渡到 {next_image_desc}")
 

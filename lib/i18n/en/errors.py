@@ -21,6 +21,11 @@ MESSAGES = {
     "script_item_not_found": "Shot '{id}' does not exist in this script",
     "prompt_preview_missing": "This shot has no prompt written yet",
     "prompt_preview_invalid": "The prompt cannot be rendered: check its format",
+    "prompt_preview_pending": "This shot's prompt is pending: let the Agent write it, or fill it in the editor",
+    "script_prompt_pending": "The prompt of shot '{segment_id}' is pending; let the Agent write it or fill it in before generating",
+    "script_conversion_refused": "This episode cannot be converted to a formal script yet: confirm its content and resolve pending drafts first",
+    "script_conversion_conflict": "The formal script was changed by another writer during conversion; nothing was overwritten. Refresh and retry",
+    "script_conversion_invalid_entries": "Only stale shots can adopt new content; check the selected shots",
     "scene_not_found": "Scene '{id}' does not exist",
     "segment_not_found": "Segment '{id}' does not exist",
     "script_missing": "Script does not exist",
@@ -235,6 +240,11 @@ MESSAGES = {
     "model_not_found": "Model not found",
     "trial_run_already_running": "A trial run is already in progress. Wait for it to finish or cancel it first",
     "trial_run_not_found": "Trial run not found or expired",
+    "usage_record_not_found": "Usage record not found",
+    "usage_cursor_invalid": "Invalid pagination cursor; go back to the first page and browse again",
+    "usage_range_too_wide": "The requested time range is too wide; narrow the start and end and try again",
+    "usage_time_out_of_range": "The start or end time is outside the representable range; check it and try again",
+    "usage_timezone_invalid": "Unknown IANA time zone name; check the tz parameter",
     "trial_run_artifact_not_found": "This trial run has no playable output",
     "at_least_one_field_required": "At least one field must be provided for update",
     "discovery_failed": "Model discovery failed: {err_msg}",
@@ -369,6 +379,11 @@ MESSAGES = {
         "consistency does not apply; dialogue is used only as prompt context. Whether the rendered "
         "video actually has sound depends on the selected model"
     ),
+    # Storyboard scene text mentions that are not bound to a reference image
+    "storyboard_warn_mention_unbound": (
+        "The scene text of {unit_id} mentions @[{name}], which is not a registered asset or is not listed in "
+        "that entry's reference fields: it is not numbered as a reference image and is sent as a plain name"
+    ),
     # Episode meta
     "episode_not_found": "Episode {episode} not found or has no script file yet",
     "episode_title_empty": "Episode title cannot be empty",
@@ -420,6 +435,7 @@ MESSAGES = {
     # Agent credentials
     "agent_preset_unknown": "Unknown preset provider: {preset_id}",
     "agent_base_url_required_custom": "base_url is required for custom configuration",
+    "agent_base_url_invalid": "Agent credential URLs cannot carry query strings, fragments or userinfo; use a plain https://host/path address",
     "agent_no_fields_to_update": "No fields to update",
     "agent_credential_not_found": "Credential not found",
     "agent_cannot_delete_active": "Cannot delete the active credential; activate another first",

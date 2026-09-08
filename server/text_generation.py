@@ -8,9 +8,10 @@ import logging
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -58,6 +59,7 @@ from lib.path_safety import PathTraversalError, safe_join
 from lib.project_manager import ProjectManager, is_reference_video_project
 from lib.prompt_builders_reference import build_reference_units_split_prompt
 from lib.prompt_builders_script import append_user_instructions, build_narration_split_prompt, build_normalize_prompt
+from lib.providers import CallPurpose
 from lib.reference_catalog import ReferenceCatalog, build_reference_catalog
 from lib.reference_video.draft_validation import (
     validate_dialogue_load,
@@ -86,6 +88,7 @@ from lib.script_models import (
 from lib.script_plan_entries import SCOPE_ALL, SCOPE_STALE, ScriptPlanEntryError
 from lib.speech_composition import admit_script_unit
 from lib.speech_rate import project_speech_rate_override
+from lib.storyboard_mentions import render_storyboard_mention_warnings, storyboard_mention_warnings
 from lib.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextTaskType
 from lib.text_backends.base import TextGenerationRequest as BackendTextGenerationRequest
 from lib.text_generator import TextGenerator
@@ -144,6 +147,9 @@ class TextGenerationRequest:
 @dataclass(frozen=True, slots=True)
 class TextGenerationResult:
     message: str
+    #: locale-neutral 的 ``{"key", "params"}`` 提示条目（如画面描述里没绑定参考图的 ``@[名称]``），
+    #: 与任务 ``result.warnings`` 同一形态，读侧按语言渲染。
+    warnings: list[dict[str, Any]] = dataclass_field(default_factory=list)
 
 
 class CompensableTextGenerationResult(TextGenerationResult):
@@ -157,8 +163,9 @@ class CompensableTextGenerationResult(TextGenerationResult):
         cancel_compensation: Callable[[], None],
         *,
         payload: dict[str, Any] | None = None,
+        warnings: list[dict[str, Any]] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, list(warnings or []))
         object.__setattr__(self, "_cancel_compensation", cancel_compensation)
         object.__setattr__(self, "payload", payload)
 
@@ -618,7 +625,7 @@ def _resolve_script_plan_path(
     return script_plan_json, "generate_script_plan tool"
 
 
-def _episode_generation_preflight(project_path: Path, episode: int, *, enforce_review_gate: bool) -> None:
+def episode_generation_preflight(project_path: Path, episode: int, *, enforce_review_gate: bool) -> None:
     try:
         project_data = json.loads((project_path / "project.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -660,7 +667,7 @@ async def generate_episode_script(
     instructions = _instructions(request.instructions)
     project_path = projects.get_project_path(project_name)
     await asyncio.to_thread(
-        _episode_generation_preflight,
+        episode_generation_preflight,
         project_path,
         episode,
         enforce_review_gate=not request.dry_run,
@@ -710,12 +717,36 @@ async def generate_episode_script(
         raise TextGenerationError(f"❌ 文件错误: {exc}") from exc
     rewritten_note = "、".join(rewritten) if rewritten else "无（其余条目原样保留）"
     summary = f"✅ 剧本生成完成: {result_path}\n   本次重写条目: {rewritten_note}"
+    warnings = await asyncio.to_thread(_rewritten_mention_warnings, projects, project_name, result_path, rewritten)
+    summary += _unbound_mentions_note(warnings)
     if not file_receipts and not manifest_receipts:
-        return TextGenerationResult(summary)
+        return TextGenerationResult(summary, warnings)
     if len(file_receipts) != 1 or len(manifest_receipts) != 1:
         raise RuntimeError("episode script commit did not return cancellation state")
     receipt = _EpisodeScriptCancellationReceipt(project_path, episode, file_receipts[0], manifest_receipts[0])
-    return CompensableTextGenerationResult(summary, receipt.compensate_cancelled)
+    return CompensableTextGenerationResult(summary, receipt.compensate_cancelled, warnings=warnings)
+
+
+def _rewritten_mention_warnings(
+    projects: ProjectManager,
+    project_name: str,
+    result_path: Path,
+    rewritten: Sequence[str],
+) -> list[dict[str, Any]]:
+    """本次重写条目的画面描述里没绑定参考图的 ``@[名称]``；剧本读不回来时不阻断回执。"""
+    if not rewritten:
+        return []
+    try:
+        project = projects.load_project_readonly(project_name)
+        script = projects.load_script_readonly(project_name, result_path.name)
+    except (OSError, ValueError):
+        # 剧本已落盘，回执不能因为读回失败（文件缺失、I/O 故障、JSON 不合法）而失败。
+        return []
+    return storyboard_mention_warnings(project, script, unit_ids=rewritten)
+
+
+def _unbound_mentions_note(warnings: Sequence[Mapping[str, Any]]) -> str:
+    return "".join(f"\n   ⚠️ {line}" for line in render_storyboard_mention_warnings(warnings, translate))
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +883,9 @@ async def generate_drama_script_plan(
                 script_plan_path,
             )
         schema = build_drama_normalized_script_model(supported_durations)
-        generator = await TextGenerator.create(TextTaskType.SCRIPT, project_name=project_name)
+        generator = await TextGenerator.create(
+            TextTaskType.SCRIPT, project_name=project_name, purpose=CallPurpose.SCRIPT_GENERATION
+        )
         result = await generator.generate(
             BackendTextGenerationRequest(
                 prompt=prompt,
@@ -1512,7 +1545,9 @@ async def generate_reference_script_plan(
                 formal_script_plan_path,
             )
         schema = build_reference_units_script_plan_model(split_caps.durations)
-        generator = await TextGenerator.create(TextTaskType.SCRIPT, project_name=project_name)
+        generator = await TextGenerator.create(
+            TextTaskType.SCRIPT, project_name=project_name, purpose=CallPurpose.SCRIPT_GENERATION
+        )
         result = await generator.generate(
             BackendTextGenerationRequest(
                 prompt=prompt,
@@ -1659,7 +1694,9 @@ async def generate_narration_script_plan(
                 draft_path,
                 script_plan_path,
             )
-        generator = await TextGenerator.create(TextTaskType.SCRIPT, project_name=project_name)
+        generator = await TextGenerator.create(
+            TextTaskType.SCRIPT, project_name=project_name, purpose=CallPurpose.SCRIPT_GENERATION
+        )
         result = await generator.generate(
             BackendTextGenerationRequest(
                 prompt=prompt,

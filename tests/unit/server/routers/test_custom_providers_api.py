@@ -583,8 +583,8 @@ class TestDiscoverModels:
         # 确认 discovery_format 透传
         assert mock_discover.call_args.kwargs["discovery_format"] == "google"
 
-    def test_discover_error_text_drops_credentials(self, custom_providers_client: TestClient):
-        """发现失败时回给前端的 discovery_failed 文案不含 base_url 里的查询串与权限段凭证。"""
+    def test_discover_rejects_credential_bearing_base_url(self, custom_providers_client: TestClient):
+        """带查询串 / 权限段凭证的 anthropic base_url 在发起请求前就被拒，回给前端的文案不含凭证。"""
         base_url = "https://ant-user:sk-leaked-userinfo@relay.example.com/anthropic?api_key=sk-leaked-query"
         discovery_client = httpx.AsyncClient()
         try:
@@ -602,11 +602,8 @@ class TestDiscoverModels:
         finally:
             asyncio.run(discovery_client.aclose())
 
-        # 泄漏面真实存在：出站请求 URL 上带着查询串凭证。权限段口令进异常消息这件事由
-        # test_model_discovery.py 的 test_status_error_message_drops_query_and_userinfo_credentials
-        # 在 exc.request.url 上断言：httpx 出站前会把权限段挪进 Authorization 头。
-        assert "sk-leaked-query" in str(only_request(route).url)
-        assert resp.status_code == 502
+        assert route.call_count == 0
+        assert resp.status_code == 422
         detail = resp.json()["detail"]
         assert "sk-leaked-userinfo" not in detail
         assert "sk-leaked-query" not in detail
@@ -1717,6 +1714,62 @@ class TestDiscoverAnthropic:
         kwargs = mock_discover.call_args.kwargs
         assert kwargs["base_url"] == "https://stored.example"
         assert kwargs["api_key"] == "sk-stored"
+
+    @pytest.mark.parametrize(
+        ("stored_base_url", "expected_discovery_base"),
+        [
+            # 预设默认值不算覆盖：模型列表按预设目录的 discovery_url 取
+            ("https://api.deepseek.com/anthropic", "https://api.deepseek.com"),
+            # 用户覆盖过的 base_url 按存储值发现
+            ("https://proxy.internal/anthropic", "https://proxy.internal/anthropic"),
+        ],
+    )
+    async def test_active_preset_credential_discovers_from_preset_root_unless_overridden(
+        self,
+        custom_providers_client: TestClient,
+        db_session: AsyncSession,
+        stored_base_url: str,
+        expected_discovery_base: str,
+    ):
+        from lib.db.repositories.agent_credential_repo import AgentCredentialRepository
+
+        repo = AgentCredentialRepository(db_session)
+        cred = await repo.create(
+            preset_id="deepseek",
+            display_name="DeepSeek",
+            base_url=stored_base_url,
+            api_key="sk-stored",
+        )
+        await repo.set_active(cred.id)
+        await db_session.commit()
+
+        with patch(
+            "lib.custom_provider.discovery.discover_models",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_discover:
+            resp = custom_providers_client.post("/api/v1/custom-providers/discover-anthropic", json={})
+
+        assert resp.status_code == 200
+        assert mock_discover.call_args.kwargs["base_url"] == expected_discovery_base
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://relay.example.com/anthropic?api_key=sk-x",
+            "https://x/a#frag",
+            "https://u:p@x/a",
+            "x.example.com",
+        ],
+    )
+    def test_rejects_unsupported_base_url(self, custom_providers_client: TestClient, base_url: str):
+        """Agent 发现入口拒绝带 query / fragment / userinfo 或缺 scheme 的地址，文案不回显 query 值。"""
+        resp = custom_providers_client.post(
+            "/api/v1/custom-providers/discover-anthropic",
+            json={"base_url": base_url, "api_key": "sk-ant"},
+        )
+        assert resp.status_code == 422
+        assert "sk-x" not in resp.text
 
     def test_returns_400_when_no_key_anywhere(self, custom_providers_client: TestClient):
         """请求未带 api_key 且 DB 也没有 → 400。"""

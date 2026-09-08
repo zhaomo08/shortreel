@@ -21,19 +21,28 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from lib.config.registry import ProviderMeta
+    from lib.ledger import Ledger
 
     ProviderProjection = Callable[[dict[str, Any]], Awaitable[str]]
     TaskExecutor = Callable[..., Awaitable[dict[str, Any]]]
+    # 启动收口：返回已翻成终态的 pending 调用行数。
+
+    class InterruptedCallSettler(Protocol):
+        """启动收口入口：无任务身份的 pending 行只收口在 ``taskless_started_before`` 之前发起的，
+        传 ``None`` 则只收口绑定了任务的行。"""
+
+        def __call__(self, *, taskless_started_before: datetime | None) -> Awaitable[int]: ...
+
 
 logger = logging.getLogger(__name__)
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 # Lease 丢失超过 ``lease_ttl * _ORPHAN_RESCAN_LEASE_LOST_MULT`` 才认为是真切换 owner
 # （另一个 worker 进程曾持过 lease 且写入了新 orphan），需要重扫；短 flap（续约抖动）
@@ -496,8 +505,11 @@ class GenerationWorker:
         provider_projection: ProviderProjection = _extract_provider,
         executor: TaskExecutor = _execute_task,
         lanes: tuple[str, ...] = ("image", "video", "audio", "text"),
+        settle_interrupted_calls: InterruptedCallSettler | None = None,
     ):
         self.queue = queue or get_generation_queue()
+        # 启动收口入口（记账层的公开方法）。默认经 ``_ledger`` 走队列同一处落库接线。
+        self._settle_interrupted_calls = settle_interrupted_calls or self._settle_interrupted_calls_via_ledger
         # 认领期与执行期共用的 provider 投影：限流按它的结果路由到对应容量桶。
         self._provider_projection = provider_projection
         self._executor = executor
@@ -527,6 +539,10 @@ class GenerationWorker:
         # 一次性扫描开关：单 lease 互斥架构下，进程一旦扫过 orphan 就不再重扫；
         # 配合 _lease_lost_monotonic 阈值在「真切换 owner」时清零、「短 flap」不清零。
         self._orphan_handled_once: bool = False
+        # 本 worker 的构造时刻：早于 web 层开始接受请求。首次收口只收口在此之前发起的无任务
+        # 调用行——之后发起的还在本进程里跑；后续重扫发生在进程存活期间，无任务行一律不碰。
+        self._constructed_at = datetime.now(UTC)
+        self._startup_settled: bool = False
         self._lease_lost_monotonic: float | None = None
 
     # ------------------------------------------------------------------
@@ -619,6 +635,13 @@ class GenerationWorker:
                 # 单 lease 互斥保证不会与另一个 worker 同时扫；跨进程接管由上述阈值兜底。
                 if self._owns_lease and not self._orphan_handled_once:
                     await self._handle_orphan_tasks_on_start()
+                    # 首次收口是进程启动：构造时刻之前发起的无任务 pending 行（文本调用、端点试跑）
+                    # 没人接续，一并翻终态。lease 长时间丢失触发的重扫发生在进程存活期间，无任务行
+                    # 可能正在本进程里跑，只收口绑定了任务的行。
+                    await self._settle_interrupted_calls_on_start(
+                        taskless_started_before=None if self._startup_settled else self._constructed_at
+                    )
+                    self._startup_settled = True
                     self._orphan_handled_once = True
 
                 if not self._owns_lease:
@@ -1006,12 +1029,12 @@ class GenerationWorker:
 
         # 续跑不开新的记账括号（账是提交时记的），任何终态出口都要顺手结算那条 pending 的
         # ApiCall，否则用量报表里留下永不终态的行。「重试下载」把调用重开成 pending 之后，
-        # 下面每一条出口都变得可达。``resume_failed`` 带 WHERE status='pending'，重复调用无副作用。
+        # 下面每一条出口都变得可达。resume 结算带 WHERE status='pending'，重复调用无副作用。
         try:
             result = await _execute_with_video_cleanup()
         except asyncio.CancelledError:
             await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
-            await asyncio.shield(self._settle_unresumable_call(task))
+            await asyncio.shield(self._settle_unresumable_call(task, cancelled=True))
             raise
         except NotImplementedError as exc:
             logger.warning("resume 不支持 task %s: %s", task_id, exc)
@@ -1020,7 +1043,7 @@ class GenerationWorker:
             )
             if rows == 0:
                 await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
-            await asyncio.shield(self._settle_unresumable_call(task))
+            await asyncio.shield(self._settle_unresumable_call(task, cancelled=rows == 0))
             return
         except ResumeEndpointChangedError as exc:
             logger.warning("resume endpoint 已变更 task %s: %s", task_id, exc)
@@ -1029,7 +1052,7 @@ class GenerationWorker:
             )
             if rows == 0:
                 await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
-            await asyncio.shield(self._settle_unresumable_call(task))
+            await asyncio.shield(self._settle_unresumable_call(task, cancelled=rows == 0))
             return
         except ResumeExpiredError as exc:
             logger.warning("resume 已过期 task %s: %s", task_id, exc)
@@ -1038,14 +1061,14 @@ class GenerationWorker:
             )
             if rows == 0:
                 await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
-            await asyncio.shield(self._settle_unresumable_call(task))
+            await asyncio.shield(self._settle_unresumable_call(task, cancelled=rows == 0))
             return
         except Exception as exc:
             logger.exception("resume 失败 %s (type=%s, provider=%s)", task_id, task_type, provider_id)
             rows = await asyncio.shield(self.queue.mark_task_failed(task_id, _encode_task_failure_message(exc)))
             if rows == 0:
                 await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
-            await asyncio.shield(self._settle_unresumable_call(task))
+            await asyncio.shield(self._settle_unresumable_call(task, cancelled=rows == 0))
             return
 
         try:
@@ -1111,6 +1134,39 @@ class GenerationWorker:
             await asyncio.to_thread(cleanup_staged_provider_media, project_path, task["task_id"])
         except Exception:
             logger.warning("video provider media cleanup failed task_id=%s", task.get("task_id"), exc_info=True)
+
+    def _ledger(self) -> Ledger:
+        """worker 侧的记账入口：与队列共用同一处 session factory，不另接全局引擎。
+
+        任务行与它的调用行必须落在同一个库里——队列注入了别的 session factory（测试库、
+        独立 schema）时，记账若仍走全局引擎，会翻错库里的行，还会跨事件循环持有连接。
+        延迟 import 避开 worker → ledger 的模块级依赖。
+        """
+        from lib.ledger import Ledger
+
+        return Ledger(session_factory=self.queue.session_factory)
+
+    async def _settle_interrupted_calls_via_ledger(self, *, taskless_started_before: datetime | None) -> int:
+        return await self._ledger().settle_interrupted_calls(taskless_started_before=taskless_started_before)
+
+    async def _settle_interrupted_calls_on_start(self, *, taskless_started_before: datetime | None) -> None:
+        """孤儿任务处理之后收口没有存活任务的 pending 调用行（与孤儿扫描共用一次性开关）。
+
+        顺序不能反：孤儿处理先把无法接续的任务翻成终态，收口才能按任务的结局判定它的调用行；
+        反过来那些任务还是 running，它们的调用行会被当成「任务还活着」跳过。收口失败只记日志，
+        不阻断认领循环——账目收尾比不上 worker 起不来。
+        """
+        try:
+            settled = await self._settle_interrupted_calls(taskless_started_before=taskless_started_before)
+        except Exception:
+            logger.warning("启动收口 pending 调用行失败", exc_info=True)
+            return
+        if settled:
+            logger.info(
+                "启动收口：%d 条无存活任务的 pending 调用行已结算（%s）",
+                settled,
+                "仅绑定任务的行" if taskless_started_before is None else "含启动前发起的无任务行",
+            )
 
     async def _handle_orphan_tasks_on_start(self) -> None:
         """重启自愈：扫 running + cancelling 孤儿，按"是否可安全 resume"分流。
@@ -1343,24 +1399,26 @@ class GenerationWorker:
         self._retry_dispatch_tasks.add(dispatch)
         dispatch.add_done_callback(self._retry_dispatch_tasks.discard)
 
-    async def _settle_unresumable_call(self, task: dict[str, Any]) -> None:
-        """任务在派发前就被判死时，把它那条 pending 的 ApiCall 一并翻 failed（零费用）。
+    async def _settle_unresumable_call(self, task: dict[str, Any], *, cancelled: bool = False) -> None:
+        """把无法继续的 pending ApiCall 按任务终态结算为 failed / cancelled（零费用）。
 
         续跑路径不开新的记账括号——账是提交时记的。派发侧终态失败若只翻任务不结算调用，
         那条 pending 会永久留在用量报表里；重试下载尤其明显：它刚把调用重开成 pending。
         """
-        payload = task.get("payload")
-        call_id = payload.get("api_call_id") if isinstance(payload, dict) else None
-        if not isinstance(call_id, int):
+        task_id = task.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
             return
-        from lib.ledger import Ledger
 
+        call_id: int | None = None
         try:
-            await Ledger().resume_failed(call_id=call_id)
+            ledger = self._ledger()
+            call_id = await ledger.pending_call_id_for_task(task_id)
+            if call_id is None:
+                return
+            settle = ledger.resume_cancelled if cancelled else ledger.resume_failed
+            await settle(call_id=call_id)
         except Exception:
-            logger.warning(
-                "pending ApiCall 结算失败 task_id=%s call_id=%s", task.get("task_id"), call_id, exc_info=True
-            )
+            logger.warning("pending ApiCall 结算失败 task_id=%s call_id=%s", task_id, call_id, exc_info=True)
 
     async def _dispatch_provider_bucket(
         self,
@@ -1394,7 +1452,7 @@ class GenerationWorker:
                 )
                 if rows == 0:
                     await self.queue.mark_task_cancelled(t["task_id"], cancelled_by="user")
-                await self._settle_unresumable_call(t)
+                await self._settle_unresumable_call(t, cancelled=rows == 0)
                 await self._cleanup_video_staging(t)
             return
 
@@ -1422,6 +1480,7 @@ class GenerationWorker:
                 #    cancelled 行返回 0 rows，无副作用
                 try:
                     await asyncio.shield(self.queue.mark_task_cancelled(task_id, cancelled_by="user"))
+                    await asyncio.shield(self._settle_unresumable_call(t, cancelled=True))
                     await asyncio.shield(self._cleanup_video_staging(t))
                 except Exception:
                     logger.exception("sem dispatch cancel 落终态失败 task_id=%s", task_id)

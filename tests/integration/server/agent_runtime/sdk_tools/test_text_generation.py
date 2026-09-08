@@ -11,6 +11,7 @@ import pytest
 
 from lib import script_review
 from lib.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
+from lib.providers import CallPurpose
 from server.agent_runtime.sdk_tools.text_generation import (
     generate_episode_script_tool,
     generate_script_plan_tool,
@@ -265,6 +266,47 @@ async def test_generate_episode_script_scope_reaches_the_generator(fake_ctx: Too
     assert captured["scope"] == "all"
 
 
+async def test_generate_episode_script_reports_unbound_scene_mentions(fake_ctx: ToolContext, monkeypatch) -> None:
+    """写出的剧本里，被重写条目的画面描述若有对不上参考图的 @[名称]，回执带 warnings。"""
+    from lib.storyboard_mentions import WARN_STORYBOARD_MENTION_UNBOUND
+    from server import text_generation as mod
+
+    project_path = fake_ctx.project_path
+    (project_path / "project.json").write_text(
+        json.dumps({"content_mode": "ad", "target_duration": 30, "characters": {"主播": {"description": "出镜"}}}),
+        encoding="utf-8",
+    )
+    fake_ctx.pm.project_payload["characters"] = {"主播": {"description": "出镜"}}
+    fake_ctx.pm.script_payload = {
+        "episode": 1,
+        "content_mode": "ad",
+        "shots": [
+            {"shot_id": "E1S01", "characters_in_shot": ["主播"], "image_prompt": "@[主播]举起@[神秘商品]"},
+            {"shot_id": "E1S02", "characters_in_shot": [], "image_prompt": "@[主播]微笑"},
+        ],
+    }
+
+    class _FakeGenerator:
+        @classmethod
+        async def create(cls, _path, **_kwargs):
+            return cls()
+
+        async def generate(self, **kwargs) -> Path:
+            kwargs["rewritten_entry_ids"].append("E1S02")
+            return project_path / "scripts" / "episode_1.json"
+
+    monkeypatch.setattr(mod, "ScriptGenerator", _FakeGenerator)
+
+    out = await call(generate_episode_script_tool(fake_ctx), {"episode": 1, "entry_ids": ["E1S02"]})
+
+    assert out.get("is_error") is not True
+    payload = json.loads(out["content"][0]["text"])["text_generation"]
+    assert payload["warnings"] == [
+        {"key": WARN_STORYBOARD_MENTION_UNBOUND, "params": {"unit_id": "E1S02", "name": "主播"}}
+    ]
+    assert "主播" in payload["message"]
+
+
 async def test_generate_episode_script_unknown_entry_id_is_refused_not_internal(
     fake_ctx: ToolContext, monkeypatch
 ) -> None:
@@ -483,7 +525,7 @@ async def test_normalize_drama_script_rejects_empty_scenes(fake_ctx: ToolContext
 
             return _R()
 
-    async def fake_create(task_type, project_name=None):
+    async def fake_create(task_type, project_name=None, **kwargs):
         return _EmptyGenerator()
 
     use_fake_caps(fake_ctx)
@@ -579,9 +621,10 @@ async def test_normalize_drama_script_passes_project_name_to_backend(fake_ctx: T
 
             return _R()
 
-    async def fake_create(task_type, project_name=None):
+    async def fake_create(task_type, project_name=None, **kwargs):
         captured["task_type"] = task_type
         captured["create_project_name"] = project_name
+        captured["purpose"] = kwargs.get("purpose")
         return _FakeGenerator()
 
     use_fake_caps(fake_ctx)
@@ -592,6 +635,7 @@ async def test_normalize_drama_script_passes_project_name_to_backend(fake_ctx: T
 
     assert out.get("is_error") is not True, out
     assert captured["task_type"] is mod.TextTaskType.SCRIPT
+    assert captured["purpose"] is CallPurpose.SCRIPT_GENERATION
     assert captured["create_project_name"] == "demo", (
         f"normalize_drama_script 必须向 TextGenerator.create 传入 project_name，"
         f"实际传入: {captured.get('create_project_name')!r}"
@@ -658,7 +702,7 @@ async def test_normalize_drama_script_registers_the_frozen_explicit_source_basis
                 },
             )()
 
-    async def fake_create(_task_type, project_name=None):
+    async def fake_create(_task_type, project_name=None, **_kwargs):
         return _Generator()
 
     use_fake_caps(fake_ctx)
@@ -734,7 +778,7 @@ async def test_normalize_drama_script_preserves_legacy_request_basis_when_manife
                 },
             )()
 
-    async def fake_create(_task_type, project_name=None):
+    async def fake_create(_task_type, project_name=None, **_kwargs):
         return _Generator()
 
     use_fake_caps(fake_ctx)
@@ -789,7 +833,7 @@ async def test_normalize_drama_script_marks_mixed_machine_candidate_before_revie
 
             return _Result()
 
-    async def fake_create(_task_type, project_name=None):
+    async def fake_create(_task_type, project_name=None, **_kwargs):
         return _FakeGenerator()
 
     use_fake_caps(fake_ctx)

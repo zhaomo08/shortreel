@@ -68,7 +68,6 @@ def _worker_reference_checkpoint(task_id: str, *, provider_id: str = "ark") -> s
         provider_model_id="model-v1",
         backend_model_id="model-v1",
         endpoint_guard=None,
-        api_call_id=7,
         prompt="frozen",
         duration_seconds=8,
         aspect_ratio="9:16",
@@ -134,7 +133,6 @@ def _worker_storyboard_checkpoint(task_id: str, *, provider_id: str = "ark") -> 
         provider_model_id="model-v1",
         backend_model_id="model-v1",
         endpoint_guard=None,
-        api_call_id=7,
         prompt="frozen",
         duration_seconds=8,
         aspect_ratio="9:16",
@@ -209,6 +207,13 @@ class _FakeQueue:
         self._failed_rows = failed_rows
         self._orphans: list[dict] = []
         self.persisted_providers: list[tuple[str, str]] = []
+
+    @property
+    def session_factory(self):
+        """替身不自带库：worker 经队列取到的落库接线就是当前的全局 factory（``worker_db`` 换成内存库）。"""
+        import lib.db
+
+        return lib.db.safe_session_factory
 
     async def persist_execution_provider_id(self, task_id, provider_id):
         self.persisted_providers.append((task_id, provider_id))
@@ -2311,8 +2316,17 @@ class TestGenerationWorker:
         assert not staged.exists(), "终态落定后必须清掉该任务的 provider media staging"
 
     @pytest.mark.asyncio
-    async def test_process_resume_task_cancelled_error(self, monkeypatch):
-        """CancelledError → mark_cancelled + 重新抛出。"""
+    async def test_process_resume_task_cancelled_error(self, monkeypatch, worker_db):
+        """CancelledError → task / ApiCall 都结算 cancelled，再重新抛出。"""
+        from lib.db.repositories.usage_repo import UsageRepository
+
+        async with worker_db() as session:
+            older_call_id = await UsageRepository(session).start_call(
+                project_name="demo", call_type="video", model="old", task_id="rc"
+            )
+            call_id = await UsageRepository(session).start_call(
+                project_name="demo", call_type="video", model="m", task_id="rc"
+            )
         queue = _FakeQueue()
         worker = GenerationWorker(queue=queue)
 
@@ -2325,6 +2339,13 @@ class TestGenerationWorker:
             await worker._process_resume_task(task)
         assert queue.cancelled
         assert queue.cancelled[0][0] == "rc"
+        async with worker_db() as session:
+            stored = await UsageRepository(session).get_calls(project_name="demo")
+        assert [(item["id"], item["status"]) for item in stored["items"]] == [
+            (call_id, "cancelled"),
+            (older_call_id, "pending"),
+        ]
+        assert stored["items"][0]["cost_amount"] == 0
 
     @pytest.mark.asyncio
     async def test_process_resume_task_no_job_id_fails_fast(self):
@@ -2377,7 +2398,7 @@ class TestDispatcherFailFastAndPendingTracking:
         assert all("[resume_unsupported_capacity_zero]" in msg for _, msg in queue.failed)
 
     @pytest.mark.asyncio
-    async def test_capacity_zero_settles_the_pending_call(self, worker_db, monkeypatch):
+    async def test_capacity_zero_settles_the_pending_call(self, worker_db):
         """派发前就判死时那条 pending 的 ApiCall 也要翻 failed（零费用）。
 
         续跑不开新记账括号，只翻任务不结算调用会在用量报表里留一条永不终态的行；
@@ -2386,9 +2407,6 @@ class TestDispatcherFailFastAndPendingTracking:
         from lib.db.repositories.custom_provider_repo import CustomProviderRepository
         from lib.db.repositories.usage_repo import UsageRepository
 
-        # Ledger 在导入期绑定 session factory，与 worker_db patch 的那个不是同一处引用。
-        monkeypatch.setattr("lib.ledger.safe_session_factory", worker_db)
-
         async with worker_db() as session:
             provider = await CustomProviderRepository(session).create_provider(
                 display_name="no-models",
@@ -2396,7 +2414,9 @@ class TestDispatcherFailFastAndPendingTracking:
                 base_url="https://example.invalid",
                 api_key="k",
             )
-            call_id = await UsageRepository(session).start_call(project_name="demo", call_type="video", model="m")
+            await UsageRepository(session).start_call(
+                project_name="demo", call_type="video", model="m", task_id="retry-1"
+            )
             await session.commit()
         provider_key = f"custom-{provider.id}"
 
@@ -2405,7 +2425,7 @@ class TestDispatcherFailFastAndPendingTracking:
 
         await worker._dispatch_provider_bucket(
             provider_key,
-            [{"task_id": "retry-1", "provider_id": provider_key, "payload": {"api_call_id": call_id}}],
+            [{"task_id": "retry-1", "provider_id": provider_key, "payload": {}}],
         )
 
         async with worker_db() as session:
@@ -2831,3 +2851,92 @@ class TestOrphanOnceAndLeaseFlap:
             await worker._handle_orphan_tasks_on_start()
             worker._orphan_handled_once = True
         assert len(scan_count) == 2, "lost 超过 3×ttl 应重扫一次"
+
+
+class TestStartupInterruptedCallSettlement:
+    """启动收口挂在孤儿处理旁：同一 lease 内只跑一次，且跑在孤儿处理之后。"""
+
+    class _CyclingQueue(_FakeQueue):
+        """认领若干轮后置位事件，让测试等到主循环真的转了几圈再断言。"""
+
+        def __init__(self, cycles: int = 3):
+            super().__init__()
+            self._target_cycles = cycles
+            self._cycles = 0
+            self.cycled = asyncio.Event()
+
+        async def claim_next_task(self, media_type, **_kwargs):
+            if media_type == "image":
+                self._cycles += 1
+                if self._cycles >= self._target_cycles:
+                    self.cycled.set()
+            return
+
+    async def _run_until_settled(self, worker, queue) -> None:
+        worker.heartbeat_interval = 0.01
+        worker.poll_interval = 0.01
+        await worker.start()
+        try:
+            await asyncio.wait_for(queue.cycled.wait(), timeout=5)
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_settles_once_and_after_orphan_handling(self):
+        queue = self._CyclingQueue()
+        queue._orphans = [
+            {"task_id": "orphan-image", "status": "running", "task_type": "gen_image", "media_type": "image"}
+        ]
+        seen_failed_orphans: list[list[str]] = []
+
+        async def _settle(*, taskless_started_before: datetime | None) -> int:
+            seen_failed_orphans.append([task_id for task_id, _error in queue.failed])
+            return 0
+
+        worker = GenerationWorker(queue=queue, settle_interrupted_calls=_settle)
+        await self._run_until_settled(worker, queue)
+
+        assert seen_failed_orphans == [["orphan-image"]], "收口只跑一次，且孤儿已先被处理"
+
+    @pytest.mark.asyncio
+    async def test_rescan_after_lease_loss_keeps_taskless_calls(self):
+        """首次收口只收 worker 构造之前发起的无任务行；之后的重扫只收绑定任务的行。"""
+        queue = self._CyclingQueue()
+        seen: list[datetime | None] = []
+
+        async def _settle(*, taskless_started_before: datetime | None) -> int:
+            seen.append(taskless_started_before)
+            return 0
+
+        before = datetime.now(UTC)
+        worker = GenerationWorker(queue=queue, settle_interrupted_calls=_settle)
+        after = datetime.now(UTC)
+        await self._run_until_settled(worker, queue)
+        assert len(seen) == 1
+        assert seen[0] is not None
+        assert before <= seen[0] <= after
+
+        # lease 丢失超过阈值后的重扫：进程仍存活，无任务身份的行可能正在本进程里跑。
+        worker._orphan_handled_once = False
+        queue._cycles = 0
+        queue.cycled.clear()
+        await self._run_until_settled(worker, queue)
+        assert seen[1:] == [None]
+
+    @pytest.mark.asyncio
+    async def test_default_wiring_flips_orphan_pending_call_row(self, worker_db):
+        """不注入替身时走真实 Ledger，落在队列那处接线的库里：无任务身份的 pending 行翻成 failed[interrupted]。"""
+        from lib.db.models.api_call import ApiCall
+        from lib.db.repositories.usage_repo import UsageRepository
+
+        async with worker_db() as session:
+            call_id = await UsageRepository(session).start_call(
+                project_name="demo", call_type="text", model="m", provider="anthropic"
+            )
+
+        queue = self._CyclingQueue()
+        await self._run_until_settled(GenerationWorker(queue=queue), queue)
+
+        async with worker_db() as session:
+            row = await session.get(ApiCall, call_id)
+        assert (row.status, row.error_code) == ("failed", "interrupted")

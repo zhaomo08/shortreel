@@ -31,6 +31,11 @@ import type {
   TestConnectionResponse,
 } from "@/types/agent-credential";
 import type { CustomProviderInfo } from "@/types/custom-provider";
+import {
+  anthropicMessagesUrl,
+  hasUnsupportedUrlComponents,
+  normalizeAnthropicBaseUrl,
+} from "@/utils/anthropic-url";
 import { errMsg } from "@/utils/async";
 
 import { PresetIcon } from "./PresetIcon";
@@ -81,7 +86,6 @@ export function AddCredentialModal({
   // 草稿态连接测试：保存前先验 base_url + api_key 是否能真实跑通
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<TestConnectionResponse | null>(null);
-  const [testedBaseUrl, setTestedBaseUrl] = useState<string | null>(null);
 
   // 异步竞态隔离：modal 重开（或父组件切到另一条凭证）后，旧 session 里
   // discover/test/import 的 await 仍可能返回并写 state。每次 reset effect 里
@@ -123,7 +127,6 @@ export function AddCredentialModal({
     setDiscoverError(null);
     setSubmitError(null);
     setTestResult(null);
-    setTestedBaseUrl(null);
     setImportPickerOpen(false);
     setDiscovering(false);
     setTesting(false);
@@ -145,12 +148,19 @@ export function AddCredentialModal({
 
   if (!open) return null;
 
+  // 供应商不提供模型列表接口时（如火山方舟两档套餐），下拉框回退到预设的建议模型，
+  // 用户不必知道模型 ID 也能选中一个可用值。
+  const availableModels = modelOptions.length > 0 ? modelOptions : (selected?.suggested_models ?? []);
+
+  // 预览即 Agent 运行时固定调用的地址：base_url 原样存储，CLI 内置 SDK 只在其后拼 /v1/messages
+  const baseUrlRejected = hasUnsupportedUrlComponents(form.baseUrl);
+  const messagesUrlPreview = form.baseUrl.trim() ? anthropicMessagesUrl(form.baseUrl) : "";
+
   // 草稿任意可影响连通性的字段（preset / base_url / api_key / model）变化后，
   // 旧 testResult 已经不对应当前草稿了，必须失效，避免用户把未重新验证的配置
   // 当成已通过验证。
   const invalidateDraftTest = () => {
     setTestResult(null);
-    setTestedBaseUrl(null);
   };
 
   // modelOptions 是按 (endpoint, credential) 元组发现出来的；base_url 或 api_key
@@ -167,17 +177,28 @@ export function AddCredentialModal({
   };
 
   const handleDiscover = async () => {
+    if (baseUrlRejected) {
+      setDiscoverError(t("base_url_unsupported_components"));
+      return;
+    }
     const session = sessionRef.current;
     setDiscovering(true);
     setDiscoverError(null);
     try {
-      // 优先使用表单里的 base_url：用户改了 URL 但发现仍走预设默认端点会选到
-      // 当前 endpoint 不支持的模型。无 base_url 时回退到预设的 discovery/messages URL。
+      // 用户覆盖了 base_url 时按覆盖值发现：仍走预设默认端点会选到当前 endpoint 不支持的模型。
+      // 选预设时表单预填的是预设的 messages_url，它不是覆盖：此时回退到预设目录的
+      // discovery_url（DeepSeek 等预设的模型列表不在 messages 根之下）。是否覆盖按保存时
+      // 同一套归一化后的值比较，只多一个尾斜杠仍算预设默认。
+      const typedBase = form.baseUrl.trim();
+      const isPresetDefault =
+        form.presetId !== customSentinelId &&
+        normalizeAnthropicBaseUrl(typedBase) === normalizeAnthropicBaseUrl(selected?.messages_url ?? "");
       const discoverBase =
-        form.baseUrl.trim() ||
-        (form.presetId === customSentinelId
-          ? ""
-          : selected?.discovery_url || selected?.messages_url || "");
+        typedBase && !isPresetDefault
+          ? typedBase
+          : form.presetId === customSentinelId
+            ? ""
+            : selected?.discovery_url || selected?.messages_url || "";
       if (!discoverBase) {
         if (session === sessionRef.current) setDiscoverError(t("discover_no_base"));
         return;
@@ -239,12 +260,16 @@ export function AddCredentialModal({
   };
 
   const handleTest = async () => {
+    if (baseUrlRejected) {
+      setSubmitError(t("base_url_unsupported_components"));
+      return;
+    }
     const session = sessionRef.current;
+    setSubmitError(null);
     setTesting(true);
     // 失败时清旧的"连接成功"面板，避免用户看到上一次的过期结果
     setTestResult(null);
     const submitBaseUrl = form.baseUrl.trim() || undefined;
-    setTestedBaseUrl(submitBaseUrl ?? null);
     try {
       const res = await API.testAgentConnectionDraft({
         preset_id: form.presetId,
@@ -263,14 +288,11 @@ export function AddCredentialModal({
     }
   };
 
-  const handleApplyFix = (suggestedBaseUrl: string) => {
-    form.setBaseUrl(suggestedBaseUrl);
-    // base_url 变了 → 旧 discovery 和测试结果都不再可信，鼓励用户重新发现+测试
-    invalidateDiscoveredModels();
-    invalidateDraftTest();
-  };
-
   const handleSubmit = async () => {
+    if (baseUrlRejected) {
+      setSubmitError(t("base_url_unsupported_components"));
+      return;
+    }
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -287,6 +309,7 @@ export function AddCredentialModal({
     submitting ||
     (mode === "create" && !form.apiKey.trim()) ||
     !form.baseUrl.trim() ||
+    baseUrlRejected ||
     (mode === "edit" && !form.isDirty(initial));
 
   return (
@@ -419,9 +442,23 @@ export function AddCredentialModal({
                 invalidateDiscoveredModels();
                 invalidateDraftTest();
               }}
-              placeholder="https://api.example.com/anthropic"
+              placeholder="https://api.example.com"
+              aria-invalid={baseUrlRejected}
+              aria-describedby="cred-url-preview"
               className={INPUT_CLS}
             />
+            <div id="cred-url-preview" className="mt-1 text-[11px] leading-[1.55]">
+              {baseUrlRejected ? (
+                <span className="text-warm-bright">{t("base_url_unsupported_components")}</span>
+              ) : messagesUrlPreview ? (
+                <span className="text-text-4">
+                  {t("messages_url_preview_hint")}{" "}
+                  <span className="font-mono text-text-3" translate="no">
+                    {messagesUrlPreview}
+                  </span>
+                </span>
+              ) : null}
+            </div>
           </Field>
 
           <Field
@@ -483,7 +520,7 @@ export function AddCredentialModal({
                 form.setModel(v);
                 invalidateDraftTest();
               }}
-              options={modelOptions}
+              options={availableModels}
               placeholder={selected?.default_model || ""}
               clearable
             />
@@ -523,7 +560,7 @@ export function AddCredentialModal({
                 envVar="ANTHROPIC_DEFAULT_HAIKU_MODEL"
                 value={form.haikuModel}
                 onChange={form.setHaikuModel}
-                options={modelOptions}
+                options={availableModels}
               />
               <RoutingField
                 id="cred-sonnet"
@@ -532,7 +569,7 @@ export function AddCredentialModal({
                 envVar="ANTHROPIC_DEFAULT_SONNET_MODEL"
                 value={form.sonnetModel}
                 onChange={form.setSonnetModel}
-                options={modelOptions}
+                options={availableModels}
               />
               <RoutingField
                 id="cred-opus"
@@ -541,7 +578,7 @@ export function AddCredentialModal({
                 envVar="ANTHROPIC_DEFAULT_OPUS_MODEL"
                 value={form.opusModel}
                 onChange={form.setOpusModel}
-                options={modelOptions}
+                options={availableModels}
               />
               <RoutingField
                 id="cred-subagent"
@@ -550,7 +587,7 @@ export function AddCredentialModal({
                 envVar="CLAUDE_CODE_SUBAGENT_MODEL"
                 value={form.subagentModel}
                 onChange={form.setSubagentModel}
-                options={modelOptions}
+                options={availableModels}
               />
             </div>
           </details>
@@ -565,13 +602,7 @@ export function AddCredentialModal({
             <div className="text-[11.5px] text-warm-bright">{submitError}</div>
           )}
 
-          {testResult && (
-            <TestResultPanel
-              originalBaseUrl={testedBaseUrl}
-              result={testResult}
-              onApplyFix={handleApplyFix}
-            />
-          )}
+          {testResult && <TestResultPanel result={testResult} />}
         </div>
 
         {/* Footer */}
@@ -579,7 +610,9 @@ export function AddCredentialModal({
           <button
             type="button"
             onClick={() => void handleTest()}
-            disabled={testing || submitting || !form.apiKey.trim() || !form.baseUrl.trim()}
+            disabled={
+              testing || submitting || !form.apiKey.trim() || !form.baseUrl.trim() || baseUrlRejected
+            }
             className={GHOST_BTN_CLS}
             data-testid="test-connection"
           >

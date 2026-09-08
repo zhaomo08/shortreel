@@ -48,6 +48,7 @@ from lib.formal_write import FormalWriteReceipt, project_metadata_lock
 from lib.path_safety import PathTraversalError, safe_join
 from lib.project_manager import ProjectManager, resolve_source_kind
 from lib.prompt_builders_script import USER_INSTRUCTIONS_HEADER
+from lib.providers import CallPurpose
 from lib.text_backends.base import (
     DEFAULT_MAX_OUTPUT_TOKENS,
     StructuredOutputExhaustedError,
@@ -355,8 +356,9 @@ def _missing_source_range_error(nums: list[int]) -> EpisodePlanningError:
         listed += f" 等 {len(nums)} 集"
     return EpisodePlanningError(
         f"账本中第 {listed} 没有原文范围记录（source_range），无法据此续接规划——这类条目的物理集文件"
-        "就是它们的最终记录，既无法重造也无法确定下一批的起点；请先调用 reset_episode_planning 做"
-        "全量重置（这些集的集文件会改名留底、下游产物不删），再重新规划。"
+        "就是它们的最终记录，既无法重造也无法确定下一批的起点。若这些集是用户自行拆好上传的，"
+        "不需要规划：按 get_workflow_plan 逐集直接做脚本规划即可。确需重新切分时才调用 "
+        "reset_episode_planning 做全量重置（这些集的集文件会改名留底、下游产物不删），再重新规划。"
     )
 
 
@@ -410,7 +412,7 @@ class EpisodePlanner:
     async def create(cls, project_path: str | Path) -> EpisodePlanner:
         """异步工厂：按项目配置创建文本后端（与剧本生成同一条 SCRIPT 任务配置链）。"""
         project_name = Path(project_path).name
-        generator = await TextGenerator.create(TextTaskType.SCRIPT, project_name)
+        generator = await TextGenerator.create(TextTaskType.SCRIPT, project_name, purpose=CallPurpose.EPISODE_PLANNING)
         return cls(project_path, generator)
 
     # ---------------------------------------------------------------- plan

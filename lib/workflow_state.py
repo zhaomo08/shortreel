@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from portalocker.exceptions import BaseLockException
@@ -31,9 +31,11 @@ from lib.episode_ledger import (
     SourceDoc,
     compute_source_fingerprints,
     episodes_without_source_range,
+    is_derived_episode_name,
     mismatched_source_fingerprints,
     normalize_source_text,
     parse_positive_episode_num,
+    register_orphan_episode_entries,
 )
 from lib.episode_paths import episode_source_relpath
 from lib.project_manager import ProjectManager
@@ -43,6 +45,7 @@ from lib.project_migration_failure import (
     MigrationFailureRecord,
     load_migration_verdict,
 )
+from lib.project_migration_report import MigrationReport, load_migration_report
 from lib.script_models import get_generated_assets, script_duration_total
 from lib.script_plan_entries import (
     ScriptPlanEntryError,
@@ -126,6 +129,7 @@ class WorkflowActionType(StrEnum):
     PREPARE_SCRIPT_PLAN = "prepare_script_plan"
     CONFIRM_SCRIPT_PLAN = "confirm_script_plan"
     GENERATE_SCRIPT = "generate_script"
+    AUTHOR_PROMPTS = "author_prompts"
     GENERATE_ASSET_SHEETS = "generate_asset_sheets"
     GENERATE_STORYBOARDS = "generate_storyboards"
     GENERATE_GRID = "generate_grid"
@@ -179,6 +183,8 @@ class WorkflowStatus(BaseModel):
     gates: dict[str, dict[str, Any]]
     artifacts: dict[str, dict[str, Any]]
     next_action: WorkflowNextAction
+    migration_report: MigrationReport | None = None
+    """上一次跑完的项目迁移登记与跳过了什么；只作说明，不影响状态与阻断。"""
 
 
 #: 11 值制作状态在广度视图（项目列表、卡片、全局头）上的归并显示。
@@ -285,6 +291,24 @@ class _SharedWorkflowFacts:
 
 def _project_revision(project: Mapping[str, Any]) -> str:
     return prefixed_canonical_json_digest(dict(project))
+
+
+#: 提示词可为待生成态的骨架：分镜图生视频的两条剧集路线。参考生视频的单元正文即提示词，ad 无脚本规划。
+_PROMPT_BEARING_KINDS = frozenset({"segments", "scenes"})
+
+
+def _pending_prompt_entry_ids(items: list[dict[str, Any]], kind: str | None) -> list[str]:
+    """``image_prompt`` / ``video_prompt`` 任一为 ``None``（含字段缺失）的条目 id，按剧本顺序。"""
+    if kind not in _PROMPT_BEARING_KINDS:
+        return []
+    id_field = SKELETONS[kind].id_field
+    return [
+        str(item[id_field])
+        for item in items
+        if isinstance(item.get(id_field), str)
+        and item[id_field]
+        and (item.get("image_prompt") is None or item.get("video_prompt") is None)
+    ]
 
 
 def _action(
@@ -655,10 +679,14 @@ class WorkflowStateService:
         """判定源文是否已全部排布完。
 
         源文只来自 ``planning_sources``——本次请求已经读过一遍的那份，不再回磁盘取。
+        手动预拆分（源文全是 ``episode_N.txt``）没有待排布的原文，也从不产生源文指纹与
+        规划游标，直接视为排布完，做完的集才不会被打回分集规划。
         """
 
         if source is None or not source.files:
             return False
+        if all(is_derived_episode_name(PurePosixPath(rel).name) for rel in source.files):
+            return True
         recorded_fingerprints = project.get(SOURCE_FINGERPRINTS_KEY)
         if not isinstance(recorded_fingerprints, Mapping) or not recorded_fingerprints:
             return False
@@ -942,8 +970,16 @@ class WorkflowStateService:
         failure = load_migration_verdict(project_path)
         if failure is not None:
             return self._migration_blocked_status(project, failure)
+        # 用户自行拆好 source/episode_N.txt 上传、账本为空时，先在内存里补建条目再读账本，路线才有
+        # 目标集可选；否则空账本会把这些集指去分集规划，而那条路对手动预拆分只会以「条目缺位置
+        # 记录、请全量重置」告终。补建与分集规划器、内容确认共用同一登记函数（条目无 source_range，
+        # 规划入口照旧拒绝），但这里不写 project.json：状态计算不改变结论性数据（见模块 docstring），
+        # 登记落盘留给真正开始消费这些集的入口。
+        project = register_orphan_episode_entries(project_path, project)
         shared = self._shared_facts(project_path, project)
-        return self._get_status(project_name, project, project_path, episode, shared)
+        status = self._get_status(project_name, project, project_path, episode, shared)
+        status.migration_report = load_migration_report(project_path)
+        return status
 
     def get_project_summary(
         self,
@@ -964,10 +1000,12 @@ class WorkflowStateService:
 
         project = self.pm.load_project_readonly(project_name)
         project_path = self.pm.get_project_path(project_name)
-        episodes = self._episodes(project, [])
         failure = load_migration_verdict(project_path)
         if failure is not None:
-            return self._migration_blocked_summary(project, episodes, failure)
+            return self._migration_blocked_summary(project, self._episodes(project, []), failure)
+        # 与 get_status 同一口径：手动预拆分的集在内存里补进账本后再数集数，不落盘。
+        project = register_orphan_episode_entries(project_path, project)
+        episodes = self._episodes(project, [])
         try:
             resolver: ArtifactComparer | None = (
                 RegisteredArtifactResolver(project_path, project)
@@ -1527,7 +1565,10 @@ class WorkflowStateService:
                         state = "SCRIPT_PLAN_CONTENT"
                         next_action = _action(WorkflowActionType.NONE, "formal script_plan currency is blocked")
                         return self._response(project, source, target, state, blockers, gates, artifacts, next_action)
-                    if artifacts["script_plan"]["state"] == "missing":
+                    planless_script = artifacts["script_plan"][
+                        "state"
+                    ] == "missing" and self._script_usable_without_plan(currency, target, selected)
+                    if artifacts["script_plan"]["state"] == "missing" and not planless_script:
                         state = "SCRIPT_PLAN_CONTENT"
                         next_action = _action(
                             WorkflowActionType.PREPARE_SCRIPT_PLAN,
@@ -1535,26 +1576,29 @@ class WorkflowStateService:
                             args={"episode": target.episode, "preprocessor": preprocessor},
                         )
                         return self._response(project, source, target, state, blockers, gates, artifacts, next_action)
-                    review = script_review.review_status(project_path, project, target.episode)
-                    if (
-                        selected is not None
-                        and selected[1].get("ledger_status") == "stale"
-                        and script_review.stored_review(project, target.episode).get("fingerprint") is None
-                    ):
-                        review = "pending_review"
-                    gates["script_plan_review"] = {
-                        "state": "confirmed" if review == "confirmed" else "pending",
-                        "revision": revision,
-                    }
-                    if review != "confirmed":
-                        state = "SCRIPT_PLAN_REVIEW"
-                        next_action = _action(
-                            WorkflowActionType.CONFIRM_SCRIPT_PLAN,
-                            "formal script_plan awaits content review",
-                            args={"episode": target.episode},
-                            requires_confirmation=True,
-                        )
-                        return self._response(project, source, target, state, blockers, gates, artifacts, next_action)
+                    if not planless_script:
+                        review = script_review.review_status(project_path, project, target.episode)
+                        if (
+                            selected is not None
+                            and selected[1].get("ledger_status") == "stale"
+                            and script_review.stored_review(project, target.episode).get("fingerprint") is None
+                        ):
+                            review = "pending_review"
+                        gates["script_plan_review"] = {
+                            "state": "confirmed" if review == "confirmed" else "pending",
+                            "revision": revision,
+                        }
+                        if review != "confirmed":
+                            state = "SCRIPT_PLAN_REVIEW"
+                            next_action = _action(
+                                WorkflowActionType.CONFIRM_SCRIPT_PLAN,
+                                "formal script_plan awaits content review",
+                                args={"episode": target.episode},
+                                requires_confirmation=True,
+                            )
+                            return self._response(
+                                project, source, target, state, blockers, gates, artifacts, next_action
+                            )
 
                 script_artifact, items, kind, script = self._load_script_artifacts(
                     project_path, project_name, project, target, blockers, currency
@@ -1603,6 +1647,15 @@ class WorkflowStateService:
                         "target episode has no current final script",
                         args={"episode": target.episode}
                         | ({"stale_entry_ids": stale_entry_ids} if stale_entry_ids else {}),
+                    )
+                elif pending_prompt_ids := _pending_prompt_entry_ids(items, kind):
+                    # 机械转换出的剧本条目还没有提示词：剧本阶段未完成，先补提示词，不报生成分镜图。
+                    state = "FINAL_SCRIPT"
+                    next_action = _action(
+                        WorkflowActionType.AUTHOR_PROMPTS,
+                        "script entries still need prompts",
+                        args={"episode": target.episode},
+                        ids=pending_prompt_ids,
                     )
                 else:
                     missing_sheets = [
@@ -1731,6 +1784,28 @@ class WorkflowStateService:
                             next_action = _action(WorkflowActionType.EXPORT, "all required artifacts are usable")
 
         return self._response(project, source, target, state, blockers, gates, artifacts, next_action)
+
+    @staticmethod
+    def _script_usable_without_plan(
+        currency: ArtifactComparer | None,
+        target: WorkflowTarget,
+        selected: tuple[int, dict[str, Any]] | None,
+    ) -> bool:
+        """一集没有正式 script_plan、但正式剧本已按无计划依据登记且可用时，剧本门代替计划门。
+
+        没有计划文件的剧本按无计划依据登记在清单里。这样的集直接按剧本与下游产物判状态；
+        用户重跑规划产生正式计划后，剧本条目因依据变化判 stale，走常规路线。
+        """
+
+        if currency is None or selected is None:
+            return False
+        script_file = selected[1].get("script_file")
+        if not isinstance(script_file, str) or not script_file:
+            return False
+        state = WorkflowStateService._artifact_state(
+            currency, ArtifactKey.episode_script(target.episode), script_file, []
+        )
+        return state in {ArtifactStatus.CURRENT.value, ArtifactStatus.STALE.value}
 
     @staticmethod
     def _response(

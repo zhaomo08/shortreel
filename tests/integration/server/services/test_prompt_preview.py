@@ -166,7 +166,33 @@ class TestPreviewMatchesExecution:
         text = preview.storyboard_image.text
         assert text is not None
         assert preview.storyboard_image.is_text_form
-        assert text.startswith(f"Style: Anime\nVisual style: cinematic\n\n{body}")
+        assert text.startswith("Style: Anime\nVisual style: cinematic\nReference_Images: 图1")
+        assert f"\n\n{body}\n\nAvoid: 水印、多余文字、Logo" in text
+        assert text == generator.image_calls[0]["prompt"]
+
+    async def test_reference_numbering_covers_the_previous_storyboard_and_mentions(self, tmp_path, monkeypatch):
+        """预览与执行读同一份参考图装配：上一分镜图占最后一个序位，正文里的 @[登记名] 换成对应的图N。"""
+        project_path = prepare_files(tmp_path)
+        pm = _pm_for("narration", project_path)
+        seed_current_storyboard(pm, "E1S01")
+        _item_of(pm)["image_prompt"] = {
+            **STRUCTURED_IMAGE_PROMPT,
+            "scene": "@[Alice]站在@[祠堂]门口，手里握着@[玉佩]，身后是@[无名路人]",
+        }
+        generator = FakeGenerator()
+        _patch_execution(monkeypatch, pm, generator)
+
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+        await generation_tasks.execute_storyboard_task(
+            "demo", ITEM_ID, {"script_file": "episode_1.json", "prompt": _item_of(pm)["image_prompt"]}
+        )
+
+        text = preview.storyboard_image.text
+        assert text is not None
+        assert (
+            "Reference_Images: 图1为角色参考图；图2为场景参考图；图3为道具参考图；图4为上一分镜图，只参考构图与色调。\n"
+            "Scene: 图1站在图2门口，手里握着图3，身后是无名路人\n"
+        ) in text
         assert text == generator.image_calls[0]["prompt"]
 
     @pytest.mark.parametrize("content_mode", CONTENT_MODES)
@@ -244,17 +270,32 @@ class TestPreviewIsReadOnly:
 
 
 class TestPreviewUnavailableSides:
-    async def test_missing_prompt_reports_that_side_only(self, tmp_path, monkeypatch):
+    async def test_pending_prompt_reports_that_side_only(self, tmp_path, monkeypatch):
+        """机械转换写下的 ``None`` 与根本没有该字段的存量条目都是待生成：另一侧照常渲染。"""
         project_path = prepare_files(tmp_path)
         pm = _pm_for("narration", project_path)
-        _item_of(pm).pop("video_prompt")
+        _item_of(pm)["video_prompt"] = None
         _patch_execution(monkeypatch, pm, FakeGenerator())
 
         preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
 
         assert preview.video.text is None
-        assert preview.video.unavailable == prompt_preview.UNAVAILABLE_MISSING
+        assert preview.video.unavailable == prompt_preview.UNAVAILABLE_PENDING
         assert preview.storyboard_image.text
+
+        _item_of(pm).pop("video_prompt")
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+        assert preview.video.unavailable == prompt_preview.UNAVAILABLE_PENDING
+
+    async def test_blank_prompt_reports_missing(self, tmp_path, monkeypatch):
+        project_path = prepare_files(tmp_path)
+        pm = _pm_for("narration", project_path)
+        _item_of(pm)["video_prompt"] = "   "
+        _patch_execution(monkeypatch, pm, FakeGenerator())
+
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+
+        assert preview.video.unavailable == prompt_preview.UNAVAILABLE_MISSING
 
     async def test_malformed_prompt_reports_invalid(self, tmp_path, monkeypatch):
         project_path = prepare_files(tmp_path)
