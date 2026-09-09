@@ -95,7 +95,7 @@ from lib.prompt_builders import (
 )
 from lib.prompt_utils import render_storyboard_video_prompt
 from lib.reference_catalog import build_reference_catalog
-from lib.reference_image_numbering import PREVIOUS_STORYBOARD_ROLE, ReferenceImageSlot
+from lib.reference_image_numbering import PREVIOUS_STORYBOARD_ROLE, ReferenceImageSlot, clamp_reference_images
 from lib.reference_video.execution_checkpoint import (
     NarrationExecutionFacts,
     ProviderMediaInput,
@@ -132,6 +132,7 @@ from lib.visual_artifact_provenance import (
 )
 from server.services.generation_context import (
     AudioLaneRequest,
+    GenerationContext,
     ImageLaneRequest,
     VideoLaneRequest,
     resolve_generation_context,
@@ -601,7 +602,8 @@ def collect_shot_product_references(
     每个商品：有 product sheet 时注入集为「sheet 多角度 + 原图压阵」（sheet 在前、
     原图收尾），无 sheet 时原图直注。返回 ``{"image": Path, "name": str,
     "kind": "sheet"|"original"}`` 列表——name 是商品的逻辑身份（进参考图证据，供正文
-    ``@[商品名]`` 指认到对应「图N」），kind 供截断时让 sheet 优先存活；调用方负责把该列表
+    ``@[商品名]`` 指认到对应「图N」），kind 只区分 sheet 与原图、映射成参考图证据里的
+    role（按后端上限裁剪时纯去尾，不看 kind）；调用方负责把该列表
     排在其它参考之前（排序绝对优先），声明行随之把这些序位标为商品参考图并附完全一致
     的保真约束。氛围分镜
     （列表为空）返回空列表，零商品图。脏数据（products_in_shot 非列表、products
@@ -698,16 +700,38 @@ def _product_visual_references(product_references: Sequence[Mapping[str, object]
 
 @dataclass(frozen=True)
 class StoryboardReferenceSet:
-    """一个分镜条目最终随请求发出的参考图列表及其证据。
+    """一个分镜条目装配出的参考图列表及其证据。
 
     ``provider_references`` 与 ``visual_references`` 严格等长同序：前者是发给供应商的
     路径条目，后者是同一序位的逻辑身份，prompt 渲染层据此声明「图N」并替换正文的
-    ``@[登记名]``。
+    ``@[登记名]``。完整列表是产物依据与 claim 的口径；随请求实发的子集经 :meth:`clamped`
+    按图像后端上限得出，``warnings`` 随之记下裁剪 warning（与任务 ``result.warnings`` 同形），
+    未裁剪时为空。
     """
 
     item: dict[str, Any]
     provider_references: list[object]
     visual_references: list[VisualReference]
+    warnings: tuple[dict[str, Any], ...] = ()
+
+    def clamped(self, max_reference_images: int, *, model: str) -> StoryboardReferenceSet:
+        """按图像后端的参考图上限去尾裁剪，返回实发的参考图集（未超限时返回自身）。
+
+        装配序不因裁剪改变。调用方须在渲染提示词前先经这一步，编号才只指认实际发出的图；
+        产物依据仍按裁剪前的完整列表登记——上限是供应商属性，不进 basis（ADR 0062），
+        目标态规划器也按脚本条目重建完整列表。裁剪发生时结果集带一条 warning，调用方把它
+        写进任务结果，用户与 Agent 才能看到有参考图没随请求发出。
+        """
+        clamp = clamp_reference_images(self.visual_references, max_reference_images, model=model)
+        warning = clamp.warning()
+        if warning is None:
+            return self
+        return StoryboardReferenceSet(
+            item=self.item,
+            provider_references=self.provider_references[: clamp.kept],
+            visual_references=self.visual_references[: clamp.kept],
+            warnings=(warning,),
+        )
 
 
 def collect_storyboard_references(
@@ -723,6 +747,9 @@ def collect_storyboard_references(
 ) -> StoryboardReferenceSet:
     """按执行期口径装配一个分镜条目的参考图：商品参考排首、随后角色/场景/道具 sheet、
     补充参考图，上一分镜图收尾。预览与执行共用此函数，提示词里的编号才能逐字一致。
+
+    装配不看图像后端的参考图数量上限：解析出 backend 之后由调用方经
+    :meth:`StoryboardReferenceSet.clamped` 裁剪，再渲染提示词。
 
     条目不存在时抛 ``ValueError``。
     """
@@ -1250,6 +1277,8 @@ class _FormalImagePlan:
     finalize: Callable[[Any, int], Awaitable[tuple[str, _CancellationReceipt | None]]]
     pre_submit: Callable[[], Awaitable[None]] | None = None
     before_submit: Callable[[], Awaitable[None]] | None = None
+    #: 写进任务 ``result.warnings`` 的非阻断提示（如参考图超限裁剪）；为空时结果不带该键。
+    warnings: tuple[dict[str, Any], ...] = ()
 
 
 async def _run_formal_image_task(
@@ -1261,19 +1290,25 @@ async def _run_formal_image_task(
     task_id: str | None,
     frozen_references: FrozenImageReferences,
     plan: _FormalImagePlan,
+    context: GenerationContext | None = None,
 ) -> dict[str, Any]:
-    """Submit one formal image, then take either the staged activation or the finalizer path."""
+    """Submit one formal image, then take either the staged activation or the finalizer path.
+
+    ``context`` 供已经解析过 image lane 的调用方复用同一次解析——提示词里的参考图编号按
+    backend 的上限裁剪过，重解析可能落到别的 backend、让编号与实发张数错位。不传则在提交
+    前按参考图有无定 t2i / i2i 槽自行解析。
+    """
 
     reference_images = frozen_references.reference_images
     formal_outcomes: list[_FormalImageCommitOutcome] = []
 
     async def _submit() -> tuple[Any, tuple[Path, int]]:
-        ctx = await resolve_generation_context(
+        ctx = context or await resolve_generation_context(
             project_name,
             payload,
             project=project,
             user_id=user_id,
-            image=ImageLaneRequest(capability="i2i" if reference_images else "t2i"),
+            image=ImageLaneRequest(generation_type="i2i" if reference_images else "t2i"),
         )
         if plan.pre_submit is not None:
             await plan.pre_submit()
@@ -1307,16 +1342,16 @@ async def _run_formal_image_task(
     else:
         created_at, receipt = await plan.finalize(generator, version)
 
-    return compensable_formal_task_result(
-        {
-            "version": version,
-            "file_path": plan.artifact_path,
-            "created_at": created_at,
-            "resource_type": plan.resource_type,
-            "resource_id": plan.resource_id,
-        },
-        receipt,
-    )
+    result: dict[str, Any] = {
+        "version": version,
+        "file_path": plan.artifact_path,
+        "created_at": created_at,
+        "resource_type": plan.resource_type,
+        "resource_id": plan.resource_id,
+    }
+    if plan.warnings:
+        result["warnings"] = list(plan.warnings)
+    return compensable_formal_task_result(result, receipt)
 
 
 async def _run_asset_sheet_image_task(
@@ -1628,6 +1663,19 @@ def emit_generation_success_batch(
     return asset_fingerprints
 
 
+@dataclass(frozen=True, slots=True)
+class _StoryboardImageInputs:
+    """分镜图任务在解析 image lane 之前就能备齐的输入：项目快照、风格与未裁剪的参考图集。"""
+
+    project: dict[str, Any]
+    project_path: Path
+    style: str
+    style_description: str
+    currency_resolver: ArtifactCurrencyResolver
+    claims: list[ArtifactInputClaim]
+    references: StoryboardReferenceSet
+
+
 async def execute_storyboard_task(
     project_name: str,
     resource_id: str,
@@ -1643,7 +1691,7 @@ async def execute_storyboard_task(
     if payload.get("prompt") is None:
         raise ValueError("prompt is required for storyboard task")
 
-    def _prepare():
+    def _load() -> _StoryboardImageInputs:
         _project = get_project_manager().load_project(project_name)
         _project_path = get_project_manager().get_project_path(project_name)
         _script = get_project_manager().load_script(project_name, script_file)
@@ -1653,8 +1701,8 @@ async def execute_storyboard_task(
             script=_script,
             script_filename=str(script_file),
         )
-        _artifact_episode = _script_input.episode
         _currency_resolver = active_artifact_currency_resolver(_project_path, _project)
+        # 装配沿这份列表追加每张参考图的产物 claim，故与 references 同源、不能各传一份。
         _formal_claims: list[ArtifactInputClaim] = [_script_input.claim]
         _style = _project.get("style", "")
         _style_description = _project.get("style_description", "")
@@ -1665,44 +1713,67 @@ async def execute_storyboard_task(
             _project_path,
             _script,
             resource_id,
-            artifact_episode=_artifact_episode,
+            artifact_episode=_script_input.episode,
             currency_resolver=_currency_resolver,
             formal_claims=_formal_claims,
             extra_reference_images=payload.get("extra_reference_images") or [],
         )
-        _semantic_prompt = _references.item.get("image_prompt")
-        _ref_images = _references.provider_references or None
-        _visual_references = _references.visual_references
-        _prompt_text = _normalize_storyboard_prompt(
-            _semantic_prompt, _style, _style_description, references=_visual_references
+        return _StoryboardImageInputs(
+            project=_project,
+            project_path=_project_path,
+            style=_style,
+            style_description=_style_description,
+            currency_resolver=_currency_resolver,
+            claims=_formal_claims,
+            references=_references,
         )
-        _frozen = freeze_image_references(_ref_images, _visual_references)
+
+    inputs = await asyncio.to_thread(_load)
+    project, project_path = inputs.project, inputs.project_path
+    # 参考图先于提示词定型：backend 的参考图上限决定实际发出几张，编号只能按裁剪后的序列渲染，
+    # 故 image lane 在此解析一次并沿用到提交，避免重解析落到上限不同的 backend。
+    context = await resolve_generation_context(
+        project_name,
+        payload,
+        project=project,
+        project_path=project_path,
+        user_id=user_id,
+        image=ImageLaneRequest(generation_type="i2i" if inputs.references.provider_references else "t2i"),
+    )
+
+    def _stage() -> tuple[
+        str, FrozenImageReferences, ArtifactBasis, tuple[ArtifactInputClaim, ...], tuple[dict[str, Any], ...]
+    ]:
+        _assembled = inputs.references
+        _sent = _assembled.clamped(context.image.max_reference_images, model=context.image.backend_model)
+        _semantic_prompt = _assembled.item.get("image_prompt")
+        _prompt_text = _normalize_storyboard_prompt(
+            _semantic_prompt, inputs.style, inputs.style_description, references=_sent.visual_references
+        )
+        # 依据与 claim 按完整装配集冻结登记，供应商只收裁剪后的前几张：与目标态规划器同口径。
+        _frozen = freeze_image_references(_assembled.provider_references or None, _assembled.visual_references)
         try:
-            _formal_claims = list(
-                bind_artifact_input_claims_to_frozen_visuals(
-                    project_path=_project_path,
-                    resolver=_currency_resolver,
-                    claims=_formal_claims,
-                    source_references=_visual_references,
-                    frozen_references=_frozen.visual_references,
-                )
+            _claims = bind_artifact_input_claims_to_frozen_visuals(
+                project_path=project_path,
+                resolver=inputs.currency_resolver,
+                claims=inputs.claims,
+                source_references=_assembled.visual_references,
+                frozen_references=_frozen.visual_references,
             )
             _basis = build_storyboard_image_visual_basis(
                 resource_id=resource_id,
                 image_prompt=_semantic_prompt,
-                style=_style,
-                style_description=_style_description,
-                aspect_ratio=get_aspect_ratio(_project, "storyboards"),
+                style=inputs.style,
+                style_description=inputs.style_description,
+                aspect_ratio=get_aspect_ratio(project, "storyboards"),
                 references=_frozen.visual_references,
             )
         except BaseException:
             _frozen.cleanup()
             raise
-        return _project, _project_path, _prompt_text, _frozen, _basis, tuple(_formal_claims)
+        return _prompt_text, _frozen.sent(len(_sent.visual_references)), _basis, _claims, _sent.warnings
 
-    project, project_path, prompt_text, frozen_references, storyboard_basis, formal_claims = await asyncio.to_thread(
-        _prepare
-    )
+    prompt_text, frozen_references, storyboard_basis, formal_claims, warnings = await asyncio.to_thread(_stage)
     artifact_path = f"storyboards/scene_{resource_id}.png"
 
     async def _assert_claims_usable() -> None:
@@ -1740,6 +1811,7 @@ async def execute_storyboard_task(
         user_id=user_id,
         task_id=task_id,
         frozen_references=frozen_references,
+        context=context,
         plan=_FormalImagePlan(
             resource_type="storyboards",
             resource_id=resource_id,
@@ -1750,6 +1822,7 @@ async def execute_storyboard_task(
             finalize=_finalize,
             pre_submit=_assert_claims_usable,
             before_submit=_assert_claims_usable,
+            warnings=warnings,
         ),
     )
 
@@ -2362,7 +2435,7 @@ async def execute_video_task(
         execution_payload,
         project=project,
         user_id=user_id,
-        video=VideoLaneRequest(capability=video_bucket_for_generation_mode(project.get("generation_mode"))),
+        video=VideoLaneRequest(generation_type=video_bucket_for_generation_mode(project.get("generation_mode"))),
         audio=AudioLaneRequest() if delivery_options.narration_delivery == USE_TTS else None,
     )
     generator = ctx.generator
@@ -2668,7 +2741,7 @@ async def execute_video_task(
                     project_name=project_name,
                     script_file=script_file,
                     unit_id=resource_id,
-                    capability="i2v",
+                    generation_type="i2v",
                     provider_id=ctx.video.provider_model.provider_id,
                     provider_model_id=ctx.video.provider_model.model_id,
                     backend_model_id=ctx.video.backend_model,
@@ -3237,6 +3310,16 @@ async def execute_grid_task(
             formal_claims=formal_claims,
             visual_references=visual_references,
         )
+        # 参考图先于提示词定型：backend 的上限决定实际发出几张，各格正文的「图N」只能按
+        # 裁剪后的序列渲染，故 image lane 在冻结之前解析一次并沿用到提交。
+        ctx = await resolve_generation_context(
+            project_name,
+            payload,
+            project=project,
+            project_path=project_path,
+            user_id=user_id,
+            image=ImageLaneRequest(generation_type="i2i" if reference_images else "t2i"),
+        )
         frozen_references = await asyncio.to_thread(
             freeze_image_references,
             reference_images,
@@ -3252,12 +3335,17 @@ async def execute_grid_task(
                 frozen_references=frozen_references.visual_references,
             )
         )
-        reference_images = frozen_references.reference_images
+        # 依据与宫格记录按完整装配集登记，供应商只收裁剪后的前几张（与分镜路径同口径）；
+        # 裁剪 warning 随任务结果返回。
+        reference_clamp = clamp_reference_images(
+            visual_references, ctx.image.max_reference_images, model=ctx.image.backend_model
+        )
+        sent_references = frozen_references.sent(reference_clamp.kept)
+        reference_images = sent_references.reference_images
         grid.reference_images = [ReferenceImage.from_dict(m) for m in ref_metadata] if ref_metadata else []
         grid_manager.save(grid)
 
         # d) Generate grid image
-        _needs_i2i = bool(reference_images)
         items, id_field, _char_field, _scene_field, _prop_field = get_storyboard_items(script)
         item_by_id = {str(item.get(id_field)): item for item in items if isinstance(item, dict)}
         if len(set(grid.scene_ids)) != len(grid.scene_ids):
@@ -3283,7 +3371,7 @@ async def execute_grid_task(
             style=str(project.get("style") or ""),
             aspect_ratio=member_aspect_ratio,
             grid_aspect_ratio=grid_aspect_ratio,
-            references=frozen_references.visual_references,
+            references=sent_references.visual_references,
         )
         grid_basis = build_grid_composite_visual_basis(
             group_id=grid.id,
@@ -3293,13 +3381,6 @@ async def execute_grid_task(
             style=str(project.get("style") or ""),
             grid_aspect_ratio=grid_aspect_ratio,
             references=frozen_references.visual_references,
-        )
-        ctx = await resolve_generation_context(
-            project_name,
-            payload,
-            project=project,
-            user_id=user_id,
-            image=ImageLaneRequest(capability="i2i" if _needs_i2i else "t2i"),
         )
         generator = ctx.generator
         aspect_ratio = grid_aspect_ratio
@@ -3475,17 +3556,17 @@ async def execute_grid_task(
                     }
                 }
 
-    return compensable_formal_task_result(
-        {
-            "version": version,
-            "file_path": f"grids/{resource_id}.png",
-            "created_at": created_at,
-            "resource_type": "grids",
-            "resource_id": resource_id,
-            "unit_results": unit_results,
-        },
-        receipt,
-    )
+    grid_result: dict[str, Any] = {
+        "version": version,
+        "file_path": f"grids/{resource_id}.png",
+        "created_at": created_at,
+        "resource_type": "grids",
+        "resource_id": resource_id,
+        "unit_results": unit_results,
+    }
+    if (clamp_warning := reference_clamp.warning()) is not None:
+        grid_result["warnings"] = [clamp_warning]
+    return compensable_formal_task_result(grid_result, receipt)
 
 
 async def _execute_reference_video_task_proxy(

@@ -53,6 +53,7 @@ class _FakeBackend:
     name: str
     model: str
     voices: list = field(default_factory=list)
+    max_reference_images: int = 0
 
     def list_voices(self):
         """audio backend 协议的一部分：audio lane 解析时会取音色目录快照。"""
@@ -195,7 +196,9 @@ class TestLaneDeclaration:
             "image_provider_t2i": "ark/img-t2i",
             "image_provider_i2i": "ark/img-i2i",
         }
-        ctx = await resolve_generation_context("demo", None, project=project, image=ImageLaneRequest(capability="i2i"))
+        ctx = await resolve_generation_context(
+            "demo", None, project=project, image=ImageLaneRequest(generation_type="i2i")
+        )
         assert ctx.image.provider_model == ProviderModel("ark", "img-i2i")
 
     async def test_all_three_lanes(self, patched_session_factory, project_env, fake_assemble):
@@ -536,6 +539,7 @@ class TestValueObjectAssembly:
             backend_name="ark",
             backend_model="m",
             resolution=None,
+            max_reference_images=0,
         )
         with pytest.raises(AttributeError):
             lane.resolution = "720p"

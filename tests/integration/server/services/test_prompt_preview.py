@@ -11,6 +11,7 @@ from tests.integration.server.services.generation_tasks_support import (
     ad_pm,
     async_return,
     fake_resolve_ctx,
+    pm_with_eight_references,
     prepare_files,
     register_asset_sheet_claims,
     seed_current_storyboard,
@@ -247,6 +248,65 @@ class TestPreviewMatchesExecution:
         as_text = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
 
         assert as_text.video.text == seed
+
+
+class TestPreviewMatchesClampedExecution:
+    """参考图超过图像后端上限时，预览与执行按同一裁剪编号。"""
+
+    async def test_preview_text_is_verbatim_under_clamping(self, tmp_path, monkeypatch):
+        project_path = prepare_files(tmp_path)
+        pm = pm_with_eight_references(project_path)
+        generator = FakeGenerator(project_path)
+        _patch_execution(monkeypatch, pm, generator, register_artifacts=True)
+        clamped_lane = fake_resolve_ctx(generator, image_max_reference_images=7)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", clamped_lane)
+        monkeypatch.setattr(prompt_preview, "resolve_generation_context", clamped_lane)
+
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+        result = await generation_tasks.execute_storyboard_task(
+            "demo", ITEM_ID, {"script_file": "episode_1.json", "prompt": "queued prompt"}
+        )
+
+        assert len(generator.image_calls[0]["reference_images"]) == 7
+        assert preview.storyboard_image.text == generator.image_calls[0]["prompt"]
+        # 预览在生成前就给出与执行期任务结果同一条裁剪 warning；视频侧不裁剪参考图，不带
+        assert list(preview.storyboard_image.warnings) == result["warnings"]
+        assert preview.storyboard_image.warnings == (
+            {"key": "ref_too_many_images", "params": {"count": 8, "model": "gpt-image-2", "max_count": 7}},
+        )
+        assert preview.video.warnings == ()
+
+    async def test_preview_within_the_limit_carries_no_warning(self, tmp_path, monkeypatch):
+        project_path = prepare_files(tmp_path)
+        pm = pm_with_eight_references(project_path)
+        generator = FakeGenerator(project_path)
+        _patch_execution(monkeypatch, pm, generator, register_artifacts=True)
+        monkeypatch.setattr(
+            prompt_preview, "resolve_generation_context", fake_resolve_ctx(generator, image_max_reference_images=8)
+        )
+
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+
+        assert preview.storyboard_image.text is not None
+        assert "图8为道具参考图。" in preview.storyboard_image.text
+        assert preview.storyboard_image.warnings == ()
+
+    async def test_preview_falls_back_to_no_clamping_when_the_lane_cannot_resolve(self, tmp_path, monkeypatch):
+        """凭证缺失等解析失败只让预览退回不裁剪，仍渲染出提示词。"""
+        project_path = prepare_files(tmp_path)
+        pm = pm_with_eight_references(project_path)
+        monkeypatch.setattr(prompt_preview, "get_project_manager", lambda: pm)
+
+        async def _unresolvable(*_args, **_kwargs):
+            raise RuntimeError("no image provider configured")
+
+        monkeypatch.setattr(prompt_preview, "resolve_generation_context", _unresolvable)
+
+        preview = await prompt_preview.preview_item_prompts("demo", "episode_1.json", ITEM_ID)
+
+        assert preview.storyboard_image.text is not None
+        assert "图8为道具参考图。" in preview.storyboard_image.text
+        assert preview.storyboard_image.warnings == ()
 
 
 class TestPreviewIsReadOnly:

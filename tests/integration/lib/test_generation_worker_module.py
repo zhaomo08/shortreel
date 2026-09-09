@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
 from lib.artifact_manifest import ArtifactBasis, compose_video_artifact_basis
+from lib.db.models.api_call import ApiCall
 from lib.generation_worker import (
     _ORPHAN_RESCAN_LEASE_LOST_MULT,
     DEFAULT_PROVIDER,
@@ -19,6 +21,12 @@ from lib.generation_worker import (
 )
 from lib.script_editor import ScriptEditError
 from lib.video_artifact_facts import VideoArtifactCurrencyFacts
+
+
+async def stored_calls(session) -> list[ApiCall]:
+    """按 started_at 倒序读回 api_calls 行。"""
+    stmt = select(ApiCall).order_by(ApiCall.started_at.desc(), ApiCall.id.desc())
+    return list((await session.execute(stmt)).scalars().all())
 
 
 def _cap(limits: dict[str, dict[str, int]] | None = None, *, image: int = 5, video: int = 3) -> CapacityTable:
@@ -63,7 +71,7 @@ def _worker_reference_checkpoint(task_id: str, *, provider_id: str = "ark") -> s
         project_name="demo",
         script_file="scripts/episode_1.json",
         unit_id="E1U1",
-        capability="r2v",
+        generation_type="r2v",
         provider_id=provider_id,
         provider_model_id="model-v1",
         backend_model_id="model-v1",
@@ -128,7 +136,7 @@ def _worker_storyboard_checkpoint(task_id: str, *, provider_id: str = "ark") -> 
         project_name="demo",
         script_file="scripts/episode_1.json",
         unit_id="E1S01",
-        capability="i2v",
+        generation_type="i2v",
         provider_id=provider_id,
         provider_model_id="model-v1",
         backend_model_id="model-v1",
@@ -374,7 +382,7 @@ class TestExtractProvider:
         assert await _extract_provider(task) == "ark"
 
     async def test_project_level_image_t2i(self, monkeypatch):
-        """image 投影按代表性 capability=t2i 取项目级 image_provider_t2i。"""
+        """image 投影按代表性 generation_type=t2i 取项目级 image_provider_t2i。"""
         _patch_pm(monkeypatch, {"image_provider_t2i": "gemini-vertex/imagen-3"})
         task = {"payload": {}, "project_name": "demo", "task_type": "storyboard"}
         assert await _extract_provider(task) == "gemini-vertex"
@@ -610,7 +618,7 @@ class TestExtractProviderAlignsWithExecution:
         task = {"payload": {}, "project_name": "demo", "task_type": "storyboard"}
 
         worker_provider = await _extract_provider(task)
-        resolved = await ConfigResolver(async_session_factory).resolve_image_backend(project, {}, capability="t2i")
+        resolved = await ConfigResolver(async_session_factory).resolve_image_backend(project, {}, generation_type="t2i")
         assert worker_provider == resolved.provider_id == "openai"
 
     async def test_video_alignment(self, monkeypatch):
@@ -622,7 +630,7 @@ class TestExtractProviderAlignsWithExecution:
         task = {"payload": {}, "project_name": "demo", "task_type": "video"}
 
         worker_provider = await _extract_provider(task)
-        resolved = await ConfigResolver(async_session_factory).resolve_video_backend(project, {}, capability="i2v")
+        resolved = await ConfigResolver(async_session_factory).resolve_video_backend(project, {}, generation_type="i2v")
         assert worker_provider == resolved.provider_id == "ark"
 
 
@@ -2224,6 +2232,37 @@ class TestGenerationWorker:
         assert "[resume_expired_detail]" in queue.failed[0][1]
 
     @pytest.mark.asyncio
+    async def test_process_resume_task_settles_the_call_row_with_the_failure_text(self, monkeypatch, worker_db):
+        """派发侧终态失败：判死这次续跑的异常要随补账落到调用行，不能只翻任务。
+
+        任务侧落的是任务失败码（``[resume_expired_detail]``），记录表读的是调用行的
+        error_message / error_code——两张表各有自己的失败登记，调用行那份只能从这里落。
+        """
+        from lib.db.repositories.usage_repo import UsageRepository
+        from lib.video_backends.base import ResumeExpiredError
+
+        async with worker_db() as session:
+            call_id = await UsageRepository(session).start_call(
+                project_name="demo", call_type="video", model="m", task_id="exp-row"
+            )
+
+        queue = _FakeQueue()
+        worker = GenerationWorker(queue=queue)
+
+        async def _expire(_task, *, job_id):
+            raise ResumeExpiredError(job_id=job_id, provider="ark")
+
+        monkeypatch.setattr("server.services.resume_executor.execute_resume_video_task", _expire)
+        await worker._process_resume_task(_storyboard_resume_task("exp-row", job_id="x"))
+
+        async with worker_db() as session:
+            row = await session.get(ApiCall, call_id)
+        assert (row.status, row.cost_amount) == ("failed", 0)
+        assert row.error_message == "resume job x expired or not found on provider ark"
+        # 过期异常不带 HTTP 状态也不带上游错误码，分类落空——读侧按原文显示
+        assert (row.error_code, row.error_params) == (None, None)
+
+    @pytest.mark.asyncio
     async def test_process_resume_task_endpoint_changed(self, monkeypatch):
         """ResumeEndpointChangedError → mark_failed [resume_endpoint_changed]，错误可归因。"""
         from lib.video_backends.base import ResumeEndpointChangedError
@@ -2340,12 +2379,12 @@ class TestGenerationWorker:
         assert queue.cancelled
         assert queue.cancelled[0][0] == "rc"
         async with worker_db() as session:
-            stored = await UsageRepository(session).get_calls(project_name="demo")
-        assert [(item["id"], item["status"]) for item in stored["items"]] == [
+            stored = await stored_calls(session)
+        assert [(row.id, row.status) for row in stored] == [
             (call_id, "cancelled"),
             (older_call_id, "pending"),
         ]
-        assert stored["items"][0]["cost_amount"] == 0
+        assert stored[0].cost_amount == 0
 
     @pytest.mark.asyncio
     async def test_process_resume_task_no_job_id_fails_fast(self):
@@ -2414,7 +2453,7 @@ class TestDispatcherFailFastAndPendingTracking:
                 base_url="https://example.invalid",
                 api_key="k",
             )
-            await UsageRepository(session).start_call(
+            call_id = await UsageRepository(session).start_call(
                 project_name="demo", call_type="video", model="m", task_id="retry-1"
             )
             await session.commit()
@@ -2429,9 +2468,11 @@ class TestDispatcherFailFastAndPendingTracking:
         )
 
         async with worker_db() as session:
-            stored = await UsageRepository(session).get_calls(project_name="demo")
-        assert stored["items"][0]["status"] == "failed"
-        assert stored["items"][0]["cost_amount"] == 0
+            row = await session.get(ApiCall, call_id)
+        assert (row.status, row.cost_amount) == ("failed", 0)
+        # 判死时没有异常对象可分类，只有一段原文：落 error_message，不落码
+        assert row.error_message == f"resume unsupported: provider {provider_key} has no video capacity"
+        assert (row.error_code, row.error_params) == (None, None)
 
     @pytest.mark.asyncio
     async def test_sub_task_registered_in_pending_before_sem_acquire(self, monkeypatch, staged_project):

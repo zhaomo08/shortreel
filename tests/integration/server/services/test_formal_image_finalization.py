@@ -15,6 +15,7 @@ from lib.artifact_manifest import (
 from lib.generation_queue import CompensableGenerationResult
 from lib.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
 from server.services import generation_tasks
+from tests.fakes import hook_claim_recheck
 from tests.integration.server.services.generation_tasks_support import (
     FakeGenerator,
     _FakePM,
@@ -270,14 +271,11 @@ class TestGenerationTasks:
         key = ArtifactKey.asset_sheet("character", "Alice")
         register_stale_visual_claim(project_path, key, "characters/Alice.png")
         fake_generator = FakeGenerator()
-        resolve_context = fake_resolve_ctx(fake_generator)
-
-        async def _delete_claim_then_resolve(*args, **kwargs):
-            ProjectArtifactManifestAdapter(project_path).delete_entry(key)
-            return await resolve_context(*args, **kwargs)
 
         monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", _delete_claim_then_resolve)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", fake_resolve_ctx(fake_generator))
+        # 参考图冻结之后、发给供应商之前登记被删：提交前的复核须在此拦下。
+        hook_claim_recheck(monkeypatch, before=lambda: ProjectArtifactManifestAdapter(project_path).delete_entry(key))
 
         with pytest.raises(ValueError, match="no longer registered"):
             await generation_tasks.execute_storyboard_task(
@@ -298,14 +296,11 @@ class TestGenerationTasks:
         artifact_path = "characters/Alice.png"
         register_stale_visual_claim(project_path, key, artifact_path)
         fake_generator = FakeGenerator()
-        resolve_context = fake_resolve_ctx(fake_generator)
-
-        async def _replace_bytes_then_resolve(*args, **kwargs):
-            (project_path / artifact_path).write_bytes(b"replacement")
-            return await resolve_context(*args, **kwargs)
 
         monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", _replace_bytes_then_resolve)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", fake_resolve_ctx(fake_generator))
+        # 参考图冻结之后、发给供应商之前字节被换：提交前的复核须在此拦下。
+        hook_claim_recheck(monkeypatch, before=lambda: (project_path / artifact_path).write_bytes(b"replacement"))
 
         with pytest.raises(ValueError, match="changed since it was selected"):
             await generation_tasks.execute_storyboard_task(
@@ -329,15 +324,12 @@ class TestGenerationTasks:
                 return await super().generate_image_async(**kwargs)
 
         fake_generator = _SubmittingGenerator(project_path)
-        resolve_context = fake_resolve_ctx(fake_generator)
         character_path = project_path / "characters" / "Alice.png"
 
-        async def _replace_sheet_then_resolve(*args, **kwargs):
-            character_path.write_bytes(b"replacement")
-            return await resolve_context(*args, **kwargs)
-
         monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", _replace_sheet_then_resolve)
+        monkeypatch.setattr(generation_tasks, "resolve_generation_context", fake_resolve_ctx(fake_generator))
+        # 首次复核（提交前）通过后才换字节：第二道复核（进供应商调用前的 checkpoint）须拦下。
+        hook_claim_recheck(monkeypatch, after_first_pass=lambda: character_path.write_bytes(b"replacement"))
 
         with pytest.raises(ValueError, match="changed since it was selected"):
             await generation_tasks.execute_storyboard_task(

@@ -37,7 +37,9 @@ import type {
   ProviderConfigDetail,
   ConnectivityCheckResult,
   ProviderCredential,
-  UsageStatsResponse,
+  UsageRecordDetail,
+  UsageRecordPage,
+  UsageSummary,
   CustomProviderInfo,
   CustomProviderModelInfo,
   CustomProviderCreateRequest,
@@ -413,22 +415,34 @@ export interface TaskListFilters {
   pageSize?: number;
 }
 
-/** Filters for {@link API.getUsageStats} and {@link API.getUsageCalls}. */
-export interface UsageStatsFilters {
+/** {@link API.getUsageRecords} 的筛选；数组维度在查询串里逗号分隔。 */
+export interface UsageRecordsQuery {
+  /** 空串筛选端点试跑记录，`undefined` 表示不按项目筛。 */
   projectName?: string;
-  startDate?: string;
-  endDate?: string;
+  providers?: readonly string[];
+  models?: readonly string[];
+  mediaTypes?: readonly string[];
+  statuses?: readonly string[];
+  segmentIds?: readonly string[];
+  /** ISO 8601 时刻，半开区间 [since, until)，作用于 started_at。 */
+  since?: string;
+  until?: string;
+  limit?: number;
+  /** 上一页返回的不透明游标。 */
+  cursor?: string;
 }
 
-export interface UsageCallsFilters {
-  callId?: number;
+/** {@link API.getUsageSummary} 的筛选；不收状态，pending 不进聚合。 */
+export interface UsageSummaryQuery {
+  /** 空串筛选端点试跑记录，`undefined` 表示不按项目筛。 */
   projectName?: string;
-  callType?: string;
-  status?: string;
-  startDate?: string;
-  endDate?: string;
-  page?: number;
-  pageSize?: number;
+  provider?: string;
+  model?: string;
+  mediaType?: string;
+  since?: string;
+  until?: string;
+  /** IANA 时区名，按此切天；缺省 UTC。 */
+  tz?: string;
 }
 
 /** Generic success response used by many endpoints. */
@@ -2453,12 +2467,15 @@ class API {
   // ==================== 任务取消 API ====================
 
   static async cancelPreview(
-    taskId: string
+    taskId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<{
     task: { task_id: string; task_type: string; resource_id: string; status: string };
     cascaded: { task_id: string; task_type: string; resource_id: string }[];
   }> {
-    return this.request(`/tasks/${encodeURIComponent(taskId)}/cancel-preview`);
+    return this.request(`/tasks/${encodeURIComponent(taskId)}/cancel-preview`, {
+      signal: options.signal,
+    });
   }
 
   static async cancelTask(
@@ -2480,11 +2497,12 @@ class API {
   }
 
   static async cancelAllPreview(
-    projectName: string
+    projectName: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<{ queued_count: number }> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/tasks/cancel-all-preview`
-    );
+    return this.request(`/projects/${encodeURIComponent(projectName)}/tasks/cancel-all-preview`, {
+      signal: options.signal,
+    });
   }
 
   static async cancelAllQueued(
@@ -2766,54 +2784,59 @@ class API {
     );
   }
 
-  // ==================== 费用统计 API ====================
+  // ==================== 使用记录读接口 ====================
 
   /**
-   * 获取统计摘要
-   * @param filters - 筛选条件
+   * 获取使用记录的一页（keyset 分页，按 started_at 倒序）。
+   * 有任务代表的 pending 调用由服务端排除，不会出现在结果里。
    */
-  static async getUsageStats(
-    filters: UsageStatsFilters = {},
+  static async getUsageRecords(
+    query: UsageRecordsQuery = {},
     options: { signal?: AbortSignal } = {}
-  ): Promise<Record<string, unknown>> {
+  ): Promise<UsageRecordPage> {
     const params = new URLSearchParams();
-    if (filters.projectName)
-      params.append("project_name", filters.projectName);
-    if (filters.startDate) params.append("start_date", filters.startDate);
-    if (filters.endDate) params.append("end_date", filters.endDate);
-    const query = params.toString();
-    return this.request(`/usage/stats${query ? "?" + query : ""}`, {
+    // 端点试跑记录的 project_name 是空串，不能按真值判断。
+    if (query.projectName !== undefined) params.append("project_name", query.projectName);
+    if (query.providers?.length) params.append("provider", query.providers.join(","));
+    if (query.models?.length) params.append("model", query.models.join(","));
+    if (query.mediaTypes?.length) params.append("media_type", query.mediaTypes.join(","));
+    if (query.statuses?.length) params.append("status", query.statuses.join(","));
+    if (query.segmentIds?.length) params.append("segment_id", query.segmentIds.join(","));
+    if (query.since) params.append("since", query.since);
+    if (query.until) params.append("until", query.until);
+    if (query.limit !== undefined) params.append("limit", String(query.limit));
+    if (query.cursor) params.append("cursor", query.cursor);
+    const search = params.toString();
+    return this.request(`/usage/records${search ? "?" + search : ""}`, {
       signal: options.signal,
     });
   }
 
-  /**
-   * 获取调用记录列表
-   * @param filters - 筛选条件
-   */
-  static async getUsageCalls(
-    filters: UsageCallsFilters = {},
+  /** 获取单条使用记录的详情（比列表多 prompt、inputs、供应商原始响应）。 */
+  static async getUsageRecord(
+    recordId: number,
     options: { signal?: AbortSignal } = {}
-  ): Promise<Record<string, unknown>> {
-    const params = new URLSearchParams();
-    if (filters.callId) params.append("call_id", String(filters.callId));
-    if (filters.projectName)
-      params.append("project_name", filters.projectName);
-    if (filters.callType) params.append("call_type", filters.callType);
-    if (filters.status) params.append("status", filters.status);
-    if (filters.startDate) params.append("start_date", filters.startDate);
-    if (filters.endDate) params.append("end_date", filters.endDate);
-    if (filters.page) params.append("page", String(filters.page));
-    if (filters.pageSize) params.append("page_size", String(filters.pageSize));
-    const query = params.toString();
-    return this.request(`/usage/calls${query ? "?" + query : ""}`, { signal: options.signal });
+  ): Promise<UsageRecordDetail> {
+    return this.request(`/usage/records/${recordId}`, { signal: options.signal });
   }
 
-  /**
-   * 获取有调用记录的项目列表
-   */
-  static async getUsageProjects(): Promise<{ projects: string[] }> {
-    return this.request("/usage/projects");
+  /** 一次取回总览所需的全部聚合：KPI、日桶趋势、三维构成、需要关注与筛选候选值。 */
+  static async getUsageSummary(
+    query: UsageSummaryQuery = {},
+    options: { signal?: AbortSignal } = {}
+  ): Promise<UsageSummary> {
+    const params = new URLSearchParams();
+    if (query.projectName !== undefined) params.append("project_name", query.projectName);
+    if (query.provider) params.append("provider", query.provider);
+    if (query.model) params.append("model", query.model);
+    if (query.mediaType) params.append("media_type", query.mediaType);
+    if (query.since) params.append("since", query.since);
+    if (query.until) params.append("until", query.until);
+    if (query.tz) params.append("tz", query.tz);
+    const search = params.toString();
+    return this.request(`/usage/summary${search ? "?" + search : ""}`, {
+      signal: options.signal,
+    });
   }
 
   // ==================== API Key 管理 API ====================
@@ -3142,23 +3165,6 @@ class API {
     return this.request(`/custom-endpoints/trial-runs/${encodeURIComponent(runId)}/cancel`, {
       method: "POST",
     });
-  }
-
-  // ==================== 用量统计（按 provider 分组）API ====================
-
-  /**
-   * 获取按 provider 分组的用量统计。
-   * @param params - 可选筛选：provider、start、end（ISO 日期字符串）
-   */
-  static async getUsageStatsGrouped(
-    params: { provider?: string; start?: string; end?: string } = {}
-  ): Promise<UsageStatsResponse> {
-    const searchParams = new URLSearchParams();
-    searchParams.append("group_by", "provider");
-    if (params.provider) searchParams.append("provider", params.provider);
-    if (params.start) searchParams.append("start_date", params.start);
-    if (params.end) searchParams.append("end_date", params.end);
-    return this.request(`/usage/stats?${searchParams.toString()}`);
   }
 
   // ==================== 费用估算 API ====================
