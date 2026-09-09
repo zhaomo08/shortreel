@@ -30,7 +30,7 @@ export function CancelConfirmDialog({
       role="alertdialog"
       aria-label={t("cancel_confirm_aria")}
       className="border-t border-hairline-soft px-4 py-3"
-      style={{ background: "oklch(0.16 0.010 265 / 0.5)" }}
+      style={{ background: "color-mix(in oklab, var(--color-bg-grad-b) 50%, transparent)" }}
     >
       <p className="text-[12px] text-text-2">
         {request.kind === "all"
@@ -60,6 +60,8 @@ export function CancelConfirmDialog({
           onClick={voidPromise(onConfirm)}
           disabled={cancelling}
           className="focus-ring rounded px-2.5 py-1 text-[11px] font-medium transition-transform disabled:opacity-50"
+          // 危险按钮的红底与白字四套主题共用：红是「不可逆」的固定语义，
+          // 底色深到白字在浅色主题下也够对比，故不走 --color-danger。
           style={{
             color: "oklch(0.98 0 0)",
             background: "linear-gradient(135deg, oklch(0.55 0.20 25), oklch(0.45 0.18 25))",

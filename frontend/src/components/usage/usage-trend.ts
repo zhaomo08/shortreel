@@ -114,7 +114,7 @@ export function trendTicks(metric: TrendMetric, max: number): number[] {
 }
 
 /** 已取消段的斜纹描边色；图例与 pattern 共用，故导出。 */
-export const HATCH_STROKE = "oklch(0.75 0.01 265)";
+export const HATCH_STROKE = "var(--color-text-3)";
 
 /** 一条堆叠序列。`hatched` 的序列由图表换成斜纹填充，图例同步。 */
 export interface TrendSeries {
@@ -129,7 +129,7 @@ const CALL_SERIES: readonly TrendSeries[] = [
   {
     key: "success",
     labelKey: "usage_status_success",
-    color: "oklch(0.62 0.10 295)",
+    color: "var(--color-good)",
     value: (bucket) => bucket.success,
   },
   {
@@ -141,7 +141,7 @@ const CALL_SERIES: readonly TrendSeries[] = [
   {
     key: "cancelled",
     labelKey: "usage_status_cancelled",
-    color: "oklch(0.55 0.01 265)",
+    color: "var(--color-text-4)",
     hatched: true,
     value: (bucket) => bucket.cancelled,
   },

@@ -219,7 +219,7 @@ export function UsagePopover({ projectName, anchorRef, panelId }: UsagePopoverPr
     <button
       type="button"
       onClick={viewAllRecords}
-      className="focus-ring w-full border-t border-hairline-soft px-4 py-2.5 text-[11.5px] text-text-3 transition-colors hover:bg-[oklch(1_0_0_/_0.03)] hover:text-accent-2"
+      className="focus-ring w-full border-t border-hairline-soft px-4 py-2.5 text-[11.5px] text-text-3 transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_3%,transparent)] hover:text-accent-2"
     >
       {t("usage_view_all_records")}
     </button>

@@ -151,7 +151,7 @@ export function RecordRow({
           <button
             type="button"
             onClick={() => onOpenDetail(record.recordId as number)}
-            className="focus-ring flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-[oklch(1_0_0_/_0.03)]"
+            className="focus-ring flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_3%,transparent)]"
           >
             {icon}
             {body}
@@ -168,7 +168,7 @@ export function RecordRow({
   }
 
   return (
-    <tr className="border-t border-hairline-soft transition-colors hover:bg-[oklch(1_0_0_/_0.02)]">
+    <tr className="border-t border-hairline-soft transition-colors hover:bg-[color-mix(in_oklab,var(--raise)_2%,transparent)]">
       <td className={CELL_CLS}>
         <MediaIcon
           aria-label={t(media.labelKey)}

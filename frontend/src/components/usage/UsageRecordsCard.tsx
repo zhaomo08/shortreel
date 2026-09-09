@@ -146,7 +146,7 @@ export function UsageRecordsCard({
 
             {inProgress.length > 0 && (
               <tbody>
-                <tr className="border-t border-hairline-soft bg-[oklch(1_0_0_/_0.02)]">
+                <tr className="border-t border-hairline-soft bg-[color-mix(in_oklab,var(--raise)_2%,transparent)]">
                   <td colSpan={columns} className="px-2 py-1.5">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-[9.5px] font-bold uppercase tracking-[0.16em] text-accent-2">
