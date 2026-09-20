@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -20,8 +21,10 @@ from lib.project_manager import ProjectManager
 from lib.script_batch_edit import (
     ScriptBatchEditCommand,
     ScriptBatchEditor,
+    blank_item_after,
     script_revision,
 )
+from lib.script_editor import ScriptEditError
 
 
 def _segment(segment_id: str, *, text: str = "风吹过旷野。") -> dict[str, Any]:
@@ -56,12 +59,12 @@ def editor(tmp_path: Path) -> tuple[ProjectManager, ScriptBatchEditor, Path]:
     pm.create_project("demo", content_mode="narration")
     pm.create_project_metadata("demo", "Demo", "Anime", "narration")
     project_dir = pm.get_project_path("demo")
-    # 先落 script_plan、后落源文：保存剧本时计划在场但尚无源文，剧本不被登记，
-    # 之后的编辑才是首次登记，注入的清单写失败才会真正被触发。
     script_plan = project_dir / "drafts" / "episode_1" / "script_plan_segments.json"
     script_plan.parent.mkdir(parents=True, exist_ok=True)
     script_plan.write_text(json.dumps({"segments": [{"segment_id": "E1S01"}]}), encoding="utf-8")
     pm.save_script("demo", _script(), "episode_1.json")
+    # 剧本在场而产物清单尚无登记：之后的编辑才是首次登记，注入的清单写失败才会真正被触发。
+    (project_dir / ".arcreel_artifacts.json").unlink()
     source = project_dir / "source" / "episode_1.txt"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text("风吹过旷野。", encoding="utf-8")
@@ -123,11 +126,8 @@ def test_multi_operation_commit_updates_manifest_and_returns_revision(
     adapter = ProjectArtifactManifestAdapter(project_dir)
     entry = adapter.get_entry(ArtifactKey.episode_script(1))
     assert entry is not None
-    script_plan = json.loads(
-        (project_dir / "drafts" / "episode_1" / "script_plan_segments.json").read_text(encoding="utf-8")
-    )
     project = pm.load_project("demo")
-    assert entry.basis_digest == build_episode_script_basis(script_plan, project=project).digest
+    assert entry.basis_digest == build_episode_script_basis(project=project).digest
     assert entry.artifact_path == "scripts/episode_1.json"
 
 
@@ -295,7 +295,8 @@ def test_unmigrated_project_refuses_a_script_that_prepares_no_manifest_commit(
     pm, service, project_dir = editor
     script = _script()
     script["episode"] = 0
-    pm.save_script("demo", script, "custom.json")
+    # 文件名不含集号的剧本写盘入口会拒绝，直接落盘模拟外部写入的文件。
+    (project_dir / "scripts" / "custom.json").write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
     pm.update_project("demo", lambda project: project.update({"schema_version": 7}))
     (project_dir / ".arcreel_artifacts.json").unlink(missing_ok=True)
     before = (project_dir / "scripts" / "custom.json").read_bytes()
@@ -499,9 +500,11 @@ def test_malformed_item_container_returns_schema_failure_without_writes(
     assert project_path.read_bytes() == before_project
 
 
-def test_same_content_episode_rebind_conflicts_without_writing(
+def test_episode_rebound_to_another_script_conflicts_without_writing(
     editor: tuple[ProjectManager, ScriptBatchEditor, Path],
 ) -> None:
+    """账本此刻绑的已不是调用方读到的那份剧本：按改绑冲突拒绝，两份剧本都不写。"""
+
     pm, service, project_dir = editor
     current = pm.load_script("demo", "episode_1.json")
     command = ScriptBatchEditCommand.model_validate(
@@ -512,15 +515,21 @@ def test_same_content_episode_rebind_conflicts_without_writing(
             "operations": [{"op": "update", "id": "E1S01", "fields": {"note": "stale"}}],
         }
     )
-    pm.save_script("demo", current, "episode_1_copy.json")
+    pm.save_script("demo", {**copy.deepcopy(current), "episode": 2}, "episode_2.json")
+
+    def _rebind(project: dict) -> None:
+        next(entry for entry in project["episodes"] if entry["episode"] == 1)["script_file"] = "scripts/episode_2.json"
+
+    pm.update_project("demo", _rebind)
     original_path = project_dir / "scripts" / "episode_1.json"
-    rebound_path = project_dir / "scripts" / "episode_1_copy.json"
+    rebound_path = project_dir / "scripts" / "episode_2.json"
     before_original = original_path.read_bytes()
     before_rebound = rebound_path.read_bytes()
 
     result = service.execute("demo", command)
 
     assert result.success is False
+    # 冲突在解析绑定时就抛出，结果指的是调用方点名的那份剧本。
     assert result.script == "episode_1.json"
     assert result.problems[0].code == "revision_conflict"
     assert result.problems[0].reason == "script_binding_changed"
@@ -910,6 +919,103 @@ def test_remove_then_reinsert_same_id_preserves_anchor_media(
     assert {key: snapshot[key] for key in anchor_claims} == anchor_claims
 
 
+_UNAUTHORED = {"image_prompt": None, "video_prompt": None}
+_AUTHORED = {field: _segment("E1S00")[field] for field in _UNAUTHORED}
+
+
+@pytest.mark.parametrize(
+    ("visual_layer", "expected"),
+    [(_UNAUTHORED, True), (_AUTHORED, False)],
+    ids=["without-visual-layer", "with-full-visual-layer"],
+)
+def test_inserted_item_is_pending_authoring_unless_it_brings_its_visual_layer(
+    editor: tuple[ProjectManager, ScriptBatchEditor, Path],
+    visual_layer: dict[str, Any],
+    expected: bool,
+) -> None:
+    pm, service, _project_dir = editor
+    item = _segment("E1S04") | visual_layer | {"pending_authoring": not expected}
+
+    result = service.execute("demo", _command(pm, [{"op": "insert_after", "after_id": "E1S01", "item": item}]))
+
+    assert result.success is True
+    saved = {segment["segment_id"]: segment for segment in pm.load_script("demo", "episode_1.json")["segments"]}
+    assert saved["E1S04"].get("pending_authoring", False) is expected
+    assert all("pending_authoring" not in saved[segment_id] for segment_id in ("E1S01", "E1S02", "E1S03"))
+
+
+def test_reinserted_same_id_is_pending_authoring_unless_it_brings_its_visual_layer(
+    editor: tuple[ProjectManager, ScriptBatchEditor, Path],
+) -> None:
+    pm, service, _project_dir = editor
+    with pm.locked_script("demo", "episode_1.json", validate=False) as script:
+        script["segments"][1]["pending_authoring"] = True
+
+    result = service.execute(
+        "demo",
+        _command(
+            pm,
+            [
+                {"op": "remove", "id": "E1S01"},
+                {"op": "insert_after", "after_id": None, "item": _segment("E1S01") | _UNAUTHORED},
+                {"op": "remove", "id": "E1S02"},
+                {"op": "insert_after", "after_id": "E1S01", "item": _segment("E1S02")},
+            ],
+        ),
+    )
+
+    assert result.success is True
+    saved = {segment["segment_id"]: segment for segment in pm.load_script("demo", "episode_1.json")["segments"]}
+    assert saved["E1S01"]["pending_authoring"] is True
+    assert "pending_authoring" not in saved["E1S02"]
+
+
+def test_fresh_insert_reusing_a_removed_id_is_pending_authoring(
+    editor: tuple[ProjectManager, ScriptBatchEditor, Path],
+) -> None:
+    pm, service, _project_dir = editor
+
+    result = service.execute(
+        "demo",
+        _command(
+            pm,
+            [
+                {"op": "remove", "id": "E1S01"},
+                {"op": "insert_after", "after_id": None, "item": _segment("E1S01") | _UNAUTHORED},
+            ],
+        ),
+        fresh_insert_indexes=frozenset({1}),
+    )
+
+    assert result.success is True
+    assert pm.load_script("demo", "episode_1.json")["segments"][0]["pending_authoring"] is True
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        (_AUTHORED, False),
+        ({"image_prompt": "雨夜天台"}, True),
+        ({"novel_text": "新的旁白正文"}, True),
+    ],
+    ids=["writes-full-visual-layer", "writes-part-of-visual-layer", "writes-content-only"],
+)
+def test_update_clears_pending_authoring_once_the_visual_layer_is_written(
+    editor: tuple[ProjectManager, ScriptBatchEditor, Path],
+    fields: dict[str, Any],
+    expected: bool,
+) -> None:
+    pm, service, _project_dir = editor
+    with pm.locked_script("demo", "episode_1.json", validate=False) as script:
+        script["segments"][1].update(_UNAUTHORED | {"pending_authoring": True})
+
+    result = service.execute("demo", _command(pm, [{"op": "update", "id": "E1S02", "fields": fields}]))
+
+    assert result.success is True
+    saved = pm.load_script("demo", "episode_1.json")["segments"][1]
+    assert saved.get("pending_authoring", False) is expected
+
+
 def test_structural_edit_preserves_existing_paid_media(
     editor: tuple[ProjectManager, ScriptBatchEditor, Path],
 ) -> None:
@@ -931,3 +1037,312 @@ def test_structural_edit_preserves_existing_paid_media(
         "video_clip": "videos/E1S01.mp4",
         "status": "completed",
     }
+
+
+def _reference_project(tmp_path: Path, *, sources: dict[str, str]) -> tuple[ProjectManager, ScriptBatchEditor]:
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project("demo", content_mode="narration")
+    pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+    pm.update_project("demo", lambda project: project.update({"generation_mode": "reference_video"}))
+    pm.save_script(
+        "demo",
+        {
+            "episode": 1,
+            "title": "第一集",
+            "content_mode": "narration",
+            "video_units": [
+                {
+                    "unit_id": "E1U1",
+                    "text": "风吹过旷野。",
+                    "duration_seconds": 8,
+                    "source_text": "风吹过旷野。",
+                    "generated_assets": {},
+                }
+            ],
+        },
+        "episode_1.json",
+    )
+    source_dir = pm.get_project_path("demo") / "source"
+    for filename, text in sources.items():
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / filename).write_text(text, encoding="utf-8")
+    return pm, ScriptBatchEditor(pm)
+
+
+def test_source_text_that_is_a_verbatim_source_substring_is_saved(tmp_path: Path) -> None:
+    pm, service = _reference_project(
+        tmp_path, sources={"episode_1.txt": "第一章\n夜里，风吹过旷野。\n他停下脚步，\n回头看了一眼。"}
+    )
+
+    result = service.execute(
+        "demo",
+        _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": "他停下脚步， 回头看了一眼。"}}]),
+    )
+
+    assert result.success is True
+    saved = pm.load_script("demo", "episode_1.json")["video_units"][0]
+    assert saved["source_text"] == "他停下脚步， 回头看了一眼。"
+
+
+def test_source_text_not_in_source_is_rejected_with_its_location(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={"episode_1.txt": "夜里，风吹过旷野。"})
+    script_path = pm.get_project_path("demo") / "scripts" / "episode_1.json"
+    before = script_path.read_bytes()
+
+    result = service.execute(
+        "demo",
+        _command(
+            pm,
+            [
+                {"op": "update", "id": "E1U1", "fields": {"note": "备注"}},
+                {"op": "update", "id": "E1U1", "fields": {"source_text": "夜里，风轻轻吹过旷野。"}},
+            ],
+        ),
+    )
+
+    assert result.success is False
+    problem = result.problems[0]
+    assert problem.code == "source_text_not_verbatim"
+    assert problem.operation_index == 1
+    assert problem.unit_id == "E1U1"
+    assert problem.locations[0].path == ("video_units", 0, "source_text")
+    assert problem.next_action == "fix_operation"
+    assert script_path.read_bytes() == before
+
+
+def test_inserted_item_source_text_is_checked_against_the_source(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={"episode_1.txt": "夜里，风吹过旷野。"})
+    item = {"unit_id": "E1U2", "text": "旷野无人。", "duration_seconds": 8, "source_text": "杜撰的原文"}
+
+    result = service.execute("demo", _command(pm, [{"op": "insert_after", "after_id": "E1U1", "item": item}]))
+
+    assert result.success is False
+    assert result.problems[0].code == "source_text_not_verbatim"
+    assert result.problems[0].operation_index == 0
+    assert result.problems[0].locations[0].path == ("video_units", 1, "source_text")
+
+
+def test_source_text_is_not_checked_when_the_project_has_no_source(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={})
+
+    result = service.execute(
+        "demo",
+        _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": "任意改写的原文"}}]),
+    )
+
+    assert result.success is True
+    assert pm.load_script("demo", "episode_1.json")["video_units"][0]["source_text"] == "任意改写的原文"
+
+
+def test_unchanged_stale_source_text_does_not_block_other_edits(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={"episode_1.txt": "源文已被改写。"})
+
+    result = service.execute("demo", _command(pm, [{"op": "update", "id": "E1U1", "fields": {"note": "备注"}}]))
+
+    assert result.success is True
+    assert pm.load_script("demo", "episode_1.json")["video_units"][0]["source_text"] == "风吹过旷野。"
+
+
+def test_clearing_source_text_is_allowed(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={"episode_1.txt": "夜里，风吹过旷野。"})
+
+    result = service.execute("demo", _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": ""}}]))
+
+    assert result.success is True
+    assert pm.load_script("demo", "episode_1.json")["video_units"][0]["source_text"] == ""
+
+
+def test_source_text_from_another_episode_is_rejected(tmp_path: Path) -> None:
+    pm, service = _reference_project(
+        tmp_path,
+        sources={
+            "novel.txt": "夜里，风吹过旷野。天亮后，他进了城。",
+            "episode_1.txt": "夜里，风吹过旷野。",
+            "episode_2.txt": "天亮后，他进了城。",
+        },
+    )
+
+    result = service.execute(
+        "demo",
+        _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": "天亮后，他进了城。"}}]),
+    )
+
+    assert result.success is False
+    assert result.problems[0].code == "source_text_not_verbatim"
+
+
+def test_source_text_falls_back_to_project_sources_without_an_episode_source(tmp_path: Path) -> None:
+    pm, service = _reference_project(tmp_path, sources={"novel.txt": "夜里，风吹过旷野。天亮后，他进了城。"})
+
+    accepted = service.execute(
+        "demo",
+        _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": "天亮后，他进了城。"}}]),
+    )
+    rejected = service.execute(
+        "demo",
+        _command(pm, [{"op": "update", "id": "E1U1", "fields": {"source_text": "黄昏时，他出了城。"}}]),
+    )
+
+    assert accepted.success is True
+    assert rejected.success is False
+    assert rejected.problems[0].code == "source_text_not_verbatim"
+
+
+_STORYBOARD_VISUAL = {
+    "image_prompt": {
+        "scene": "荒野",
+        "composition": {"shot_type": "Medium Shot", "lighting": "暖光", "ambiance": "薄雾"},
+    },
+    "video_prompt": {"action": "转身", "camera_motion": "Static", "ambiance_audio": "风声"},
+}
+
+
+def _storyboard_script(content_mode: str, ids: list[str]) -> dict[str, Any]:
+    if content_mode == "narration":
+        items_key, entries = "segments", [_segment(item_id) for item_id in ids]
+    elif content_mode == "drama":
+        items_key = "scenes"
+        entries = [
+            {
+                "scene_id": item_id,
+                "duration_seconds": 6,
+                "characters_in_scene": [],
+                "utterances": [{"kind": "voiceover", "speaker": None, "text": "风吹过旷野。"}],
+                **_STORYBOARD_VISUAL,
+                "generated_assets": {},
+            }
+            for item_id in ids
+        ]
+    else:
+        items_key = "shots"
+        entries = [
+            {
+                "shot_id": item_id,
+                "section": "hook",
+                "duration_seconds": 4,
+                "voiceover_text": "轻装出发。",
+                **_STORYBOARD_VISUAL,
+                "generated_assets": {},
+            }
+            for item_id in ids
+        ]
+    return {"episode": 1, "title": "第一集", "content_mode": content_mode, items_key: entries}
+
+
+def _storyboard_project(tmp_path: Path, content_mode: str, ids: list[str]) -> tuple[ProjectManager, ScriptBatchEditor]:
+    pm = ProjectManager(str(tmp_path))
+    pm.create_project("demo", content_mode=content_mode)
+    pm.create_project_metadata("demo", "Demo", "Anime", content_mode)
+    pm.save_script("demo", _storyboard_script(content_mode, ids), "episode_1.json")
+    return pm, ScriptBatchEditor(pm)
+
+
+@pytest.mark.parametrize(
+    ("content_mode", "items_key", "id_field"),
+    [("narration", "segments", "segment_id"), ("drama", "scenes", "scene_id"), ("ad", "shots", "shot_id")],
+)
+def test_blank_item_inserted_after_anchor_is_committed_as_pending_authoring(
+    tmp_path: Path, content_mode: str, items_key: str, id_field: str
+) -> None:
+    pm, service = _storyboard_project(tmp_path, content_mode, ["E1S01", "E1S03_1", "E1S02"])
+    item = blank_item_after(pm.load_script("demo", "episode_1.json"), "E1S01")
+    if content_mode == "narration":
+        # 旁白正文即配音内容，为空的分镜过不了发声准入；新增旁白分镜由调用方先带上正文。
+        rejected = service.execute("demo", _command(pm, [{"op": "insert_after", "after_id": "E1S01", "item": item}]))
+        assert rejected.problems[0].reason == "speech_input_unparseable"
+        item["novel_text"] = "风停了。"
+
+    result = service.execute("demo", _command(pm, [{"op": "insert_after", "after_id": "E1S01", "item": item}]))
+
+    assert result.success is True, result.problems
+    saved = pm.load_script("demo", "episode_1.json")[items_key]
+    assert [entry[id_field] for entry in saved] == ["E1S01", "E1S04", "E1S03_1", "E1S02"]
+    inserted = saved[1]
+    assert inserted["pending_authoring"] is True
+    assert inserted["image_prompt"] is None
+    assert inserted["video_prompt"] is None
+    assert inserted["duration_seconds"] == saved[0]["duration_seconds"]
+    assert all("pending_authoring" not in saved[index] for index in (0, 2, 3))
+
+
+def test_blank_item_id_skips_past_the_highest_number_without_reusing_gaps(tmp_path: Path) -> None:
+    pm, service = _storyboard_project(tmp_path, "narration", ["E1S01", "E1S02", "E1S05"])
+    removed = service.execute("demo", _command(pm, [{"op": "remove", "id": "E1S05"}]))
+    assert removed.success is True
+
+    script = pm.load_script("demo", "episode_1.json")
+
+    assert blank_item_after(script, "E1S02")["segment_id"] == "E1S03"
+    assert blank_item_after(_storyboard_script("narration", ["E1S01", "E1S04"]), "E1S01")["segment_id"] == "E1S05"
+
+
+def test_blank_item_inherits_an_integral_float_duration_from_the_anchor() -> None:
+    script = _storyboard_script("drama", ["E1S01"])
+    script["scenes"][0]["duration_seconds"] = 5.0
+
+    item = blank_item_after(script, "E1S01")
+
+    assert item["duration_seconds"] == 5
+    assert type(item["duration_seconds"]) is int
+
+
+def test_blank_item_rejects_unknown_anchor_and_reference_units(tmp_path: Path) -> None:
+    pm, _service = _reference_project(tmp_path, sources={})
+
+    with pytest.raises(ScriptEditError):
+        blank_item_after(_storyboard_script("drama", ["E1S01"]), "E1S09")
+    with pytest.raises(ScriptEditError):
+        blank_item_after(pm.load_script("demo", "episode_1.json"), "E1U1")
+
+
+@pytest.mark.parametrize(
+    ("content_mode", "items_key"),
+    [("narration", "segments"), ("drama", "scenes"), ("ad", "shots")],
+)
+def test_removing_the_only_item_is_rejected_without_writes(tmp_path: Path, content_mode: str, items_key: str) -> None:
+    pm, service = _storyboard_project(tmp_path, content_mode, ["E1S01"])
+    script_path = pm.get_project_path("demo") / "scripts" / "episode_1.json"
+    before = script_path.read_bytes()
+
+    result = service.execute("demo", _command(pm, [{"op": "remove", "id": "E1S01"}]))
+
+    assert result.success is False
+    problem = result.problems[0]
+    assert (problem.code, problem.reason, problem.operation_index, problem.unit_id) == (
+        "schema_invalid",
+        "script_collection_empty",
+        0,
+        "E1S01",
+    )
+    assert problem.locations[0].path == (items_key,)
+    assert script_path.read_bytes() == before
+
+
+def test_removing_every_item_in_one_batch_is_attributed_to_the_last_remove(tmp_path: Path) -> None:
+    pm, service = _storyboard_project(tmp_path, "ad", ["E1S01", "E1S02"])
+    script_path = pm.get_project_path("demo") / "scripts" / "episode_1.json"
+    before = script_path.read_bytes()
+
+    result = service.execute("demo", _command(pm, [{"op": "remove", "id": "E1S02"}, {"op": "remove", "id": "E1S01"}]))
+
+    assert result.success is False
+    assert (result.problems[0].reason, result.problems[0].operation_index) == ("script_collection_empty", 1)
+    assert script_path.read_bytes() == before
+
+
+def test_removing_the_only_item_and_reinserting_in_the_same_batch_is_allowed(tmp_path: Path) -> None:
+    pm, service = _storyboard_project(tmp_path, "narration", ["E1S01"])
+
+    result = service.execute(
+        "demo",
+        _command(
+            pm,
+            [
+                {"op": "remove", "id": "E1S01"},
+                {"op": "insert_after", "after_id": None, "item": _segment("E1S01", text="风停了。")},
+            ],
+        ),
+    )
+
+    assert result.success is True, result.problems
+    assert [item["segment_id"] for item in pm.load_script("demo", "episode_1.json")["segments"]] == ["E1S01"]

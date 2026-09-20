@@ -60,8 +60,6 @@ from lib.db.base import Base
 from server.agent_runtime.session_manager import SessionManager
 from server.agent_runtime.session_store import SessionMetaStore
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
 
 def _discard_pooled_connections_in_forked_child() -> None:
     """fork 出的子进程丢弃模块级 engine 池里从父进程继承的连接。
@@ -131,12 +129,6 @@ def profile_env(tmp_path_factory):
     """
     profile_dir = tmp_path_factory.mktemp("agent-runtime-profile")
     (profile_dir / "CLAUDE.md").write_text("", encoding="utf-8")
-    # ``.claude/references/`` 下的规则正文由 prompt builder 在运行时读入，桩 profile 须原样带上，
-    # 否则任何构建 prompt 的测试都会撞 FileNotFoundError。
-    references = profile_dir / ".claude" / "references"
-    references.mkdir(parents=True, exist_ok=True)
-    for rule_file in (REPO_ROOT / "agent_runtime_profile" / ".claude" / "references").glob("*.md"):
-        (references / rule_file.name).write_text(rule_file.read_text(encoding="utf-8"), encoding="utf-8")
 
     previous = os.environ.get("ARCREEL_PROFILE_DIR")
     os.environ["ARCREEL_PROFILE_DIR"] = str(profile_dir)
@@ -319,6 +311,41 @@ async def file_db_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
 async def db_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     """``db_engine`` 上的 session factory。"""
     return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+async def custom_providers_app_session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    """``custom_providers_app`` 绑定的 session factory；用例也直接用它预置端点与模型行。"""
+    return async_sessionmaker(db_engine, expire_on_commit=False)
+
+
+@pytest.fixture
+def custom_providers_app(custom_providers_app_session_factory):
+    """只挂自定义供应商路由、绑内存库、以管理员身份免鉴权的 FastAPI 应用。
+
+    三个测试文件（协议无关的 CRUD、能力覆盖、ComfyUI 协议）按行为域分文件，共用的是同一个
+    被测应用。import 放在函数体内：根 conftest 由整个测试会话加载，不该为三个文件把 server
+    包拉进每一次收集。
+    """
+    from fastapi import FastAPI
+
+    from lib.db import get_async_session
+    from server.auth import CurrentUserInfo, get_current_user
+    from server.error_handlers import register_error_handlers
+    from server.routers import custom_providers
+    from tests.auth_deps import AUTH_DEPENDENCIES
+
+    app = FastAPI()
+
+    async def _override_session():
+        async with custom_providers_app_session_factory() as db_session:
+            yield db_session
+
+    app.dependency_overrides[get_async_session] = _override_session
+    app.dependency_overrides[get_current_user] = lambda: CurrentUserInfo(id="test", sub="test", role="admin")
+    app.include_router(custom_providers.router, prefix="/api/v1", dependencies=AUTH_DEPENDENCIES)
+    register_error_handlers(app)
+    return app
 
 
 @pytest.fixture

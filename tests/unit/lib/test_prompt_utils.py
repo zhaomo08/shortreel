@@ -5,35 +5,20 @@ import pytest
 import yaml
 
 from lib.prompt_utils import (
+    append_avoid_text,
     build_drama_video_prompt,
     image_prompt_to_yaml,
     is_structured_image_prompt,
     is_structured_video_prompt,
-    normalize_style,
     normalize_video_prompt,
     render_storyboard_video_prompt,
+    split_avoid_lines,
     utterances_to_dialogue,
     validate_camera_motion,
     validate_shot_type,
     video_prompt_to_yaml,
     yaml_section,
 )
-
-
-class TestNormalizeStyle:
-    def test_strips_leading_huafeng_prefix(self):
-        assert normalize_style("画风：真人电视剧风格，大师级构图") == "真人电视剧风格，大师级构图"
-
-    def test_strips_halfwidth_colon_and_whitespace(self):
-        assert normalize_style("  画风: 国风3D  ") == "国风3D"
-
-    def test_idempotent_when_no_prefix(self):
-        assert normalize_style("Anime") == "Anime"
-        assert normalize_style("油画三渲二画风：参考双城之战") == "油画三渲二画风：参考双城之战"
-
-    def test_empty_and_none_safe(self):
-        assert normalize_style("") == ""
-        assert normalize_style(None) == ""
 
 
 class TestPromptUtils:
@@ -83,12 +68,6 @@ class TestPromptUtils:
         assert list(yaml.safe_load(text)) == ["Style", "Reference_Images", "Scene", "Composition", "Avoid"]
         assert "Reference_Images: 图1为角色参考图。\n" in text
 
-    def test_image_prompt_to_yaml_strips_legacy_huafeng_style(self):
-        # 存量 project.json 的 style 带「画风：」前缀，注入 YAML 前兜底清理，避免 Style: 画风：叠加
-        data = {"scene": "x", "composition": {"shot_type": "Medium Shot", "lighting": "", "ambiance": ""}}
-        parsed = yaml.safe_load(image_prompt_to_yaml(data, "画风：真人电视剧风格"))
-        assert parsed["Style"] == "真人电视剧风格"
-
     def test_video_prompt_to_yaml_includes_dialogue_conditionally(self):
         with_dialogue = {
             "action": "抬头观察",
@@ -112,7 +91,7 @@ class TestPromptUtils:
         # 反向约束以 Avoid 键收尾：有对话时置于 Dialogue 之后
         assert list(parsed_a)[-2:] == ["Dialogue", "Avoid"]
         assert list(parsed_b)[-1] == "Avoid"
-        assert parsed_a["Avoid"] == "BGM、文字字幕、水印"
+        assert parsed_a["Avoid"] == "BGM、文字字幕、水印、Logo"
 
     def test_structured_checks(self):
         assert is_structured_image_prompt({"scene": "x"})
@@ -276,6 +255,52 @@ class TestUtterancesToDialogue:
         assert not validate_camera_motion("Teleport")
 
 
+class TestSplitAvoidLines:
+    """正文里的排除项行按前缀识别，正文与排除项文本各自成形。"""
+
+    def test_every_avoid_line_is_lifted_in_order(self):
+        body, avoid = split_avoid_lines("一只猫\n\nAvoid: 水印\n\n镜头推近\n\nAvoid: 模糊、畸变")
+
+        assert body == "一只猫\n\n镜头推近"
+        assert avoid == "水印，模糊、畸变"
+
+    @pytest.mark.parametrize(
+        "line",
+        ["Avoid: BGM、文字字幕、水印", "Avoid: BGM、文字字幕、水印、Logo", "Avoid:BGM、文字字幕、水印"],
+        ids=["legacy", "current", "no-space"],
+    )
+    def test_any_historical_wording_of_the_declaration_is_recognised(self, line: str):
+        body, avoid = split_avoid_lines(f"一只猫\n{line}")
+
+        assert body == "一只猫"
+        assert avoid == line.removeprefix("Avoid:").strip()
+
+    def test_a_body_without_any_avoid_line_is_only_trimmed(self):
+        assert split_avoid_lines("  一只猫\n镜头推近  ") == ("一只猫\n镜头推近", "")
+
+    def test_an_empty_declaration_contributes_no_wording(self):
+        assert split_avoid_lines("一只猫\nAvoid:") == ("一只猫", "")
+
+    def test_an_indented_avoid_line_stays_in_the_body(self):
+        """前缀顶行起才算声明行；缩进的 Avoid 是正文自己的措辞。"""
+        body, avoid = split_avoid_lines("一只猫\n  Avoid: 水印")
+
+        assert body == "一只猫\n  Avoid: 水印"
+        assert avoid == ""
+
+
+class TestAppendAvoidText:
+    def test_a_non_empty_literal_keeps_its_wording_and_takes_the_suffix(self):
+        assert append_avoid_text("low quality", "水印") == "low quality，水印"
+
+    @pytest.mark.parametrize("literal", ["", "   "])
+    def test_a_blank_literal_takes_the_wording_without_a_separator(self, literal: str):
+        assert append_avoid_text(literal, "水印") == "水印"
+
+    def test_an_empty_wording_leaves_the_literal_alone(self):
+        assert append_avoid_text("low quality", "") == "low quality"
+
+
 class TestNormalizeVideoPrompt:
     def test_structured_prompt_renders_yaml_with_defaults_filled(self):
         rendered = normalize_video_prompt(
@@ -309,6 +334,43 @@ class TestRenderStoryboardVideoPrompt:
         rendered = self._render("镜头缓缓推近")
         assert rendered.startswith("镜头缓缓推近")
         assert "Voice_Style: 低沉沙哑" in rendered
+        assert "Line: 你来了。" in rendered
+
+    @pytest.mark.parametrize("prompt", ["镜头缓缓推近", {"action": "起身", "camera_motion": "Static"}])
+    def test_both_forms_exclude_logos_and_keep_one_avoid_line_on_rerender(self, prompt):
+        rendered = self._render(prompt)
+        assert rendered.endswith("Avoid: BGM、文字字幕、水印、Logo")
+        assert self._render(rendered) == rendered
+        assert rendered.count("Avoid:") == 1
+
+    @pytest.mark.parametrize(
+        "legacy",
+        [
+            "镜头缓缓推近\n\nAvoid: BGM、文字字幕、水印",
+            "Action: 起身\nCamera_Motion: Static\nAmbiance_Audio: ''\nAvoid: BGM、文字字幕、水印\n",
+        ],
+        ids=["text", "structured-preview"],
+    )
+    def test_legacy_avoid_line_without_logo_is_upgraded_on_rerender(self, legacy):
+        """纯文本回贴中不含 Logo 的 Avoid 行由模版完整声明替换，不叠出第二行。"""
+        rendered = self._render(legacy, content_mode="narration")
+        assert rendered.count("Avoid:") == 1
+        assert rendered.endswith("Avoid: BGM、文字字幕、水印、Logo")
+        assert self._render(rendered, content_mode="narration") == rendered
+
+    def test_a_hand_edited_avoid_line_is_replaced_by_the_shared_declaration(self):
+        """排除项声明是按产出媒体共享的片段，正文里改写它不会被带到供应商——渲染出口只留那一份。"""
+        rendered = self._render("镜头缓缓推近\n\nAvoid: BGM、文字字幕、水印、Logo、红色", content_mode="narration")
+
+        assert rendered.count("Avoid:") == 1
+        assert rendered.endswith("Avoid: BGM、文字字幕、水印、Logo")
+
+    def test_speech_sections_appended_after_an_avoid_line_keep_the_declaration_last(self):
+        """发声声明段追加在正文的 Avoid 行之后时，渲染出口仍把那一行归回末尾。"""
+        rendered = self._render("镜头缓缓推近\n\nAvoid: BGM、文字字幕、水印、Logo")
+
+        assert rendered.count("Avoid:") == 1
+        assert rendered.endswith("Avoid: BGM、文字字幕、水印、Logo")
         assert "Line: 你来了。" in rendered
 
     def test_speech_sections_already_in_body_are_not_appended_twice(self):

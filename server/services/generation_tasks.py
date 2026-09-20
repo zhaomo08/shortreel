@@ -93,6 +93,7 @@ from lib.prompt_builders import (
     build_scene_prompt,
     render_storyboard_image_prompt,
 )
+from lib.prompt_style import normalize_style_value
 from lib.prompt_utils import render_storyboard_video_prompt
 from lib.reference_catalog import build_reference_catalog
 from lib.reference_image_numbering import PREVIOUS_STORYBOARD_ROLE, ReferenceImageSlot, clamp_reference_images
@@ -129,6 +130,7 @@ from lib.visual_artifact_provenance import (
     build_grid_composite_visual_basis,
     build_storyboard_image_visual_basis,
     build_storyboard_video_artifact_visual_basis,
+    project_basis_style_description,
 )
 from server.services.generation_context import (
     AudioLaneRequest,
@@ -2784,6 +2786,8 @@ async def execute_video_task(
         if task_id is not None
         else None
     )
+    #: backend 执行期产生的非阻断提示（如 ComfyUI 一次产出多个文件），随结果落进任务 result。
+    warnings: list[dict[str, Any]] = []
     try:
         await asyncio.to_thread(assert_current_artifact_input_claims_usable, project_path, formal_input_claims)
         _output_path, version, _, video_uri = await generator.generate_video_async(
@@ -2805,6 +2809,7 @@ async def execute_video_task(
             visual_basis_digest=visual_basis_digest,
             generate_audio=ctx.video.requested_generate_audio,
             poll_timeout_seconds=poll_timeout_seconds,
+            warnings=warnings,
         )
 
         async def _finalize() -> dict[str, Any]:
@@ -2816,6 +2821,7 @@ async def execute_video_task(
                 version=version,
                 video_uri=video_uri,
                 generator=generator,
+                warnings=warnings,
             )
 
         return await complete_video_artifact_commit(
@@ -2826,6 +2832,7 @@ async def execute_video_task(
             version=version,
             video_uri=video_uri,
             finalize=_finalize,
+            warnings=warnings,
         )
     finally:
         if artifact_committer is not None:
@@ -2843,8 +2850,13 @@ async def _finalize_video_task(
     version: int,
     video_uri: str | None,
     generator: Any,
+    warnings: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Normal + resume 共用的 finalize 逻辑：写 scene asset + 抽缩略图 + 返回 result dict。"""
+    """Normal + resume 共用的 finalize 逻辑：写 scene asset + 抽缩略图 + 返回 result dict。
+
+    ``warnings`` 为空时结果不带该键：读侧按「有没有这个键」判断这一版带不带提示，恒写一个空
+    列表会让每一版都多出一个永远为空的形状。
+    """
 
     def _update_video_metadata():
         get_project_manager().update_scene_asset(
@@ -2883,7 +2895,7 @@ async def _finalize_video_task(
         lambda: generator.versions.get_versions("videos", resource_id)["versions"][-1]["created_at"]
     )
 
-    return {
+    result: dict[str, Any] = {
         "version": version,
         "file_path": f"videos/scene_{resource_id}.mp4",
         "created_at": created_at,
@@ -2891,6 +2903,9 @@ async def _finalize_video_task(
         "resource_id": resource_id,
         "video_uri": video_uri,
     }
+    if warnings:
+        result["warnings"] = list(warnings)
+    return result
 
 
 async def execute_character_task(
@@ -3368,7 +3383,8 @@ async def execute_grid_task(
             id_field=id_field,
             rows=grid.rows,
             cols=grid.cols,
-            style=str(project.get("style") or ""),
+            style=normalize_style_value(project.get("style")),
+            style_description=normalize_style_value(project.get("style_description")),
             aspect_ratio=member_aspect_ratio,
             grid_aspect_ratio=grid_aspect_ratio,
             references=sent_references.visual_references,
@@ -3379,6 +3395,7 @@ async def execute_grid_task(
             rows=grid.rows,
             columns=grid.cols,
             style=str(project.get("style") or ""),
+            style_description=project_basis_style_description(project),
             grid_aspect_ratio=grid_aspect_ratio,
             references=frozen_references.visual_references,
         )

@@ -28,6 +28,8 @@ import type {
   ProjectDeletedPayload,
   GetSystemConfigResponse,
   GetSystemVersionResponse,
+  PromptTemplateDetail,
+  PromptTemplateListResponse,
   ModelCandidatesResponse,
   OnboardingStatus,
   SystemConfigPatch,
@@ -45,9 +47,16 @@ import type {
   CustomProviderCreateRequest,
   CustomProviderFullUpdateRequest,
   CustomProviderModelInput,
-  DiscoveredModel,
+  DiscoverModelsResponse,
   EndpointDescriptor,
+  ComfyuiInferResponse,
+  ComfyuiMediaType,
   CustomEndpointInfo,
+  MarketEntryListResponse,
+  MarketEntryDetail,
+  MarketEntryInstallation,
+  MarketSourceInfo,
+  MarketSourceListResponse,
   EndpointDefinition,
   EndpointValidateResponse,
   EndpointTestParameters,
@@ -65,6 +74,8 @@ import type {
   ReferenceVideoUnit,
   TransitionType,
   AdShot,
+  DramaScene,
+  NarrationSegment,
   ReferenceDurationPrecheck,
   ReferenceProjectionAdmission,
   NarratedVideoDurationAdmission,
@@ -75,8 +86,6 @@ import type {
   ScriptPreview,
   ItemPromptPreview,
   ScriptReviewState,
-  ScriptPlanConversionPreview,
-  ScriptPlanConversionReceipt,
   DramaNormalizedScript,
   NarrationScriptPlanDraft,
   ReferenceScriptPlanDraft,
@@ -984,6 +993,23 @@ class API {
     return this.request("/system/version");
   }
 
+  // ==================== 提示词模版 ====================
+
+  static async listPromptTemplates(
+    options: { signal?: AbortSignal } = {}
+  ): Promise<PromptTemplateListResponse> {
+    return this.request("/prompt-templates", { signal: options.signal });
+  }
+
+  /** 模版 id 自带 `/` 分层，逐段编码后保留分隔符。 */
+  static async getPromptTemplate(
+    templateId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<PromptTemplateDetail> {
+    const path = templateId.split("/").map(encodeURIComponent).join("/");
+    return this.request(`/prompt-templates/${path}`, { signal: options.signal });
+  }
+
   // ==================== 首次使用引导 ====================
 
   static async getOnboardingStatus(
@@ -1670,41 +1696,22 @@ class API {
     );
   }
 
-  /** 用户显式确认 script_plan 内容，放行 prompt_authoring 视觉生成。 */
+  /**
+   * 用户显式确认 script_plan 内容：整份转为正式脚本，放行 prompt_authoring 视觉生成。
+   * 该集已有正式脚本时须带 `overwriteRevision`（覆盖清单的 `revision`）；缺失或与当前正式脚本不符时 409，
+   * `diagnostic.script_overwrite` 列出当前将被移除的分镜。
+   */
   static async confirmScriptReview(
     projectName: string,
-    episode: number
+    episode: number,
+    options: { overwriteRevision?: string } = {}
   ): Promise<ScriptReviewState> {
     return this.request(
       `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/script-review/confirm`,
-      { method: "POST" }
-    );
-  }
-
-  /** 只读预演机械转换：按当前脚本规划与正式剧本列出新增 / 失效 / 移出条目，不落盘。 */
-  static async previewScriptPlanConversion(
-    projectName: string,
-    episode: number,
-    options?: { signal?: AbortSignal },
-  ): Promise<ScriptPlanConversionPreview> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/script-review/conversion-preview`,
-      { signal: options?.signal },
-    );
-  }
-
-  /**
-   * 把脚本规划机械转为正式脚本（只同步内容层，drama / narration 的提示词以待生成落盘）。
-   * `entryIds` 非空时让点名的失效条目「采用新内容」：内容按脚本规划重取、提示词保留。
-   */
-  static async convertScriptPlan(
-    projectName: string,
-    episode: number,
-    entryIds: string[] = [],
-  ): Promise<ScriptPlanConversionReceipt> {
-    return this.request(
-      `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/script-review/convert`,
-      { method: "POST", body: JSON.stringify({ entry_ids: entryIds }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ overwrite_revision: options.overwriteRevision ?? null }),
+      }
     );
   }
 
@@ -1712,7 +1719,7 @@ class API {
 
   /**
    * 旁白/解说分镜 PATCH（剧情演绎分镜走 {@link API.updateScene}）。`updates` 必带
-   * `script_file`，其余为可选白名单字段：`duration_seconds`、`segment_break`、
+   * `script_file`，其余为可选白名单字段：`duration_seconds`、`segment_break`、`novel_text`、
    * `image_prompt`、`video_prompt`、`transition_to_next`、`note`、
    * `characters_in_segment`、`scenes`、`props`。字段清单以后端为准，
    * mirrors server/routers/projects.py UpdateSegmentRequest。
@@ -1762,6 +1769,40 @@ class API {
         method: "POST",
         body: JSON.stringify({ script_file: scriptFile, shot_ids: shotIds }),
       }
+    );
+  }
+
+  /**
+   * 在分镜 `itemId` 之后新增一条待编写分镜（剧情演绎 / 旁白 / 广告通用）。服务端按当前剧本
+   * revision 执行，并发改写时返回 409。旁白分镜的正文即配音内容，`novelText` 必填。
+   */
+  static async insertScriptItemAfter(
+    projectName: string,
+    itemId: string,
+    scriptFile: string,
+    novelText?: string
+  ): Promise<SuccessResponse & { item: NarrationSegment | DramaScene | AdShot | null }> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/script-items/${encodeURIComponent(itemId)}/insert-after`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          script_file: scriptFile,
+          ...(novelText !== undefined ? { novel_text: novelText } : {}),
+        }),
+      }
+    );
+  }
+
+  /** 移除分镜 `itemId`，其产物随分镜一并移除；服务端按当前剧本 revision 执行。 */
+  static async removeScriptItem(
+    projectName: string,
+    itemId: string,
+    scriptFile: string
+  ): Promise<SuccessResponse> {
+    return this.request(
+      `/projects/${encodeURIComponent(projectName)}/script-items/${encodeURIComponent(itemId)}?script_file=${encodeURIComponent(scriptFile)}`,
+      { method: "DELETE" }
     );
   }
 
@@ -3034,11 +3075,11 @@ class API {
     return this.request(`/custom-providers/${id}/models`, { method: "PUT", body: JSON.stringify({ models }) });
   }
 
-  static async discoverModels(data: { discovery_format: string; base_url: string; api_key: string }): Promise<{ models: DiscoveredModel[] }> {
+  static async discoverModels(data: { discovery_format: string; base_url: string; api_key: string }): Promise<DiscoverModelsResponse> {
     return this.request("/custom-providers/discover", { method: "POST", body: JSON.stringify(data) });
   }
 
-  static async discoverModelsForProvider(id: number): Promise<{ models: DiscoveredModel[] }> {
+  static async discoverModelsForProvider(id: number): Promise<DiscoverModelsResponse> {
     return this.request(`/custom-providers/${id}/discover`, { method: "POST" });
   }
 
@@ -3063,6 +3104,94 @@ class API {
       body: JSON.stringify(data),
       signal: options.signal,
     });
+  }
+
+  // ==================== 市场 API ====================
+
+  static async listMarketSources(
+    options: { signal?: AbortSignal } = {},
+  ): Promise<MarketSourceListResponse> {
+    return this.request("/market/sources", { signal: options.signal });
+  }
+
+  /** 添加即抓取一次；地址不被接受、已添加或抓取失败时抛错，不落库。 */
+  static async addMarketSource(body: {
+    address: string;
+    display_name?: string;
+  }): Promise<MarketSourceInfo> {
+    return this.request("/market/sources", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  static async updateMarketSource(
+    id: number,
+    patch: { display_name?: string; is_enabled?: boolean },
+  ): Promise<MarketSourceInfo> {
+    return this.request(`/market/sources/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+  }
+
+  /** 官方市场源返回 409。 */
+  static async deleteMarketSource(id: number): Promise<void> {
+    return this.request(`/market/sources/${id}`, { method: "DELETE" });
+  }
+
+  /** ids 须是全部市场源 id 的全排列。 */
+  static async reorderMarketSources(ids: number[]): Promise<MarketSourceListResponse> {
+    return this.request("/market/sources/order", { method: "PUT", body: JSON.stringify({ ids }) });
+  }
+
+  /** 刷新失败不抛错：结果落在返回行的 status / last_error 上。 */
+  static async refreshMarketSource(id: number): Promise<MarketSourceInfo> {
+    return this.request(`/market/sources/${id}/refresh`, { method: "POST" });
+  }
+
+  /**
+   * 刷新全部启用源，逐源返回刷新过的行。
+   * @param staleOnly - 打开市场页时的自动刷新：只刷距上次成功刷新超过 1 小时的源。
+   */
+  static async refreshMarketSources(
+    options: { staleOnly?: boolean; signal?: AbortSignal } = {},
+  ): Promise<MarketSourceListResponse> {
+    const query = options.staleOnly ? "?stale_only=true" : "";
+    return this.request(`/market/refresh${query}`, { method: "POST", signal: options.signal });
+  }
+
+  /** 所有启用源缓存快照里的条目，按源顺序、源内按名称排列；只读快照，不触发抓取。 */
+  static async listMarketEntries(
+    options: { type?: string; signal?: AbortSignal } = {},
+  ): Promise<MarketEntryListResponse> {
+    const query = new URLSearchParams({ type: options.type ?? "endpoint" });
+    return this.request(`/market/entries?${query}`, { signal: options.signal });
+  }
+
+  static async getMarketEntry(sourceId: number, slug: string, options: { signal?: AbortSignal } = {}): Promise<MarketEntryDetail> {
+    return this.request(`/market/sources/${sourceId}/entries/${encodeURIComponent(slug)}`, options);
+  }
+
+  static async getMarketEntryDefinition(sourceId: number, slug: string, options: { signal?: AbortSignal } = {}): Promise<{ definition: unknown; entry_matches_definition: boolean; definition_digest: string | null }> {
+    return this.request(`/market/sources/${sourceId}/entries/${encodeURIComponent(slug)}/definition`, options);
+  }
+
+  /** `definitionDigest` 取自确认页加载的定义；服务端重新抓取后内容不同即 409 拒装。 */
+  static async installMarketEntry(sourceId: number, slug: string, definitionDigest: string, overwriteEndpointId?: number): Promise<{ endpoint: CustomEndpointInfo; installation: MarketEntryInstallation }> {
+    return this.request(`/market/sources/${sourceId}/entries/${encodeURIComponent(slug)}/install`, {
+      method: "POST", body: JSON.stringify({ definition_digest: definitionDigest, overwrite_endpoint_id: overwriteEndpointId }),
+    });
+  }
+
+  /**
+   * 经后端代理取条目 icon。接口走会话鉴权，`<img>` 带不上凭证，故取回 Blob；
+   * 地址带上条目版本，条目升版即绕过浏览器缓存。
+   */
+  static async getMarketEntryIcon(
+    sourceId: number,
+    slug: string,
+    version: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<Blob> {
+    const url = `/market/sources/${sourceId}/entries/${encodeURIComponent(slug)}/icon?v=${encodeURIComponent(version)}`;
+    const response = await fetch(`${API_BASE}${url}`, withAuth(url, { signal: options.signal }));
+    await throwIfNotOk(response, "获取条目图标失败");
+    return response.blob();
   }
 
   // ==================== 自定义调用端点 API ====================
@@ -3092,12 +3221,34 @@ class API {
    */
   static async validateCustomEndpoint(
     definition: unknown,
-    options: { excludeId?: number; signal?: AbortSignal } = {},
+    options: { excludeId?: number; mediaType?: ComfyuiMediaType; signal?: AbortSignal } = {},
   ): Promise<EndpointValidateResponse> {
-    const query = options.excludeId === undefined ? "" : `?exclude_id=${options.excludeId}`;
+    const params = new URLSearchParams();
+    if (options.excludeId !== undefined) params.set("exclude_id", String(options.excludeId));
+    if (options.mediaType !== undefined) params.set("media_type", options.mediaType);
+    const query = params.size === 0 ? "" : `?${params.toString()}`;
     return this.request(`/custom-endpoints/validate${query}`, {
       method: "POST",
       body: JSON.stringify(definition),
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * 推断一份 workflow 的节点绑定候选；载荷带既有节点绑定时同时做重导入重匹配。
+   *
+   * 服务端不留状态：结果只用来渲染绑定编辑器，用户确认后才经创建或整份替换接口落盘
+   * （`docs/adr/0082`）。`mediaType` 只在载荷是原始 API workflow 时生效——端点定义
+   * 自己带着这一项。
+   */
+  static async inferComfyuiBindings(
+    payload: unknown,
+    options: { mediaType?: ComfyuiMediaType; signal?: AbortSignal } = {},
+  ): Promise<ComfyuiInferResponse> {
+    const query = options.mediaType === undefined ? "" : `?media_type=${options.mediaType}`;
+    return this.request(`/custom-endpoints/comfyui/infer${query}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
       signal: options.signal,
     });
   }

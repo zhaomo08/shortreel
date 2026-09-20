@@ -1,7 +1,7 @@
 [project]
 name = "arcreel"
 # managed by release-please — do not bump manually
-version = "0.29.0"
+version = "0.30.0"
 description = "AI video generation workspace"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -46,6 +46,7 @@ dependencies = [
     "httpx>=0.28.1",
     "grpcio>=1.83.0",
     "numpy>=2.5.2",
+    "jinja2>=3.1.6",
 ]
 
 [dependency-groups]
@@ -111,16 +112,18 @@ exclude_lines = [
 [tool.importlinter]
 root_packages = ["lib"]
 
-# lib.config < lib.*_backends < lib.custom_provider：config 是配置解析的基础层，backends
-# 在其上组装出各供应商实现，custom_provider 再在 backends 之上拼装自定义供应商。四个 backend
-# 包为同层 sibling（`:` 分隔），彼此复用 video_backends.base 的工具不算方向违规。
+# lib.config < lib.*_backends < lib.custom_provider < lib.market：config 是配置解析的基础层，backends
+# 在其上组装出各供应商实现，custom_provider 再在 backends 之上拼装自定义供应商，market 以调用端点
+# 定义为条目载荷、复用其校验器，位于最上层。四个 backend 包为同层 sibling（`:` 分隔），彼此复用
+# video_backends.base 的工具不算方向违规。
 # ignore_imports 是存量违规的 baseline，逐条掐的是**违规链的终端边**而非首跳，这样中间模块
 # （project_manager / cost_calculator / usage_repo 等）后续新增的反向依赖仍会被契约拦下。
 # 新增条目前先确认该边无法就地清零；清零一条即删一行。
 [[tool.importlinter.contracts]]
-name = "lib.config / lib.*_backends / lib.custom_provider 分层契约"
+name = "lib.config / lib.*_backends / lib.custom_provider / lib.market 分层契约"
 type = "layers"
 layers = [
+    "market",
     "custom_provider",
     "image_backends : video_backends : audio_backends : text_backends",
     "config",
@@ -155,6 +158,44 @@ ignore_imports = [
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider",
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider.endpoints",
     "lib.db.models.custom_provider -> lib.custom_provider",
+]
+
+# ComfyUI 端点定义不经声明式运行时（docs/adr/0081）：两种 kind 的定义不同构，共用的只有诊断载体、
+# 诊断翻译与 kind 常量三件事。comfyui 子包一旦够到声明式的模板引擎、取值路径或它的校验实现，就是把
+# 「JSON in/out + 提交 / 轮询」的假设搬进节点图这一侧，保存期与填值期从此各说各话。反向也不许：
+# 分派表在 endpoint_definition.validator，它 import comfyui.validator 是唯一允许的方向。
+[[tool.importlinter.contracts]]
+name = "ComfyUI 端点实现不依赖声明式运行时"
+type = "forbidden"
+source_modules = ["lib.custom_provider.comfyui"]
+forbidden_modules = [
+    "lib.custom_provider.declarative_backend",
+    "lib.custom_provider.endpoint_definition.validator",
+    "lib.custom_provider.endpoint_definition.template_engine",
+    "lib.custom_provider.endpoint_definition.response_extractor",
+    "lib.custom_provider.endpoint_definition.jsonpath_subset",
+]
+
+# 同一条墙的另一半：ComfyUI 的客户端与 backend 落在 lib.custom_provider 顶层（子包够不到
+# lib.video_backends.base——那条链会间接绕回声明式 backend），于是上一条契约的 source_modules
+# 看不住它们。这里按直接 import 立一条同义契约：allow_indirect_imports 只查这几个模块自己写下的
+# import，正是把它们逼出子包的那条间接链绕开的一格。新增顶层 comfyui_* 模块时加进 source_modules。
+[[tool.importlinter.contracts]]
+name = "ComfyUI 顶层实现模块不直接依赖声明式运行时"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = [
+    "lib.custom_provider.comfyui_client",
+    "lib.custom_provider.comfyui_execution",
+    "lib.custom_provider.comfyui_backend",
+    "lib.custom_provider.comfyui_image_backend",
+]
+forbidden_modules = [
+    "lib.custom_provider.declarative_backend",
+    "lib.custom_provider.endpoint_definition.validator",
+    "lib.custom_provider.endpoint_definition.template_engine",
+    "lib.custom_provider.endpoint_definition.response_extractor",
+    "lib.custom_provider.endpoint_definition.jsonpath_subset",
 ]
 
 # 路线中立层不得依赖某一条具体路线的子包。违约条目类型（draft_violation）、草稿信封

@@ -27,7 +27,9 @@ from lib.artifact_manifest import (
 )
 from lib.content_digest import prefixed
 from lib.data_validator import DataValidator
-from lib.episode_paths import episode_script_filename
+from lib.episode_ledger import discover_sources, normalize_source_text
+from lib.episode_paths import episode_script_filename, episode_source_relpath
+from lib.path_safety import try_safe_join
 from lib.project_manager import EpisodeScriptReboundError, ProjectManager
 from lib.project_migration_failure import (
     MIGRATION_FAILURE_CODE,
@@ -35,7 +37,9 @@ from lib.project_migration_failure import (
     ProjectMigrationError,
     load_migration_verdict,
 )
+from lib.reference_video.draft_validation import is_verbatim_source_anchor
 from lib.script_editor import ScriptEditError, patch_field, resolve_items
+from lib.script_models import PENDING_AUTHORING_FIELD
 from lib.script_review import content_fingerprint_of_data
 from lib.script_structure_validator import validate_script_structure
 from lib.speech_composition import SpeechAdmission, admit_script_unit, refresh_video_unit_replan_state
@@ -43,6 +47,14 @@ from lib.storyboard_mentions import storyboard_mention_warnings
 from lib.validation_messages import ValidationMessage
 
 _REVISION_PATTERN = r"^sha256-v1:[0-9a-f]{64}$"
+
+#: 各条目形态的视觉层字段。参考生视频单元的正文即其视觉层。
+_VISUAL_LAYER_FIELDS: dict[str, tuple[str, ...]] = {
+    "segments": ("image_prompt", "video_prompt"),
+    "scenes": ("image_prompt", "video_prompt"),
+    "shots": ("image_prompt", "video_prompt"),
+    "video_units": ("text",),
+}
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +363,29 @@ class ScriptBatchEditor:
                         if before_admission != after_admission:
                             speech_change[item_id] = index
 
+                # 分镜图生视频的一集至少保留一个分镜：空集合能过结构校验，却让该集在工作流中阻塞、
+                # 时间线也没有新增入口。参考生视频画布可从空集合新增单元，不受此限。按整批结果判定
+                # 而不是在单条 remove 处判定，同批先删后插（拆分锚点、整体替换）照常成立。
+                remaining_items, _remaining_id_field, collection_kind = resolve_items(candidate)
+                if not remaining_items and collection_kind != "video_units":
+                    last_remove = max(
+                        (i for i, op in enumerate(command.operations) if isinstance(op, RemoveOperation)),
+                        default=None,
+                    )
+                    raise _AbortEdit(
+                        self._failure(
+                            script=resolved_script,
+                            episode=episode_number,
+                            revision=before_revision,
+                            code="schema_invalid",
+                            reason="script_collection_empty",
+                            next_action="fix_operation",
+                            operation_index=last_remove,
+                            unit_id=_operation_id(command.operations[last_remove]) if last_remove is not None else None,
+                            locations=(ScriptBatchEditLocation(path=(collection_kind,)),),
+                        )
+                    )
+
                 speech_problems = _new_speech_problems(
                     candidate,
                     before_admissions=before_admissions,
@@ -395,6 +430,25 @@ class ScriptBatchEditor:
                     )
 
                 project_dir = self._pm.get_project_path(project_name)
+                source_text_problems = _source_text_problems(
+                    project_dir,
+                    episode_number,
+                    original,
+                    candidate,
+                    command.operations,
+                )
+                if source_text_problems:
+                    raise _AbortEdit(
+                        ScriptBatchEditResult(
+                            success=False,
+                            script=resolved_script,
+                            episode=episode_number,
+                            before_revision=before_revision,
+                            revision=before_revision,
+                            affected_ids=(),
+                            problems=source_text_problems,
+                        )
+                    )
                 reference_validation = DataValidator(self._pm.projects_root).validate_episode_payload(
                     project_dir,
                     project,
@@ -560,6 +614,67 @@ class ScriptBatchEditor:
         )
 
 
+#: 分镜图生视频各条目形态的空条目内容字段；时长沿用锚点分镜，视觉层留空待编写。
+_BLANK_ITEM_FIELDS: dict[str, dict[str, Any]] = {
+    "segments": {
+        "segment_break": False,
+        "novel_text": "",
+        "characters_in_segment": [],
+        "scenes": [],
+        "props": [],
+    },
+    "scenes": {
+        "segment_break": False,
+        "characters_in_scene": [],
+        "scenes": [],
+        "props": [],
+        "utterances": [],
+    },
+    "shots": {
+        "section": "",
+        "voiceover_text": "",
+        "characters_in_shot": [],
+        "scenes": [],
+        "props": [],
+        "products_in_shot": [],
+    },
+}
+
+
+def blank_item_after(script: dict[str, Any], after_id: str) -> dict[str, Any]:
+    """构造紧随 ``after_id`` 插入的空分镜（分镜图生视频的 segments / scenes / shots）。
+
+    id 为 ``E{集}S{序号}``，序号取本集现存主序号的最大值顺延，不回填中间空缺；只看现存条目，
+    因此末尾分镜被移除后再新增会取回其序号。集号取剧本 ``episode``，缺失时取锚点 id 的集号前缀。
+    视觉层留空，由批量编辑 insert 置待编写。
+    """
+    items, id_field, kind = resolve_items(script)
+    if kind not in _BLANK_ITEM_FIELDS:
+        raise ScriptEditError(f"{kind} does not support blank item insertion")
+    anchor = items[_find_index(items, id_field, after_id)]
+    episode = script.get("episode")
+    if not isinstance(episode, int) or isinstance(episode, bool) or episode < 1:
+        match = re.match(r"^E(\d+)S", after_id)
+        episode = int(match.group(1)) if match is not None else 1
+    existing = {str(item.get(id_field)) for item in items if isinstance(item, dict)}
+    pattern = re.compile(rf"^E{episode}S(\d+)(?:_\d+)?$")
+    numbers = [int(match.group(1)) for item_id in existing if (match := pattern.match(item_id)) is not None]
+    number = max(numbers, default=0) + 1
+    while (item_id := f"E{episode}S{number:02d}") in existing:
+        number += 1
+    duration = anchor.get("duration_seconds")
+    if isinstance(duration, float) and duration.is_integer():
+        # JSON 里的 5.0 与 5 是同一个整数时长，剧本结构校验同样接受。
+        duration = int(duration)
+    return {
+        id_field: item_id,
+        "duration_seconds": duration if isinstance(duration, int) and not isinstance(duration, bool) else 8,
+        **copy.deepcopy(_BLANK_ITEM_FIELDS[kind]),
+        "image_prompt": None,
+        "video_prompt": None,
+    }
+
+
 def _operation_id(operation: ScriptBatchOperation) -> str | None:
     if isinstance(operation, InsertAfterOperation):
         _items = operation.item
@@ -574,6 +689,15 @@ def _operation_id(operation: ScriptBatchOperation) -> str | None:
 def _filename_episode(script_file: str) -> int | None:
     match = re.search(r"episode[-_\s]*(\d+)", script_file, re.IGNORECASE)
     return int(match.group(1)) if match is not None else None
+
+
+def _visual_layer_complete(kind: str, item: dict[str, Any]) -> bool:
+    """条目的视觉层字段都已写入非空值。"""
+    for field in _VISUAL_LAYER_FIELDS[kind]:
+        value = item.get(field)
+        if not (value.strip() if isinstance(value, str) else value):
+            return False
+    return True
 
 
 def _find_index(items: list[Any], id_field: str, item_id: str) -> int:
@@ -617,6 +741,9 @@ def _apply_operation(
                     location=("fields", *_parse_path(field)),
                 ) from exc
         roots = {field.split(".", 1)[0] for field in operation.fields}
+        # 手写视觉层等同编写完成：写入后视觉层齐备即清除待编写，默认编写不再覆盖它。
+        if roots & set(_VISUAL_LAYER_FIELDS[kind]) and _visual_layer_complete(kind, item):
+            item.pop(PENDING_AUTHORING_FIELD, None)
         if kind == "video_units":
             if roots & {"text", "duration_seconds"}:
                 refresh_video_unit_replan_state(item)
@@ -650,6 +777,11 @@ def _apply_operation(
         removed = removed_items.pop(item_id, None)
         if not preserve_removed_assets:
             removed = None
+        # 待编写标记不接受调用方自带的值，只看插入的条目是否带齐视觉层；同 id 重插（拆分锚点、
+        # 先删后插）同样按此判定。
+        item.pop(PENDING_AUTHORING_FIELD, None)
+        if not _visual_layer_complete(kind, item):
+            item[PENDING_AUTHORING_FIELD] = True
         if removed is None:
             item["generated_assets"] = {}
             item.pop("end_frame_image", None)
@@ -693,6 +825,76 @@ def _apply_operation(
     before = _admission_for(script, operation.id)
     removed_items[operation.id] = copy.deepcopy(items.pop(index))
     return operation.id, before, None
+
+
+def _source_text_problems(
+    project_dir: Path,
+    episode: int | None,
+    original: dict[str, Any],
+    candidate: dict[str, Any],
+    operations: list[ScriptBatchOperation],
+) -> tuple[ScriptBatchEditProblem, ...]:
+    """本次写入的对应原文须是本集源文的逐字子串，与参考生视频拆分工具同一判定口径。
+
+    只查新增或改动过的非空 ``source_text``：未动的条目即使源文后来变了也不拦无关编辑，清空
+    对应原文始终允许。比对源文见 :func:`_anchor_sources`；项目没有源文时不校验。
+    """
+    items, id_field, kind = resolve_items(candidate)
+    original_items, original_id_field, _original_kind = resolve_items(original)
+    previous = {
+        item.get(original_id_field): item.get("source_text")
+        for item in original_items
+        if isinstance(item, dict) and isinstance(item.get(original_id_field), str)
+    }
+    written: list[tuple[int, str, str]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get(id_field)
+        source_text = item.get("source_text")
+        if not isinstance(item_id, str) or not isinstance(source_text, str) or not source_text.strip():
+            continue
+        if item_id in previous and previous[item_id] == source_text:
+            continue
+        written.append((index, item_id, source_text))
+    if not written:
+        return ()
+    sources = _anchor_sources(project_dir, episode)
+    problems: list[ScriptBatchEditProblem] = []
+    for index, item_id, source_text in written:
+        if not sources or any(is_verbatim_source_anchor(source_text, source) for source in sources):
+            continue
+        path: tuple[str | int, ...] = (kind, index, "source_text")
+        problems.append(
+            ScriptBatchEditProblem(
+                code="source_text_not_verbatim",
+                operation_index=_responsible_operation(item_id, path, operations),
+                unit_id=item_id,
+                locations=(ScriptBatchEditLocation(path=path),),
+                reason="source_text_not_verbatim",
+                next_action="fix_operation",
+            )
+        )
+    return tuple(problems)
+
+
+def _anchor_sources(project_dir: Path, episode: int | None) -> list[str]:
+    """对应原文的比对源文。
+
+    本集派生源文 ``source/episode_N.txt`` 可读且非空时只认它，与拆分工具生成对应原文时读的
+    是同一份；缺失或集号未知时回落到项目源文（命中任一份即可），项目也没有源文时返回空列表。
+    """
+    episode_source = (
+        None if episode is None else try_safe_join(project_dir, episode_source_relpath(episode), require_file=True)
+    )
+    if episode_source is not None:
+        try:
+            text = normalize_source_text(episode_source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        if text.strip():
+            return [text]
+    return [doc.text for doc in discover_sources(project_dir)]
 
 
 def _admissions(script: dict[str, Any]) -> dict[str, SpeechAdmission]:
@@ -844,5 +1046,6 @@ __all__ = [
     "ScriptBatchEditor",
     "ScriptBatchOperation",
     "UpdateOperation",
+    "blank_item_after",
     "script_revision",
 ]

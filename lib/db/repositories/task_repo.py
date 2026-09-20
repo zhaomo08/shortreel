@@ -605,7 +605,7 @@ class TaskRepository(BaseRepository):
         派发所需的 ``provider_id`` 一并作为资格条件：状态一旦翻成 running，本方法就已提交，
         派发侧再拒绝就没有回滚点，任务会永久停在 running 上无人接手。
         """
-        result = await self.session.execute(select(Task).where(Task.task_id == task_id))
+        result = await self.session.execute(self._scope_query(select(Task).where(Task.task_id == task_id), Task))
         task = result.scalar_one_or_none()
         parsed = parse_failure(task.error_message or "") if task is not None else None
         if (
@@ -751,7 +751,7 @@ class TaskRepository(BaseRepository):
         以避免吓人：running / cancelling 下游运行期数量不稳定，由 cancel 操作实际触发后再
         通过 SSE 反映。终态 task 调用方应在前端避免触发。
         """
-        result = await self.session.execute(select(Task).where(Task.task_id == task_id))
+        result = await self.session.execute(self._scope_query(select(Task).where(Task.task_id == task_id), Task))
         task = result.scalar_one_or_none()
         if not task:
             raise ValueError(f"任务 '{task_id}' 不存在")
@@ -797,7 +797,7 @@ class TaskRepository(BaseRepository):
         Repository 只更新 DB，不持有 worker callback。``cancelling`` 列表交由
         上层（GenerationQueue）拿到后同步分发 in-process cancel 信号。
         """
-        result = await self.session.execute(select(Task).where(Task.task_id == task_id))
+        result = await self.session.execute(self._scope_query(select(Task).where(Task.task_id == task_id), Task))
         task = result.scalar_one_or_none()
         if not task:
             raise ValueError(f"任务 '{task_id}' 不存在")
@@ -1084,22 +1084,24 @@ class TaskRepository(BaseRepository):
 
     async def get_cancel_all_preview(self, project_name: str) -> int:
         """返回项目中当前 queued 状态的任务数量。"""
-        result = await self.session.execute(
-            select(func.count()).select_from(Task).where(Task.project_name == project_name, Task.status == "queued")
-        )
+        stmt = select(func.count()).select_from(Task).where(Task.project_name == project_name, Task.status == "queued")
+        result = await self.session.execute(self._scope_query(stmt, Task))
         return result.scalar_one()
 
     async def cancel_all_queued(self, project_name: str) -> dict[str, Any]:
         """取消项目中所有 queued 任务。"""
         queued_result = await self.session.execute(
-            select(Task).where(Task.project_name == project_name, Task.status == "queued")
+            self._scope_query(select(Task).where(Task.project_name == project_name, Task.status == "queued"), Task)
         )
-        queued_tasks = list(queued_result.scalars().all())
+        task_ids = [t.task_id for t in queued_result.scalars().all()]
+        if not task_ids:
+            return {"cancelled_count": 0, "skipped_running_count": 0}
 
+        # UPDATE 不经 _scope_query（只接受 Select），按作用域内查出的 id 集合限定目标行
         now = utc_now()
         stmt = (
             update(Task)
-            .where(Task.project_name == project_name, Task.status == "queued")
+            .where(Task.task_id.in_(task_ids), Task.status == "queued")
             .values(
                 status="cancelled",
                 cancelled_by="user",
@@ -1110,23 +1112,21 @@ class TaskRepository(BaseRepository):
         result = await self.session.execute(stmt)
         cancelled_count = rowcount(result)
 
-        if queued_tasks:
-            await self.session.flush()
-            task_ids = [t.task_id for t in queued_tasks]
-            refreshed = await self.session.execute(
-                select(Task).where(Task.task_id.in_(task_ids), Task.status == "cancelled")
+        await self.session.flush()
+        refreshed = await self.session.execute(
+            select(Task).where(Task.task_id.in_(task_ids), Task.status == "cancelled")
+        )
+        for updated_task in refreshed.scalars().all():
+            self._record_terminal_event(
+                task_id=updated_task.task_id,
+                project_name=project_name,
+                status="cancelled",
+                task_type=updated_task.task_type,
             )
-            for updated_task in refreshed.scalars().all():
-                self._record_terminal_event(
-                    task_id=updated_task.task_id,
-                    project_name=project_name,
-                    status="cancelled",
-                    task_type=updated_task.task_type,
-                )
 
         await self.session.commit()
         # 竞态时部分任务可能在 UPDATE 前被 worker 领走，skipped = 预期取消数 - 实际取消数
-        skipped = len(queued_tasks) - cancelled_count
+        skipped = len(task_ids) - cancelled_count
         return {
             "cancelled_count": cancelled_count,
             "skipped_running_count": max(0, skipped),

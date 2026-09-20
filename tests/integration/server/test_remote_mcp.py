@@ -355,11 +355,11 @@ async def test_remote_mcp_returns_typed_workflow_plan_and_rejects_bad_project(
         "generate_episode_script",
         "generate_script_plan",
         "confirm_script_review",
-        "convert_script_plan",
         "patch_episode_script",
     }
     batches = {"get_generation_batch", "cancel_generation_batch"}
     retired = {
+        "convert_script_plan",
         "normalize_drama_script",
         "split_narration_segments",
         "split_reference_video_units",
@@ -800,7 +800,9 @@ async def test_remote_mcp_entry_tools_share_one_projects_root(remote_server) -> 
     assert uploaded.structuredContent["source"]["path"] == "source/novel.txt"
 
 
-async def test_remote_mcp_draft_supports_multiple_patches_and_discard(remote_server) -> None:
+async def test_remote_mcp_draft_supports_multiple_patches_and_discard(remote_server, remote_projects) -> None:
+    # 尚无正式剧本：脚本规划未确认，可取回编辑副本。
+    (remote_projects.get_project_path("demo") / "scripts" / "episode_1.json").unlink()
     app = _mounted(remote_server)
     async with (
         remote_server.session_manager.run(),
@@ -896,11 +898,24 @@ async def test_remote_mcp_text_generation_and_script_patch_return_structured_con
             },
             progress_callback=record_progress,
         )
-        confirmed = await session.call_tool("confirm_script_review", {"project": "demo", "episode": 1})
+        refused = await session.call_tool("confirm_script_review", {"project": "demo", "episode": 1})
+        refused_problem = refused.structuredContent["problem"]
+        confirmed = await session.call_tool(
+            "confirm_script_review",
+            {
+                "project": "demo",
+                "episode": 1,
+                "overwrite_revision": refused_problem["params"]["script_overwrite"]["revision"],
+            },
+        )
         script = await session.call_tool(
             "generate_episode_script",
             {"project": "ad-demo", "episode": 1, "dry_run": True},
             progress_callback=record_progress,
+        )
+        scoped = await session.call_tool(
+            "generate_episode_script",
+            {"project": "ad-demo", "episode": 1, "dry_run": True, "scope": "all"},
         )
         patched = await session.call_tool(
             "patch_episode_script",
@@ -917,6 +932,9 @@ async def test_remote_mcp_text_generation_and_script_patch_return_structured_con
     assert "prompt immediately without a generation_batch; do not poll" in tools["generate_script_plan"].description
     assert set(script_plan.structuredContent) == {"text_generation"}
     assert script_plan.structuredContent["text_generation"]["message"]
+    assert refused.isError
+    assert refused_problem["code"] == "script_overwrite_required"
+    assert refused_problem["params"]["script_overwrite"]["entries"] == []
     assert not confirmed.isError
     assert confirmed.structuredContent["text_generation"]["message"]
     assert not script.isError
@@ -924,6 +942,10 @@ async def test_remote_mcp_text_generation_and_script_patch_return_structured_con
     assert "prompt immediately without a generation_batch; do not poll" in tools["generate_episode_script"].description
     assert set(script.structuredContent) == {"text_generation"}
     assert "DRY RUN" in script.structuredContent["text_generation"]["message"]
+    assert "scope" not in tools["generate_episode_script"].inputSchema["properties"]
+    assert scoped.isError
+    assert scoped.structuredContent["problem"]["code"] == "invalid_request"
+    assert "entry_ids" in scoped.structuredContent["problem"]["detail"]
     assert progress_messages == ["Generating script_plan", "Generating episode script"]
     assert patched.isError
     assert patched.structuredContent["script_patch"]["problems"][0]["code"] == "revision_conflict"
@@ -1068,6 +1090,8 @@ async def test_remote_mcp_generation_rejects_non_positive_episode(remote_server,
 
 
 async def test_remote_mcp_draft_preserves_explicit_null_updates(remote_server, remote_projects) -> None:
+    # 尚无正式剧本：脚本规划未确认，可取回编辑副本。
+    (remote_projects.get_project_path("demo") / "scripts" / "episode_1.json").unlink()
     app = _mounted(remote_server)
     async with (
         remote_server.session_manager.run(),

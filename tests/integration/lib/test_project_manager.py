@@ -136,32 +136,30 @@ class TestProjectManager:
         assert overview["genre"] == "悬疑"
         assert captured["purpose"] is CallPurpose.PROJECT_OVERVIEW
 
-    def test_filesystem_script_rebinding_forgets_unbound_resource_claims(self, tmp_path):
+    def test_filesystem_script_binding_forgets_unbound_resource_claims(self, tmp_path):
         pm = ProjectManager(tmp_path / "projects")
         project_dir = pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo", "Anime", "narration")
-        pm.save_script("demo", _narration_script("E1S01"), "old.json", validate=False)
-        (project_dir / "scripts" / "new.json").write_text(
+        (project_dir / "scripts" / "episode_1.json").write_text(
             json.dumps(_narration_script("E1S02")),
             encoding="utf-8",
         )
         adapter, old_keys = _seed_episode_resource_claims(project_dir, "E1S01")
 
-        pm.sync_episode_from_script("demo", "new.json")
+        pm.sync_episode_from_script("demo", "episode_1.json")
 
-        assert pm.load_project("demo")["episodes"][0]["script_file"] == "scripts/new.json"
+        assert pm.load_project("demo")["episodes"][0]["script_file"] == "scripts/episode_1.json"
         assert all(adapter.get_entry(key) is None for key in old_keys)
 
-    def test_save_script_rebinding_forgets_unbound_resource_claims(self, tmp_path):
+    def test_save_script_binding_forgets_unbound_resource_claims(self, tmp_path):
         pm = ProjectManager(tmp_path / "projects")
         project_dir = pm.create_project("demo")
         pm.create_project_metadata("demo", "Demo", "Anime", "narration")
-        pm.save_script("demo", _narration_script("E1S01"), "old.json", validate=False)
         adapter, old_keys = _seed_episode_resource_claims(project_dir, "E1S01")
 
-        pm.save_script("demo", _narration_script("E1S02"), "new.json", validate=False)
+        pm.save_script("demo", _narration_script("E1S02"), "episode_1.json", validate=False)
 
-        assert pm.load_project("demo")["episodes"][0]["script_file"] == "scripts/new.json"
+        assert pm.load_project("demo")["episodes"][0]["script_file"] == "scripts/episode_1.json"
         assert all(adapter.get_entry(key) is None for key in old_keys)
 
     def test_project_and_status_lifecycle(self, tmp_path):
@@ -354,6 +352,28 @@ class TestProjectManager:
         loaded = pm.load_script("demo", "episode_1.json")
         assert loaded["scenes"][0]["generated_assets"]["storyboard_image"] == "sb/001.png"
 
+    def test_scene_asset_restore_across_scripts_only_rewrites_canonical_names(self, tmp_path):
+        pm = ProjectManager(tmp_path / "projects")
+        project_dir = pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+        pm.save_script("demo", _narration_script("E1S01"), "episode_1.json", validate=False)
+        scripts_dir = project_dir / "scripts"
+        for name in ("episode_1_backup.json", "custom.json"):
+            (scripts_dir / name).write_text(json.dumps(_narration_script("E1S01")), encoding="utf-8")
+        untouched = {name: (scripts_dir / name).read_bytes() for name in ("episode_1_backup.json", "custom.json")}
+
+        changed = pm.update_scene_asset_across_scripts(
+            "demo",
+            ["custom.json", "episode_1.json", "episode_1_backup.json"],
+            "E1S01",
+            "storyboard_image",
+            "storyboards/scene_E1S01.png",
+        )
+
+        assert changed == ("episode_1.json",)
+        assert {name: (scripts_dir / name).read_bytes() for name in untouched} == untouched
+        assert pm.load_project("demo")["episodes"][0]["script_file"] == "scripts/episode_1.json"
+
     def test_batch_update_scene_assets_persists_all(self, tmp_path):
         """batch_update_scene_assets 单次锁内写多个分镜，命中全部 id 时持久化所有更新。"""
         pm = ProjectManager(tmp_path / "projects")
@@ -493,6 +513,75 @@ class TestProjectManager:
         # 关键断言：文件不应被写入磁盘（原子性保持）
         scripts_dir = pm.get_project_path("demo") / "scripts"
         assert not (scripts_dir / "episode_10.json").exists()
+
+    @pytest.mark.parametrize("bogus_episode", [True, 0, -1])
+    def test_malformed_script_episode_does_not_reach_the_ledger(self, tmp_path, bogus_episode):
+        """剧本 JSON 也是裸读进来的：内部 episode 不是正整数时按「没记集号」处理，归属仍看文件名。
+
+        认它作集号会让集元数据同步往账本里写一条 `episode: True` / `0`，而账本的集号判据只认
+        正整数，那条条目此后既不被任何一集认领，又让目标态规划整体拒绝这个项目。
+        """
+        pm = ProjectManager(tmp_path / "projects")
+        pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+        script = {**_narration_script("E1S01"), "episode": bogus_episode}
+
+        pm.save_script("demo", script, "episode_1.json", validate=False)
+
+        [entry] = pm.load_project("demo")["episodes"]
+        # True == 1，按值比分不出来：集号的类型本身就是断言的一部分。
+        assert (type(entry["episode"]), entry["episode"], entry["script_file"]) == (int, 1, "scripts/episode_1.json")
+
+    def test_filename_whose_episode_number_is_not_positive_is_rejected(self, tmp_path):
+        """`episode_0.json`：0 不对应任何一集，认它作归属会让账本多出一条 `episode: 0`。"""
+        pm = ProjectManager(tmp_path / "projects")
+        project_dir = pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+        script = _narration_script("E1S01")
+
+        assert ProjectManager.filename_episode("episode_0.json") is None
+        with pytest.raises(ValueError, match="不是规范名"):
+            pm.save_script("demo", script, "episode_0.json", validate=False)
+        assert not (project_dir / "scripts" / "episode_0.json").exists()
+        assert pm.load_project("demo")["episodes"] == []
+
+    @pytest.mark.parametrize("filename", ["episode_1.json", "scripts/episode_1.json"])
+    def test_canonical_filename_matching_the_script_episode_goes_through(self, tmp_path, filename):
+        """规范名的两种写法都指向同一份剧本：写盘收下它并登记为第 1 集的绑定。"""
+        pm = ProjectManager(tmp_path / "projects")
+        project_dir = pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+
+        pm.save_script("demo", _narration_script("E1S01"), filename, validate=False)
+
+        stored = json.loads((project_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8"))
+        assert stored["segments"][0]["segment_id"] == "E1S01"
+        assert pm.load_project("demo")["episodes"] == [
+            {"episode": 1, "title": "Episode 1", "script_file": "scripts/episode_1.json"}
+        ]
+
+    @pytest.mark.parametrize(
+        "filename", ["custom.json", "scripts/ep1.json", "episode_1_old.json", "scripts/drafts/episode_1.json"]
+    )
+    def test_filename_that_is_not_the_canonical_name_is_rejected(self, tmp_path, filename):
+        """文件名不是规范名时拒绝：写盘前不落盘，外部落盘的文件也不登记为集绑定。"""
+        pm = ProjectManager(tmp_path / "projects")
+        project_dir = pm.create_project("demo")
+        pm.create_project_metadata("demo", "Demo", "Anime", "narration")
+        script = _narration_script("E1S01")
+        stored = project_dir / "scripts" / ProjectManager.normalize_script_filename(filename)
+
+        with pytest.raises(ValueError, match="不是规范名"):
+            ProjectManager.require_filename_episode_consistency({}, filename)
+        with pytest.raises(ValueError, match="不是规范名"):
+            pm.save_script("demo", script, filename, validate=False)
+        assert not stored.exists()
+
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        stored.write_text(json.dumps(script), encoding="utf-8")
+        with pytest.raises(ValueError, match="不是规范名"):
+            pm.sync_episode_from_script("demo", filename)
+        assert pm.load_project("demo").get("episodes", []) == []
 
     def test_sync_episode_rejects_filename_episode_mismatch(self, tmp_path):
         """文件名隐含集号与脚本内 episode 字段不一致时必须拒绝同步。

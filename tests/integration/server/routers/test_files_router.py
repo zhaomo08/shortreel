@@ -3,6 +3,7 @@ import json
 import shutil
 from io import BytesIO
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +18,7 @@ from lib.i18n.vi import assets as vi_assets
 from lib.i18n.zh import assets as zh_assets
 from lib.i18n.zh import errors as zh_errors
 from lib.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
+from lib.prompt_templates.builtin import builtin_templates
 from lib.providers import CallPurpose
 from server.auth import CurrentUserInfo, get_current_user
 from server.error_handlers import register_error_handlers
@@ -25,6 +27,8 @@ from tests.factories import wav_bytes
 
 
 class _FakeTextBackend:
+    requests: ClassVar[list] = []
+
     @property
     def name(self):
         return "fake"
@@ -40,6 +44,7 @@ class _FakeTextBackend:
     async def generate(self, request):
         from lib.text_backends.base import TextGenerationResult
 
+        _FakeTextBackend.requests.append(request)
         return TextGenerationResult(text="cinematic, high contrast", provider="fake", model="fake-model")
 
 
@@ -728,6 +733,7 @@ class TestFilesRouter:
             return await original_create(task_type, project_name, purpose=purpose)
 
         monkeypatch.setattr(TextGenerator, "create", capture_create)
+        monkeypatch.setattr(_FakeTextBackend, "requests", [])
 
         # 预置 style_template_id + 展开后的 style prompt，验证上传后被强制清掉（互斥）
         project = pm.load_project("demo")
@@ -743,6 +749,9 @@ class TestFilesRouter:
             assert upload_style.status_code == 200
             assert upload_style.json()["style_description"] == "cinematic, high contrast"
             assert captured["purpose"] is CallPurpose.STYLE_ANALYSIS
+            (request,) = _FakeTextBackend.requests
+            assert request.prompt == builtin_templates.render("text/style_analysis")
+            assert "Do NOT describe the subject matter" in request.prompt
             after = pm.load_project("demo")
             assert after.get("style_image", "").startswith("style_reference")
             assert "style_template_id" not in after
@@ -1048,6 +1057,28 @@ class TestFilesRouter:
             unknown_draft = client.delete("/api/v1/projects/demo/drafts/9/script_plan")
             assert unknown_draft.status_code == 404
 
+    def test_plain_script_plan_save_is_rejected_once_confirmed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        client, pm = _client(monkeypatch, tmp_path)
+        project_dir = pm.get_project_path("demo")
+        plan_path = project_dir / "drafts" / "episode_1" / "script_plan_segments.json"
+        plan_path.parent.mkdir(parents=True)
+        plan_path.write_text('{"episode": 1, "segments": []}', encoding="utf-8")
+        # 该集已产出正式剧本、无确认记录：按存量口径视为脚本规划已确认。
+        (project_dir / "scripts").mkdir(exist_ok=True)
+        (project_dir / "scripts" / "episode_1.json").write_text('{"episode": 1, "segments": []}', encoding="utf-8")
+        before = plan_path.read_bytes()
+
+        with client:
+            refused = client.put(
+                "/api/v1/projects/demo/drafts/1/script_plan",
+                content='{"episode": 1, "segments": [{"segment_id": "E1S01"}]}',
+                headers={"content-type": "text/plain"},
+            )
+
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["diagnostic"] == {"code": "script_plan_confirmed"}
+        assert plan_path.read_bytes() == before
+
     def test_plain_script_plan_save_registers_active_manifest_and_rolls_back_on_registration_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1120,6 +1151,7 @@ class TestFilesRouter:
             )
             with pytest.raises(RuntimeError, match="manifest unavailable"):
                 files._write_plain_draft(
+                    "demo",
                     project_dir,
                     1,
                     draft_path,

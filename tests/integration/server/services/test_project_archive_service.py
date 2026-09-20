@@ -100,7 +100,7 @@ def _create_project(
     *,
     name: str = "demo",
     title: str = "Demo",
-    style: str = "Anime",
+    style: str = "水墨风格，淡彩",
     video_uri: str | None = None,
 ) -> Path:
     pm.create_project(name)
@@ -388,6 +388,19 @@ class TestProjectArchiveService:
         imported_manifest = json.loads((pm.get_project_path("demo") / MANIFEST_FILENAME).read_text(encoding="utf-8"))
         assert imported_manifest == startup_manifest
 
+    def test_official_round_trip_accepts_project_without_style(self, tmp_path):
+        """未选风格的项目照常导出并导入，导出诊断与导入校验都不把空风格当缺陷。"""
+        pm = ProjectManager(tmp_path / "projects")
+        _create_project(pm, style="")
+        service = ProjectArchiveService(pm)
+
+        archive_path, _ = service.export_project("demo")
+        shutil.rmtree(pm.get_project_path("demo"))
+        result = service.import_project_archive(archive_path, uploaded_filename="demo.zip")
+
+        assert result.project_name == "demo"
+        assert pm.load_project("demo")["style"] == ""
+
     def test_import_rejects_official_manifest_claim_when_formal_bytes_were_replaced(self, tmp_path):
         pm = ProjectManager(tmp_path / "projects")
         project_dir = _create_project(pm)
@@ -437,14 +450,13 @@ class TestProjectArchiveService:
         project = pm.load_project("demo")
         project["schema_version"] = 7
         _write_json(project_dir / "project.json", project)
-        _write_text(project_dir / "source" / "episode_1.txt", "原文")
-        script_plan_path = project_dir / "drafts" / "episode_1" / "script_plan_segments.json"
-        _write_json(script_plan_path, {"segments": [{"segment_id": "E1S01", "text": "原文"}]})
         _activate_artifact_manifest(project_dir)
         key = ArtifactKey.episode_script(1)
         before = ProjectArtifactManifestAdapter(project_dir).get_entry(key)
         assert before is not None
-        _write_json(script_plan_path, {"segments": [{"segment_id": "E1S01", "text": "改写后的原文"}]})
+        project = pm.load_project("demo")
+        project["overview"] = {"synopsis": "改写后的项目概述"}
+        _write_json(project_dir / "project.json", project)
         assert (
             ArtifactCurrencyResolver(project_dir).compare(key, artifact_path="scripts/episode_1.json").status
             is ArtifactStatus.STALE
@@ -568,7 +580,7 @@ class TestProjectArchiveService:
             is ArtifactStatus.STALE
         )
 
-    def test_official_round_trip_preserves_a_stale_script_after_script_plan_is_deleted(self, tmp_path):
+    def test_official_round_trip_preserves_a_stale_script_claim(self, tmp_path):
         pm = ProjectManager(tmp_path / "projects")
         project_dir = _create_project(pm)
         project = pm.load_project("demo")
@@ -582,9 +594,17 @@ class TestProjectArchiveService:
         key = ArtifactKey.episode_script(1)
         before = ProjectArtifactManifestAdapter(project_dir).get_entry(key)
         assert before is not None
+        # 正式脚本不以脚本规划为依据：删掉脚本规划只撤它自己的登记，剧本登记与时效都不变。
         assert script_review.delete_script_plan_file(project_dir, 1, script_plan_path)
         assert ProjectArtifactManifestAdapter(project_dir).get_entry(ArtifactKey.episode_script_plan(1)) is None
         assert ProjectArtifactManifestAdapter(project_dir).get_entry(key) == before
+        assert (
+            ArtifactCurrencyResolver(project_dir).compare(key, artifact_path="scripts/episode_1.json").status
+            is ArtifactStatus.CURRENT
+        )
+        project = pm.load_project("demo")
+        project["overview"] = {"synopsis": "改写后的项目概述"}
+        _write_json(project_dir / "project.json", project)
         assert (
             ArtifactCurrencyResolver(project_dir).compare(key, artifact_path="scripts/episode_1.json").status
             is ArtifactStatus.STALE

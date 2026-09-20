@@ -1,32 +1,31 @@
-"""ScriptGenerator 的条目级增量合并：只重写失效条目，其余条目原样保留。
+"""正式脚本的条目级维护：内容确认整份转出待编写条目，提示词编写只填待编写条目。
 
-三种脚本规划变体（drama / narration / reference_video）各自走一遍同一组判据：改一条内容后
-只有那一条被重写、其余条目逐字节不变；条目增删改序跟随脚本规划；``scope`` 的三种取值；
-内容确认门禁与存量剧本的兼容口径。
+三种变体（drama / narration / reference_video）各自走一遍同一组判据：提示词编写默认只编写待编写
+条目、``entry_ids`` 显式重写、其余条目逐字节不变、不读脚本规划；转换整份投影内容层并拒绝确认之外的
+规划或剧本。
 """
 
 from __future__ import annotations
 
+import copy
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from lib import script_generator as script_generator_module
 from lib import script_review
 from lib.artifact_activation import activate_artifact_target_state
 from lib.config.resolver import ConfigResolver
 from lib.project_manager import ProjectManager, ScriptWriteConflict
 from lib.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
-from lib.script_generator import SCRIPT_PLAN_CONVERSION_GENERATOR, ScriptGenerator
-from lib.script_plan_entries import (
-    SCRIPT_PLAN_ENTRY_REVISION_FIELD,
-    ScriptPlanEntryError,
-    evaluate_entry_currency,
-    plan_entries_from_document,
-    plan_entry_revisions,
-)
+from lib.script_batch_edit import ScriptBatchEditCommand, ScriptBatchEditor, blank_item_after, script_revision
+from lib.script_document import SCRIPT_PLAN_CONVERSION_GENERATOR
+from lib.script_generator import PromptAuthoringTargetError, ScriptGenerator
+from lib.script_models import PENDING_AUTHORING_FIELD
 from tests.fakes import FakeConfigResolver
 
 pytestmark = pytest.mark.asyncio
@@ -324,249 +323,331 @@ def _stamp_user_fields(project_dir: Path, variant: _Variant, entry_id: str) -> N
     path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
-# 用例
-# ---------------------------------------------------------------------------
+def _rewrite_script(project_dir: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
+    path = project_dir / "scripts" / "episode_1.json"
+    script = json.loads(path.read_text(encoding="utf-8"))
+    mutate(script)
+    path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
 
 
-class TestIncrementalMerge:
-    async def test_only_the_changed_entry_is_rewritten(self, tmp_path: Path, variant: _Variant) -> None:
-        """改一条 source_text：只有该条目在重写名单里，其余条目逐字节不变。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        generator = variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")])
-        await generator.generate(1)
-
-        # 在第一条上留下用户手工成果与已付费产物引用：增量重写第二条时它们必须逐字节存活。
-        _stamp_user_fields(project_dir, variant, first)
-        before = _entries(_script(project_dir), variant)
-        before_first_json = json.dumps(before[first], ensure_ascii=False, sort_keys=True)
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document[entries_key][1]["novel_text" if variant is NARRATION else "source_text"] = "改了一个错别字。"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(second, mark="二轮")])
-        await rerun.generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == [second]
-        after = _entries(_script(project_dir), variant)
-        assert json.dumps(after[first], ensure_ascii=False, sort_keys=True) == before_first_json
-        assert after[second] != before[second]
-
-    async def test_unchanged_plan_skips_the_model_entirely(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        before = _script(project_dir)[variant.items_key]
-
-        # 只备一份响应且已被首轮耗尽：本轮若调用模型，AsyncMock 会 StopIteration。
-        rewritten: list[str] = []
-        await variant.generator(project_dir, []).generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == []
-        assert _script(project_dir)[variant.items_key] == before
-
-    async def test_added_removed_and_reordered_entries_follow_the_plan(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        before = _entries(_script(project_dir), variant)
-        before_second_json = json.dumps(before[second], ensure_ascii=False, sort_keys=True)
-
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        # 删掉第一条、把第二条排到新增的第三条之后：集合、顺序都变，未变条目仍须保留。
-        third = dict(document[entries_key][0])
-        third[variant.id_field] = variant.entry_ids[0].replace("01", "03")
-        document[entries_key] = [third, document[entries_key][1]]
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        third_id = third[variant.id_field]
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(third_id, mark="三轮")])
-        await rerun.generate(1, rewritten_entry_ids=rewritten)
-
-        script = _script(project_dir)
-        assert [entry[variant.id_field] for entry in script[variant.items_key]] == [third_id, second]
-        assert rewritten == [third_id]
-        after = _entries(script, variant)
-        assert json.dumps(after[second], ensure_ascii=False, sort_keys=True) == before_second_json
-
-    async def test_scope_all_rewrites_every_entry(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
-
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(first, second, mark="整集")])
-        await rerun.generate(1, scope="all", rewritten_entry_ids=rewritten)
-
-        assert rewritten == [first, second]
-        assert all(entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD] for entry in _script(project_dir)[variant.items_key])
-
-    async def test_scope_entry_ids_rewrites_only_those(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
-        before = _entries(_script(project_dir), variant)
-        before_second_json = json.dumps(before[second], ensure_ascii=False, sort_keys=True)
-
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(first, mark="点名")])
-        await rerun.generate(1, scope=[first], rewritten_entry_ids=rewritten)
-
-        assert rewritten == [first]
-        after = _entries(_script(project_dir), variant)
-        assert json.dumps(after[second], ensure_ascii=False, sort_keys=True) == before_second_json
-
-    async def test_entry_ids_missing_a_new_entry_fails_before_the_model(
-        self, tmp_path: Path, variant: _Variant
-    ) -> None:
-        """点名重写时漏了脚本规划新增的条目：在调用文本模型之前拒绝，不留下缺条目的剧本。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        third = dict(document[entries_key][0])
-        third[variant.id_field] = first.replace("01", "03")
-        document[entries_key].append(third)
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        # 只备一份响应：本轮若调用模型再失败，说明拦截发生在付费之后。
-        with pytest.raises(ScriptPlanEntryError, match="新增的条目不在本次重写范围内"):
-            await variant.generator(project_dir, []).generate(1, scope=[first])
-
-        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
-
-    async def test_unknown_scope_entry_id_fails_without_writing(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-
-        with pytest.raises(ScriptPlanEntryError, match="不在当前脚本规划内"):
-            await variant.generator(project_dir, []).generate(1, scope=["E9U99"])
-
-        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
-
-    async def test_first_generation_stamps_every_entry_revision(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        rewritten: list[str] = []
-        generator = variant.generator(project_dir, [variant.visual_factory(first, second)])
-        await generator.generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == [first, second]
-        entries = _entries(_script(project_dir), variant)
-        assert {entry_id: bool(entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD]) for entry_id, entry in entries.items()} == {
-            first: True,
-            second: True,
-        }
-
-    async def test_legacy_script_without_entry_revisions_is_not_reported_stale(
-        self, tmp_path: Path, variant: _Variant
-    ) -> None:
-        """存量剧本：条目上没有指纹，但整集指纹仍匹配——不重跑模型，只补齐条目指纹。"""
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        script_path = project_dir / "scripts" / "episode_1.json"
-        script = json.loads(script_path.read_text(encoding="utf-8"))
-        for entry in script[variant.items_key]:
-            entry.pop(SCRIPT_PLAN_ENTRY_REVISION_FIELD, None)
-        script_path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
-
-        rewritten: list[str] = []
-        await variant.generator(project_dir, []).generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == []
-        assert all(entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD] for entry in _script(project_dir)[variant.items_key])
-
-
-class TestWorkflowSeesTheSameRevisions:
-    """登记（生成落盘）与比对（工作流状态）必须摘出同一个指纹。
-
-    两侧读的是同一份脚本规划文件，但生成侧经草稿模型归一、工作流侧读磁盘原文：口径一旦分叉，
-    刚落盘的剧本会被工作流立刻判成整集失效，下一次提示词编写便整集重写、覆盖用户精修的提示词。
-    """
-
-    async def test_stamped_revisions_match_the_plan_document(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        expected = plan_entry_revisions(variant.name, plan_entries_from_document(variant.name, document), episode=1)
-        stamped = {
-            entry_id: entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD]
-            for entry_id, entry in _entries(_script(project_dir), variant).items()
-        }
-        assert stamped == expected
-
-    async def test_plan_omitting_defaulted_fields_still_matches(self, tmp_path: Path, variant: _Variant) -> None:
-        """脚本规划省略带默认值的内容字段（存量文件的常态）时两侧仍同源。"""
-        if variant.omissible_field is None:
-            pytest.skip("drama 的脚本规划没有草稿模型，两侧消费的都是磁盘原文")
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        for entry in document[_PLAN_ENTRIES_KEY[variant.name]]:
-            entry.pop(variant.omissible_field, None)
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        expected = plan_entry_revisions(variant.name, plan_entries_from_document(variant.name, document), episode=1)
-        stamped = {
-            entry_id: entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD]
-            for entry_id, entry in _entries(_script(project_dir), variant).items()
-        }
-        assert stamped == expected
+def _entry_json(project_dir: Path, variant: _Variant, entry_id: str) -> str:
+    return json.dumps(_entries(_script(project_dir), variant)[entry_id], ensure_ascii=False, sort_keys=True)
 
 
 def _converter(project_dir: Path) -> ScriptGenerator:
-    """机械转换不调用文本模型：不注入 generator，走与 dry-run 相同的裸构造。"""
+    """内容确认转换不调用文本模型：不注入 generator，走与 dry-run 相同的裸构造。"""
     return ScriptGenerator(
         project_dir,
         config_resolver=cast(ConfigResolver, FakeConfigResolver(supported_durations=(4, 6, 8))),
     )
 
 
-def _currency(project_dir: Path, plan_path: Path, variant: _Variant):
-    document = json.loads(plan_path.read_text(encoding="utf-8"))
-    revisions = plan_entry_revisions(variant.name, plan_entries_from_document(variant.name, document), episode=1)
-    return evaluate_entry_currency(
-        variant.name, script=_script(project_dir), plan_revisions=revisions, legacy_entries_current=False
+async def _materialize(project_dir: Path, plan_path: Path):
+    """以当前规划与当前正式剧本为认可对象，把脚本规划整份转为正式剧本。"""
+    plan_revision = script_review.content_fingerprint(plan_path)
+    assert plan_revision is not None
+    return await _converter(project_dir).materialize_script_plan(
+        1,
+        expected_plan_revision=plan_revision,
+        expected_script_fingerprint=script_review.content_fingerprint(project_dir / "scripts" / "episode_1.json"),
+        project_update=lambda _project: None,
     )
+
+
+async def _converted_and_authored(
+    tmp_path: Path, variant: _Variant, *, mark: str = "首轮", texts: tuple[str, ...] | None = None
+) -> tuple[Path, Path]:
+    """转换脚本规划并编写全部待编写条目：得到一份条目都有视觉层、无待编写标记的正式脚本。"""
+    first, second = variant.entry_ids
+    project_dir, plan_path = variant.build(tmp_path, texts=texts)
+    await _materialize(project_dir, plan_path)
+    await variant.generator(project_dir, [variant.visual_factory(first, second, mark=mark)]).generate(1)
+    return project_dir, plan_path
+
+
+#: 各变体的视觉层字段：提示词编写只写这些字段（参考生视频改写单元正文）。
+_VISUAL_FIELDS = {
+    "narration": ("image_prompt", "video_prompt"),
+    "drama": ("image_prompt", "video_prompt"),
+    "reference_video": ("text",),
+}
+
+
+def _without_visual_layer(entry: dict[str, Any], variant: _Variant) -> dict[str, Any]:
+    hidden = {*_VISUAL_FIELDS[variant.name], PENDING_AUTHORING_FIELD}
+    return {key: value for key, value in entry.items() if key not in hidden}
+
+
+def _authored_with(entry: dict[str, Any], variant: _Variant, mark: str) -> bool:
+    """条目的视觉层出自带 ``mark`` 的那次模型响应。"""
+    if variant is REFERENCE:
+        return entry["text"].startswith(f"{mark}：")
+    return entry["image_prompt"]["scene"] == f"{mark}-{entry[variant.id_field]}"
 
 
 def _plan_text_field(variant: _Variant) -> str:
     return "novel_text" if variant is NARRATION else "source_text"
 
 
-class TestScriptPlanConversion:
-    """「按脚本规划转为正式脚本」：只同步内容层，视觉层要么待生成、要么原样保留。"""
+@pytest.fixture(params=[NARRATION, DRAMA], ids=lambda variant: variant.name)
+def prompt_variant(request) -> _Variant:
+    """带 image_prompt / video_prompt 的两个变体；参考生视频的视觉层是 unit 正文，无提示词字段。"""
+    return request.param
 
-    async def test_first_conversion_projects_every_entry_with_pending_prompts(
+
+# ---------------------------------------------------------------------------
+# 用例
+# ---------------------------------------------------------------------------
+
+
+class TestPromptAuthoring:
+    """提示词编写只读正式脚本：默认编写全部待编写条目，``entry_ids`` 显式重写，其余条目逐字节不变。"""
+
+    async def test_manually_added_entry_is_the_only_one_authored(self, tmp_path: Path, variant: _Variant) -> None:
+        first, second = variant.entry_ids
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+        _stamp_user_fields(project_dir, variant, first)
+        third = first.replace("01", "03")
+
+        def add_pending_entry(script: dict[str, Any]) -> None:
+            entry = copy.deepcopy(script[variant.items_key][1])
+            entry[variant.id_field] = third
+            if variant is REFERENCE:
+                entry["text"] = "@[主角] 推开 @[酒馆] 的门（手动新增）"
+            else:
+                entry["image_prompt"] = None
+                entry["video_prompt"] = None
+            entry[PENDING_AUTHORING_FIELD] = True
+            script[variant.items_key].append(entry)
+
+        _rewrite_script(project_dir, add_pending_entry)
+        before = {entry_id: _entry_json(project_dir, variant, entry_id) for entry_id in (first, second)}
+        added = _entries(_script(project_dir), variant)[third]
+
+        rewritten: list[str] = []
+        rerun = variant.generator(project_dir, [variant.visual_factory(third, mark="补写")])
+        await rerun.generate(1, rewritten_entry_ids=rewritten)
+
+        assert rewritten == [third]
+        assert {entry_id: _entry_json(project_dir, variant, entry_id) for entry_id in (first, second)} == before
+        after = _entries(_script(project_dir), variant)[third]
+        assert _authored_with(after, variant, "补写")
+        assert PENDING_AUTHORING_FIELD not in after
+        assert _without_visual_layer(after, variant) == _without_visual_layer(added, variant)
+
+    async def test_timeline_insert_and_remove_survive_default_authoring(
+        self, tmp_path: Path, prompt_variant: _Variant
+    ) -> None:
+        """时间线新增 / 移除分镜之后编写：新增的空分镜被填充，移除的分镜不会被生成回来。"""
+        variant = prompt_variant
+        first, second = variant.entry_ids
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+        pm = ProjectManager(str(project_dir.parent))
+        editor = ScriptBatchEditor(pm)
+
+        def edit(operation: dict[str, Any]) -> None:
+            current = pm.load_script(project_dir.name, "episode_1.json")
+            command = ScriptBatchEditCommand.model_validate(
+                {"script": "episode_1.json", "expected_revision": script_revision(current), "operations": [operation]}
+            )
+            result = editor.execute(project_dir.name, command)
+            assert result.success is True, result.problems
+
+        item = blank_item_after(pm.load_script(project_dir.name, "episode_1.json"), first)
+        if variant is NARRATION:
+            item["novel_text"] = "手动新增的旁白。"
+        edit({"op": "insert_after", "after_id": first, "item": item})
+        edit({"op": "remove", "id": second})
+        added = item[variant.id_field]
+        before_first = _entry_json(project_dir, variant, first)
+
+        rewritten: list[str] = []
+        await variant.generator(project_dir, [variant.visual_factory(added, mark="补写")]).generate(
+            1, rewritten_entry_ids=rewritten
+        )
+
+        assert rewritten == [added]
+        after = _script(project_dir)[variant.items_key]
+        assert [entry[variant.id_field] for entry in after] == [first, added]
+        assert _authored_with(after[1], variant, "补写")
+        assert PENDING_AUTHORING_FIELD not in after[1]
+        assert _entry_json(project_dir, variant, first) == before_first
+
+    async def test_nothing_pending_leaves_the_script_untouched(self, tmp_path: Path, variant: _Variant) -> None:
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
+
+        # 不备响应：本轮若调用模型，AsyncMock 会 StopIteration。
+        rewritten: list[str] = []
+        await variant.generator(project_dir, []).generate(1, rewritten_entry_ids=rewritten)
+
+        assert rewritten == []
+        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
+
+    async def test_entry_ids_rewrite_keeps_content_and_user_fields(self, tmp_path: Path, variant: _Variant) -> None:
+        """点名已有视觉层的条目：只重写这些条目的视觉层，内容字段与用户字段原样保留。"""
+        first, second = variant.entry_ids
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+        _stamp_user_fields(project_dir, variant, first)
+        before_first = _entries(_script(project_dir), variant)[first]
+        before_second = _entry_json(project_dir, variant, second)
+
+        rewritten: list[str] = []
+        rerun = variant.generator(project_dir, [variant.visual_factory(first, mark="点名")])
+        await rerun.generate(1, entry_ids=[first], rewritten_entry_ids=rewritten)
+
+        assert rewritten == [first]
+        after_first = _entries(_script(project_dir), variant)[first]
+        assert _authored_with(after_first, variant, "点名")
+        assert _without_visual_layer(after_first, variant) == _without_visual_layer(before_first, variant)
+        assert _entry_json(project_dir, variant, second) == before_second
+
+    async def test_unknown_entry_id_fails_without_writing(self, tmp_path: Path, variant: _Variant) -> None:
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
+
+        with pytest.raises(PromptAuthoringTargetError, match="不在第 1 集正式脚本内"):
+            await variant.generator(project_dir, []).generate(1, entry_ids=["E9U99"])
+
+        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
+
+    @pytest.mark.parametrize("plan_state", ["missing", "diverged"])
+    async def test_authoring_does_not_read_the_script_plan(
+        self, tmp_path: Path, variant: _Variant, plan_state: str
+    ) -> None:
+        """脚本规划缺失或与正式脚本不一致，编写照常进行：输入只有正式脚本里的条目。"""
+        first, second = variant.entry_ids
+        project_dir, plan_path = variant.build(tmp_path)
+        await _materialize(project_dir, plan_path)
+        before = _entries(_script(project_dir), variant)
+        if plan_state == "missing":
+            plan_path.unlink()
+        else:
+            entries_key = _PLAN_ENTRIES_KEY[variant.name]
+            document = json.loads(plan_path.read_text(encoding="utf-8"))
+            document[entries_key] = document[entries_key][:1]
+            document[entries_key][0][_plan_text_field(variant)] = "规划里改过的原文。"
+            plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            _activate(project_dir)
+
+        rewritten: list[str] = []
+        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(
+            1, rewritten_entry_ids=rewritten
+        )
+
+        assert rewritten == [first, second]
+        after = _entries(_script(project_dir), variant)
+        for entry_id in (first, second):
+            assert PENDING_AUTHORING_FIELD not in after[entry_id]
+            assert _without_visual_layer(after[entry_id], variant) == _without_visual_layer(before[entry_id], variant)
+
+    async def test_missing_formal_script_is_refused(self, tmp_path: Path, variant: _Variant) -> None:
+        project_dir, _plan_path = variant.build(tmp_path)
+
+        with pytest.raises(PromptAuthoringTargetError, match="尚无正式脚本"):
+            await variant.generator(project_dir, []).generate(1)
+
+        assert not (project_dir / "scripts" / "episode_1.json").exists()
+
+
+class TestTextShapedPrompts:
+    """文本形态提示词（``lib.script_models.PromptText``）在编写两条路径下的行为。"""
+
+    @staticmethod
+    def _write_text_prompts(project_dir: Path, variant: _Variant, entry_id: str) -> None:
+        def mutate(script: dict[str, Any]) -> None:
+            for entry in script[variant.items_key]:
+                if entry[variant.id_field] == entry_id:
+                    entry["image_prompt"] = "手写的分镜图提示词正文"
+                    entry["video_prompt"] = "手写的视频提示词正文"
+
+        _rewrite_script(project_dir, mutate)
+
+    async def test_unmarked_entry_keeps_its_text_shaped_prompts(self, tmp_path: Path, prompt_variant: _Variant) -> None:
+        first, second = prompt_variant.entry_ids
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, prompt_variant)
+        self._write_text_prompts(project_dir, prompt_variant, first)
+        _rewrite_script(
+            project_dir,
+            lambda script: script[prompt_variant.items_key][1].__setitem__(PENDING_AUTHORING_FIELD, True),
+        )
+        before_first = _entry_json(project_dir, prompt_variant, first)
+
+        rerun = prompt_variant.generator(project_dir, [prompt_variant.visual_factory(second, mark="二轮")])
+        await rerun.generate(1)
+
+        assert _entry_json(project_dir, prompt_variant, first) == before_first
+        assert _entries(_script(project_dir), prompt_variant)[first]["image_prompt"] == "手写的分镜图提示词正文"
+
+    async def test_rewritten_entry_drops_the_text_shape(self, tmp_path: Path, prompt_variant: _Variant) -> None:
+        """点名重写一个文本形态条目：视觉层由 LLM 重出，回到结构形态、不留旧正文。"""
+        first, _second = prompt_variant.entry_ids
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, prompt_variant)
+        self._write_text_prompts(project_dir, prompt_variant, first)
+
+        rerun = prompt_variant.generator(project_dir, [prompt_variant.visual_factory(first, mark="点名")])
+        await rerun.generate(1, entry_ids=[first])
+
+        entry = _entries(_script(project_dir), prompt_variant)[first]
+        assert entry["image_prompt"]["scene"] == f"点名-{first}"
+        assert isinstance(entry["video_prompt"], dict)
+
+
+class TestDryRunPrompt:
+    """dry-run 的 prompt 与真实运行同一批编写条目：它要回答「这次会发出什么」。"""
+
+    @staticmethod
+    async def _converted_with_pending(tmp_path: Path, variant: _Variant, *pending_ids: str) -> Path:
+        """转换后只让 ``pending_ids`` 保留待编写标记。"""
+        project_dir, plan_path = variant.build(tmp_path, texts=("原文甲甲甲。", "原文乙乙乙。"))
+        await _materialize(project_dir, plan_path)
+
+        def keep_markers(script: dict[str, Any]) -> None:
+            for entry in script[variant.items_key]:
+                if entry[variant.id_field] not in pending_ids:
+                    entry.pop(PENDING_AUTHORING_FIELD, None)
+
+        _rewrite_script(project_dir, keep_markers)
+        return project_dir
+
+    async def test_prompt_covers_only_the_pending_entry(self, tmp_path: Path, variant: _Variant) -> None:
+        _first, second = variant.entry_ids
+        project_dir = await self._converted_with_pending(tmp_path, variant, second)
+
+        prompt = await variant.generator(project_dir, []).build_prompt(1)
+
+        first_needle, second_needle = variant.prompt_needles
+        assert second_needle in prompt
+        assert first_needle not in prompt
+
+    async def test_prompt_says_so_when_nothing_is_pending(self, tmp_path: Path, variant: _Variant) -> None:
+        project_dir, _plan_path = await _converted_and_authored(tmp_path, variant)
+
+        prompt = await variant.generator(project_dir, []).build_prompt(1)
+
+        assert "没有待编写的条目" in prompt
+
+    async def test_entry_ids_cover_those_entries(self, tmp_path: Path, variant: _Variant) -> None:
+        first, second = variant.entry_ids
+        project_dir = await self._converted_with_pending(tmp_path, variant)
+
+        prompt = await variant.generator(project_dir, []).build_prompt(1, entry_ids=[first, second])
+
+        assert all(needle in prompt for needle in variant.prompt_needles)
+
+
+class TestScriptPlanMaterialization:
+    """内容确认转换：整份投影内容层、全部条目待编写，只认确认过的规划与调用方认可覆盖的剧本。"""
+
+    async def test_materialization_projects_every_entry_with_pending_prompts(
         self, tmp_path: Path, variant: _Variant
     ) -> None:
         first, second = variant.entry_ids
         project_dir, plan_path = variant.build(tmp_path)
 
-        receipt = await _converter(project_dir).convert_script_plan(1)
+        receipt = await _materialize(project_dir, plan_path)
 
-        assert (receipt.added, receipt.refreshed, receipt.removed) == ((first, second), (), ())
+        assert (receipt.entry_ids, receipt.removed) == ((first, second), ())
         script = _script(project_dir)
         entries = _entries(script, variant)
         assert list(entries) == [first, second]
@@ -574,6 +655,7 @@ class TestScriptPlanConversion:
         document = json.loads(plan_path.read_text(encoding="utf-8"))
         plan_entries = {e[variant.id_field]: e for e in document[_PLAN_ENTRIES_KEY[variant.name]]}
         for entry_id, entry in entries.items():
+            assert entry[PENDING_AUTHORING_FIELD] is True
             if variant is REFERENCE:
                 assert entry["text"] == plan_entries[entry_id]["text"]
                 assert "image_prompt" not in entry
@@ -581,19 +663,9 @@ class TestScriptPlanConversion:
                 assert entry["image_prompt"] is None
                 assert entry["video_prompt"] is None
                 assert "needs_replan" not in entry
-                assert "scene_description" not in entry
+                if variant is DRAMA:
+                    assert entry["scene_description"] == plan_entries[entry_id]["scene_description"]
                 assert entry[_plan_text_field(variant)] == plan_entries[entry_id][_plan_text_field(variant)]
-        assert not _currency(project_dir, plan_path, variant).is_stale
-
-    async def test_repeated_conversion_is_a_no_op(self, tmp_path: Path, variant: _Variant) -> None:
-        project_dir, _plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
-        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-
-        receipt = await _converter(project_dir).convert_script_plan(1)
-
-        assert (receipt.added, receipt.refreshed, receipt.removed) == ((), (), ())
-        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
 
     async def test_generate_with_entry_ids_fills_only_that_entry(
         self, tmp_path: Path, prompt_variant: _Variant
@@ -601,33 +673,42 @@ class TestScriptPlanConversion:
         """转换后点名让模型补一条提示词：其余待生成条目逐字节不变。"""
         variant = prompt_variant
         first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
+        project_dir, plan_path = variant.build(tmp_path)
+        await _materialize(project_dir, plan_path)
         before_second = json.dumps(_entries(_script(project_dir), variant)[second], ensure_ascii=False, sort_keys=True)
 
         rewritten: list[str] = []
         await variant.generator(project_dir, [variant.visual_factory(first, mark="补写")]).generate(
-            1, scope=[first], rewritten_entry_ids=rewritten
+            1, entry_ids=[first], rewritten_entry_ids=rewritten
         )
 
         assert rewritten == [first]
         after = _entries(_script(project_dir), variant)
         assert after[first]["image_prompt"] is not None
+        assert "pending_authoring" not in after[first]
         assert json.dumps(after[second], ensure_ascii=False, sort_keys=True) == before_second
+        assert after[second]["pending_authoring"] is True
 
-    async def test_default_generate_after_conversion_targets_nothing(
-        self, tmp_path: Path, prompt_variant: _Variant
+    async def test_default_generate_after_materialization_fills_every_pending_entry(
+        self, tmp_path: Path, variant: _Variant
     ) -> None:
-        """待生成不是失效：默认范围（stale）下转换出的条目不在重写名单里，模型不被调用。"""
-        variant = prompt_variant
-        project_dir, _plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
+        """转换出的条目都待编写：默认编写全部待编写条目，写回后标记清除、内容层不变。"""
+        first, second = variant.entry_ids
+        project_dir, plan_path = variant.build(tmp_path)
+        await _materialize(project_dir, plan_path)
+        before = _entries(_script(project_dir), variant)
 
         rewritten: list[str] = []
-        await variant.generator(project_dir, []).generate(1, rewritten_entry_ids=rewritten)
+        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(
+            1, rewritten_entry_ids=rewritten
+        )
 
-        assert rewritten == []
-        assert all(entry["image_prompt"] is None for entry in _script(project_dir)[variant.items_key])
+        assert rewritten == [first, second]
+        after = _entries(_script(project_dir), variant)
+        for entry_id in (first, second):
+            assert _authored_with(after[entry_id], variant, "首轮")
+            assert PENDING_AUTHORING_FIELD not in after[entry_id]
+            assert _without_visual_layer(after[entry_id], variant) == _without_visual_layer(before[entry_id], variant)
 
     def _edit_plan(self, plan_path: Path, project_dir: Path, variant: _Variant) -> str:
         """改第二条正文、删第一条、新增第三条并排在最前，返回第三条 id。"""
@@ -642,366 +723,103 @@ class TestScriptPlanConversion:
         _activate(project_dir)
         return third[variant.id_field]
 
-    async def test_conversion_over_an_existing_script_syncs_the_set_and_keeps_stale_entries(
+    async def test_materialization_over_an_authored_script_replaces_it_wholesale(
         self, tmp_path: Path, variant: _Variant
     ) -> None:
+        """已有编写过的正式剧本：整份按新规划替换，不沿用任何条目的提示词或用户字段。"""
         first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
+        project_dir, plan_path = await _converted_and_authored(tmp_path, variant)
         _stamp_user_fields(project_dir, variant, second)
-        before_second = json.dumps(_entries(_script(project_dir), variant)[second], ensure_ascii=False, sort_keys=True)
         third = self._edit_plan(plan_path, project_dir, variant)
 
-        receipt = await _converter(project_dir).convert_script_plan(1)
+        receipt = await _materialize(project_dir, plan_path)
 
-        assert (receipt.added, receipt.refreshed, receipt.removed) == ((third,), (), (first,))
+        assert (receipt.entry_ids, receipt.removed) == ((third, second), (first,))
         script = _script(project_dir)
         assert [entry[variant.id_field] for entry in script[variant.items_key]] == [third, second]
         after = _entries(script, variant)
-        # 失效条目的内容、提示词、指纹三样都不动，制作状态继续报失效。
-        assert json.dumps(after[second], ensure_ascii=False, sort_keys=True) == before_second
+        for entry in after.values():
+            assert entry[PENDING_AUTHORING_FIELD] is True
+            assert "note" not in entry
+            if variant is not REFERENCE:
+                assert entry["image_prompt"] is None
         if variant is not REFERENCE:
-            assert after[third]["image_prompt"] is None
-        currency = _currency(project_dir, plan_path, variant)
-        assert currency.stale_ids == (second,)
-        assert currency.new_ids == ()
+            assert after[second][_plan_text_field(variant)] == "改了一个错别字。"
 
-    async def test_conversion_rejects_a_save_that_landed_after_its_snapshot(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """读入旧剧本之后、落盘之前另一次保存落下：按冲突拒绝，不能拿新文件的指纹把它覆盖掉。"""
-        variant = NARRATION
-        project_dir, plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
-        self._edit_plan(plan_path, project_dir, variant)
-        script_path = project_dir / "scripts" / "episode_1.json"
-        original = ProjectManager.load_script_readonly
-
-        def load_then_concurrent_save(self: ProjectManager, name: str, filename: str) -> Any:
-            data = original(self, name, filename)
-            if filename == "episode_1.json":
-                document = json.loads(script_path.read_text(encoding="utf-8"))
-                document["title"] = "并发改写"
-                script_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-            return data
-
-        monkeypatch.setattr(ProjectManager, "load_script_readonly", load_then_concurrent_save)
-
-        with pytest.raises(ScriptWriteConflict):
-            await _converter(project_dir).convert_script_plan(1)
-        assert _script(project_dir)["title"] == "并发改写"
-
-    async def test_conversion_rejects_a_plan_edit_that_landed_after_its_snapshot(
+    async def test_materialization_rejects_a_plan_edit_that_landed_after_loading(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: _Variant
     ) -> None:
-        """冻结规划快照之后、落盘之前规划又被改写并重新登记：拒绝写盘，剧本保持原样。"""
+        """加载规划之后、落盘之前规划又被改写：持锁复核指纹失配即拒绝，剧本保持原样。"""
         project_dir, plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
-        self._edit_plan(plan_path, project_dir, variant)
+        await _materialize(project_dir, plan_path)
         before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-        original = ProjectManager.load_script_readonly
+        original = script_generator_module.formal_script_overwrite
 
-        def load_then_concurrent_plan_edit(self: ProjectManager, name: str, filename: str) -> Any:
-            data = original(self, name, filename)
-            if filename == "episode_1.json":
-                document = json.loads(plan_path.read_text(encoding="utf-8"))
-                document[_PLAN_ENTRIES_KEY[variant.name]][0][_plan_text_field(variant)] = "快照之后又改了一遍。"
-                plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-                _activate(project_dir)
-            return data
+        def overwrite_then_concurrent_plan_edit(project_path: Path, project: dict, episode: int) -> Any:
+            document = json.loads(plan_path.read_text(encoding="utf-8"))
+            document[_PLAN_ENTRIES_KEY[variant.name]][0][_plan_text_field(variant)] = "加载之后又改了一遍。"
+            plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            return original(project_path, project, episode)
 
-        monkeypatch.setattr(ProjectManager, "load_script_readonly", load_then_concurrent_plan_edit)
+        monkeypatch.setattr(script_generator_module, "formal_script_overwrite", overwrite_then_concurrent_plan_edit)
 
-        with pytest.raises(ValueError, match="changed since it was selected"):
-            await _converter(project_dir).convert_script_plan(1)
+        with pytest.raises(script_review.ScriptPlanWriteConflict):
+            await _materialize(project_dir, plan_path)
         assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
 
-    async def test_title_only_change_is_previewed_and_persisted(self, tmp_path: Path) -> None:
-        """drama 规划只改标题：三组条目为空但不是空操作，预演报 title_changed，转换落盘新标题。"""
+    async def test_materialization_refuses_a_plan_other_than_the_confirmed_one(
+        self, tmp_path: Path, variant: _Variant
+    ) -> None:
+        """确认记录的是校验过的那份规划：加载到的规划指纹不同即拒绝，不写剧本、不改 project.json。"""
+        project_dir, _plan_path = variant.build(tmp_path)
+        project_before = (project_dir / "project.json").read_bytes()
+
+        with pytest.raises(script_review.ScriptPlanWriteConflict):
+            await _converter(project_dir).materialize_script_plan(
+                1,
+                expected_plan_revision="sha256-v1:" + "0" * 64,
+                expected_script_fingerprint=None,
+                project_update=lambda project: project.__setitem__("touched", True),
+            )
+
+        assert not (project_dir / "scripts" / "episode_1.json").exists()
+        assert (project_dir / "project.json").read_bytes() == project_before
+
+    async def test_materialization_refuses_a_script_other_than_the_acknowledged_one(
+        self, tmp_path: Path, variant: _Variant
+    ) -> None:
+        """覆盖认可对应调用方看到的那份正式剧本：剧本之后又被改过即按冲突拒绝，剧本与 project.json 原样。"""
+        project_dir, plan_path = variant.build(tmp_path)
+        await _materialize(project_dir, plan_path)
+        script_path = project_dir / "scripts" / "episode_1.json"
+        acknowledged = script_review.content_fingerprint(script_path)
+        document = json.loads(script_path.read_text(encoding="utf-8"))
+        document["title"] = "认可之后又改了"
+        script_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        before = script_path.read_bytes()
+        project_before = (project_dir / "project.json").read_bytes()
+        plan_revision = script_review.content_fingerprint(plan_path)
+        assert plan_revision is not None
+
+        with pytest.raises(ScriptWriteConflict):
+            await _converter(project_dir).materialize_script_plan(
+                1,
+                expected_plan_revision=plan_revision,
+                expected_script_fingerprint=acknowledged,
+                project_update=lambda project: project.__setitem__("touched", True),
+            )
+
+        assert script_path.read_bytes() == before
+        assert (project_dir / "project.json").read_bytes() == project_before
+
+    async def test_blank_plan_title_falls_back_to_the_episode_title(self, tmp_path: Path) -> None:
+        """drama 规划标题只有空白：正式剧本取分集账本标题。"""
         project_dir, plan_path = DRAMA.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        document["title"] = "改名后的第一集"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        preview = await _converter(project_dir).preview_script_plan_conversion(1)
-        assert (preview.added, preview.stale, preview.removed) == ((), (), ())
-        assert (preview.order_changed, preview.title_changed) == (False, True)
-
-        receipt = await _converter(project_dir).convert_script_plan(1)
-        assert (receipt.added, receipt.refreshed, receipt.removed) == ((), (), ())
-        assert _script(project_dir)["title"] == "改名后的第一集"
-        assert (await _converter(project_dir).preview_script_plan_conversion(1)).title_changed is False
-
-    async def test_blank_plan_title_counts_as_missing(self, tmp_path: Path) -> None:
-        """规划标题只有空白：沿用旧剧本标题，预演不报 title_changed，重复转换仍是空操作。"""
-        project_dir, plan_path = DRAMA.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
         document = json.loads(plan_path.read_text(encoding="utf-8"))
         document["title"] = "   "
         plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
         _activate(project_dir)
 
-        assert (await _converter(project_dir).preview_script_plan_conversion(1)).title_changed is False
-        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-        await _converter(project_dir).convert_script_plan(1)
-        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
+        await _materialize(project_dir, plan_path)
+
         assert _script(project_dir)["title"] == "第一集"
-
-    async def test_reorder_only_change_is_previewed_and_persisted(self, tmp_path: Path, variant: _Variant) -> None:
-        """规划只调换条目顺序：预演报 order_changed，转换让剧本顺序跟随，回执三组为空。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await _converter(project_dir).convert_script_plan(1)
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        document[entries_key] = list(reversed(document[entries_key]))
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        preview = await _converter(project_dir).preview_script_plan_conversion(1)
-        assert (preview.added, preview.stale, preview.removed) == ((), (), ())
-        assert (preview.order_changed, preview.title_changed) == (True, False)
-
-        receipt = await _converter(project_dir).convert_script_plan(1)
-        assert (receipt.added, receipt.refreshed, receipt.removed) == ((), (), ())
-        assert [entry[variant.id_field] for entry in _script(project_dir)[variant.items_key]] == [second, first]
-        assert (await _converter(project_dir).preview_script_plan_conversion(1)).order_changed is False
-
-    async def test_adopting_new_content_refreshes_a_stale_entry_but_keeps_its_prompts(
-        self, tmp_path: Path, variant: _Variant
-    ) -> None:
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
-        _stamp_user_fields(project_dir, variant, second)
-        before_second = _entries(_script(project_dir), variant)[second]
-        self._edit_plan(plan_path, project_dir, variant)
-
-        receipt = await _converter(project_dir).convert_script_plan(1, entry_ids=[second])
-
-        assert receipt.refreshed == (second,)
-        after = _entries(_script(project_dir), variant)[second]
-        if variant is REFERENCE:
-            assert after["text"] == "@[主角] 推开 @[酒馆] 的门（第2镜）"
-            assert after["text"] != before_second["text"]
-        else:
-            assert after[_plan_text_field(variant)] == "改了一个错别字。"
-            assert after["image_prompt"] == before_second["image_prompt"]
-            assert after["video_prompt"] == before_second["video_prompt"]
-        assert after["note"] == before_second["note"]
-        assert after["generated_assets"] == before_second["generated_assets"]
-        assert after[SCRIPT_PLAN_ENTRY_REVISION_FIELD] != before_second[SCRIPT_PLAN_ENTRY_REVISION_FIELD]
-        assert not _currency(project_dir, plan_path, variant).is_stale
-
-    async def test_adopting_new_content_on_a_current_entry_fails_without_writing(
-        self, tmp_path: Path, variant: _Variant
-    ) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        before = (project_dir / "scripts" / "episode_1.json").read_bytes()
-
-        with pytest.raises(ScriptPlanEntryError, match="并未失效"):
-            await _converter(project_dir).convert_script_plan(1, entry_ids=[first])
-        with pytest.raises(ScriptPlanEntryError, match="不在当前脚本规划内"):
-            await _converter(project_dir).convert_script_plan(1, entry_ids=["E9U99"])
-
-        assert (project_dir / "scripts" / "episode_1.json").read_bytes() == before
-
-
-@pytest.fixture(params=[NARRATION, DRAMA], ids=lambda variant: variant.name)
-def prompt_variant(request) -> _Variant:
-    """带 image_prompt / video_prompt 的两个变体；参考生视频的视觉层是 unit 正文，无提示词字段。"""
-    return request.param
-
-
-class TestTextShapedPrompts:
-    """文本形态提示词（``lib.script_models.PromptText``）在增量合并两条路径下的行为。"""
-
-    @staticmethod
-    def _write_text_prompts(project_dir: Path, variant: _Variant, entry_id: str) -> None:
-        path = project_dir / "scripts" / "episode_1.json"
-        script = json.loads(path.read_text(encoding="utf-8"))
-        for entry in script[variant.items_key]:
-            if entry[variant.id_field] == entry_id:
-                entry["image_prompt"] = "手写的分镜图提示词正文"
-                entry["video_prompt"] = "手写的视频提示词正文"
-        path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
-
-    async def test_unchanged_entry_keeps_its_text_shaped_prompts(
-        self, tmp_path: Path, prompt_variant: _Variant
-    ) -> None:
-        first, second = prompt_variant.entry_ids
-        project_dir, plan_path = prompt_variant.build(tmp_path)
-        await prompt_variant.generator(project_dir, [prompt_variant.visual_factory(first, second)]).generate(1)
-        self._write_text_prompts(project_dir, prompt_variant, first)
-        before_first = json.dumps(_entries(_script(project_dir), prompt_variant)[first], sort_keys=True)
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        entries_key = _PLAN_ENTRIES_KEY[prompt_variant.name]
-        document[entries_key][1]["novel_text" if prompt_variant is NARRATION else "source_text"] = "改了一句。"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        rerun = prompt_variant.generator(project_dir, [prompt_variant.visual_factory(second, mark="二轮")])
-        await rerun.generate(1)
-
-        after_first = _entries(_script(project_dir), prompt_variant)[first]
-        assert json.dumps(after_first, sort_keys=True) == before_first
-        assert after_first["image_prompt"] == "手写的分镜图提示词正文"
-
-    async def test_rewritten_entry_drops_the_text_shape(self, tmp_path: Path, prompt_variant: _Variant) -> None:
-        """点名重写一个文本形态条目：视觉层由 LLM 重出，回到结构形态、不留旧正文。"""
-        first, second = prompt_variant.entry_ids
-        project_dir, _plan_path = prompt_variant.build(tmp_path)
-        await prompt_variant.generator(project_dir, [prompt_variant.visual_factory(first, second)]).generate(1)
-        self._write_text_prompts(project_dir, prompt_variant, first)
-
-        rerun = prompt_variant.generator(project_dir, [prompt_variant.visual_factory(first, mark="点名")])
-        await rerun.generate(1, scope=[first])
-
-        entry = _entries(_script(project_dir), prompt_variant)[first]
-        assert entry["image_prompt"]["scene"] == f"点名-{first}"
-        assert isinstance(entry["video_prompt"], dict)
-
-
-class TestDryRunPrompt:
-    """dry-run 的 prompt 与真实运行同一个重写范围：它要回答「这次会发出什么」。"""
-
-    async def test_prompt_covers_only_the_outdated_entry(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path, texts=("原文甲甲甲。", "原文乙乙乙。"))
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        text_field = "novel_text" if variant is NARRATION else "source_text"
-        document[entries_key][1][text_field] = "改过的原文丙丙丙。"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        prompt = await variant.generator(project_dir, []).build_prompt(1)
-
-        first_needle, second_needle = variant.prompt_needles
-        assert second_needle in prompt
-        assert first_needle not in prompt
-
-    async def test_prompt_says_so_when_nothing_is_outdated(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        prompt = await variant.generator(project_dir, []).build_prompt(1)
-
-        assert "没有需要重写的条目" in prompt
-
-    async def test_scope_all_covers_every_entry(self, tmp_path: Path, variant: _Variant) -> None:
-        first, second = variant.entry_ids
-        project_dir, _plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-
-        prompt = await variant.generator(project_dir, []).build_prompt(1, scope="all")
-
-        assert all(needle in prompt for needle in variant.prompt_needles)
-
-
-class TestLegacyEntryRevisionBackfill:
-    """存量剧本（条目无指纹）的读时补齐：整集指纹仍相等时逐条盖章，此后按条目增量。
-
-    补齐必须发生在脚本规划被改动之前——整集指纹一旦失配就无从知道每条消费了什么，只能整集
-    回退。走的是读时补齐的落盘入口 ``ProjectManager.backfill_script_plan_entry_revisions``
-    （工作流状态计算的调用见 ``tests/integration/lib/test_workflow_state.py``）。
-    """
-
-    @staticmethod
-    def _make_legacy(project_dir: Path, variant: _Variant) -> None:
-        """抹掉全部条目指纹，把刚落盘的剧本还原成存量剧本的无指纹形状。"""
-        path = project_dir / "scripts" / "episode_1.json"
-        script = json.loads(path.read_text(encoding="utf-8"))
-        for entry in script[variant.items_key]:
-            entry.pop(SCRIPT_PLAN_ENTRY_REVISION_FIELD, None)
-        path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
-
-    @staticmethod
-    def _backfill(project_dir: Path, variant: _Variant, plan_path: Path) -> tuple[str, ...]:
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan_revisions = plan_entry_revisions(
-            variant.name, plan_entries_from_document(variant.name, document), episode=1
-        )
-        return ProjectManager(str(project_dir.parent)).backfill_script_plan_entry_revisions(
-            project_dir.name,
-            "episode_1.json",
-            plan_kind=variant.name,
-            plan_revisions=plan_revisions,
-            whole_plan_revision=script_review.content_fingerprint(plan_path),
-        )
-
-    async def test_backfill_stamps_the_same_revisions_as_the_assembly_outlet(
-        self, tmp_path: Path, variant: _Variant
-    ) -> None:
-        """回填盖的值与装配出口盖的逐个相等——两处同取一个构造器，不另摘一份。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second)]).generate(1)
-        stamped_by_outlet = {
-            entry_id: entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD]
-            for entry_id, entry in _entries(_script(project_dir), variant).items()
-        }
-        self._make_legacy(project_dir, variant)
-
-        assert self._backfill(project_dir, variant, plan_path) == (first, second)
-
-        assert {
-            entry_id: entry[SCRIPT_PLAN_ENTRY_REVISION_FIELD]
-            for entry_id, entry in _entries(_script(project_dir), variant).items()
-        } == stamped_by_outlet
-
-    async def test_backfilled_script_rewrites_only_the_changed_entry(self, tmp_path: Path, variant: _Variant) -> None:
-        """补齐之后改一条 source_text：只重写那一条，用户精修过的字段不被覆盖。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
-        self._make_legacy(project_dir, variant)
-        self._backfill(project_dir, variant, plan_path)
-        _stamp_user_fields(project_dir, variant, first)
-        before_first_json = json.dumps(
-            _entries(_script(project_dir), variant)[first], ensure_ascii=False, sort_keys=True
-        )
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document[entries_key][1]["novel_text" if variant is NARRATION else "source_text"] = "改了一个错别字。"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(second, mark="二轮")])
-        await rerun.generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == [second]
-        after = _entries(_script(project_dir), variant)
-        assert json.dumps(after[first], ensure_ascii=False, sort_keys=True) == before_first_json
-
-    async def test_whole_revision_mismatch_keeps_the_integral_fallback(self, tmp_path: Path, variant: _Variant) -> None:
-        """整集指纹已经失配：不回填，仍按整集口径整集重写（本机制引入前的结论）。"""
-        first, second = variant.entry_ids
-        project_dir, plan_path = variant.build(tmp_path)
-        await variant.generator(project_dir, [variant.visual_factory(first, second, mark="首轮")]).generate(1)
-        self._make_legacy(project_dir, variant)
-
-        document = json.loads(plan_path.read_text(encoding="utf-8"))
-        entries_key = _PLAN_ENTRIES_KEY[variant.name]
-        document[entries_key][1]["novel_text" if variant is NARRATION else "source_text"] = "改了一个错别字。"
-        plan_path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
-        _activate(project_dir)
-
-        assert self._backfill(project_dir, variant, plan_path) == ()
-        assert all(SCRIPT_PLAN_ENTRY_REVISION_FIELD not in entry for entry in _script(project_dir)[variant.items_key])
-
-        rewritten: list[str] = []
-        rerun = variant.generator(project_dir, [variant.visual_factory(first, second, mark="二轮")])
-        await rerun.generate(1, rewritten_entry_ids=rewritten)
-
-        assert rewritten == [first, second]

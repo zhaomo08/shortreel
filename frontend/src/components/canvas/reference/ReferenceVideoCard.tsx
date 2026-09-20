@@ -5,6 +5,7 @@ import { ASSET_COLORS, assetColor } from "./asset-colors";
 import { useUnitPromptHighlight, type Token } from "@/hooks/useUnitPromptHighlight";
 import { buildMentionLookup, characterReferenceForms, MENTION_RE } from "@/utils/reference-mentions";
 import { useProjectsStore } from "@/stores/projects-store";
+import { SourceTextReadonly } from "@/components/shared/SourceTextReadonly";
 import {
   SHEET_FIELD,
   type AssetKind,
@@ -298,6 +299,20 @@ export function ReferenceVideoCard({
         </span>
       </div>
 
+      {unit.pending_authoring === true && (
+        <div
+          role="status"
+          className="mb-2 flex-shrink-0 rounded-lg px-3 py-2 text-[11.5px]"
+          style={{
+            color: "var(--color-text-2)",
+            background: "var(--color-warm-tint-faint)",
+            border: "1px solid var(--color-hairline-soft)",
+          }}
+        >
+          {t("reference_editor_pending_authoring_hint")}
+        </div>
+      )}
+
       <div className="relative min-h-0 flex-1 rounded-md border border-gray-800 bg-gray-950/60">
         <pre
           ref={preRef}
@@ -349,6 +364,8 @@ export function ReferenceVideoCard({
           />
         )}
       </div>
+
+      <SourceTextReadonly text={unit.source_text} className="mt-3 flex-shrink-0" />
 
       {unknownMentions.length > 0 && (
         <div

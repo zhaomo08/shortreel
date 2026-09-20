@@ -441,7 +441,18 @@ class DataValidator:
 
         self._validate_ad_project_fields(project, content_mode, errors)
 
-        if not project.get("style"):
+        # 风格不是必填：缺失与空串都是合法状态（未选风格、自定义风格图）。出现即须为字符串，
+        # 显式 null 也不行：v13→v14 迁移把非字符串值原样保留，等这里报告，产物规划遇到会直接抛错。
+        # 选定了风格模版时 style 必须是展开快照（ADR 0023），空快照会让生成端丢掉已选的风格；
+        # 模版 id 为空串与 null 同义（创建接口按真值判定是否展开模版）。
+        style = project.get("style")
+        style_template_id = project.get("style_template_id")
+        if style_template_id is not None and not isinstance(style_template_id, str):
+            errors.append(_m("val_field_type_string", field="style_template_id"))
+            style_template_id = None
+        if "style" in project and not isinstance(style, str):
+            errors.append(_m("val_field_type_string", field="style"))
+        elif style_template_id and not (style or "").strip():
             errors.append(_m("val_missing_field", field="style"))
 
         episodes = project.get("episodes", [])
@@ -1001,11 +1012,14 @@ class DataValidator:
             # 时仅提示「说不完」，不阻塞、不改写 duration（duration 由画面驱动）。
             self._warn_scene_speech_overflow(scene, prefix, language, speech_rate_override, warnings)
 
-            # source_text：逐字原文锚（best-effort，由 script_plan 脚本规划填入、prompt_authoring 透传）。镜像共享模型
-            # 的 source_text: str（extra=forbid 下显式 null 同样被拒）——键存在则须为字符串，显式 null
+            # source_text（逐字原文锚）与 scene_description（视觉改编描述）由脚本规划填入、转换透传。镜像
+            # 共享模型的 str 字段（extra=forbid 下显式 null 同样被拒）——键存在则须为字符串，显式 null
             # 一并拒绝；键缺失放行（默认空串，存量数据无此字段）。用 in 判定以区分缺失与显式 null。
-            if "source_text" in scene and not isinstance(scene["source_text"], str):
-                errors.append(_m("val_field_must_be_string", field=f"{prefix}: source_text"))
+            errors.extend(
+                _m("val_field_must_be_string", field=f"{prefix}: {text_field}")
+                for text_field in ("source_text", "scene_description")
+                if text_field in scene and not isinstance(scene[text_field], str)
+            )
 
             if project_dir is not None:
                 self._validate_generated_assets(
@@ -1181,11 +1195,12 @@ class DataValidator:
                 asset_type="product",
             )
 
-            # 广告/短片分镜没有待生成态：两侧提示词缺失或为空即结构不完整。
-            if not shot.get("image_prompt"):
-                errors.append(_m("val_missing_field_at", prefix=prefix, field="image_prompt"))
-            if not shot.get("video_prompt"):
-                errors.append(_m("val_missing_field_at", prefix=prefix, field="video_prompt"))
+            # 广告/短片分镜只有待编写时提示词可以为空；其余分镜两侧提示词缺失或为空即结构不完整。
+            if shot.get("pending_authoring") is not True:
+                if not shot.get("image_prompt"):
+                    errors.append(_m("val_missing_field_at", prefix=prefix, field="image_prompt"))
+                if not shot.get("video_prompt"):
+                    errors.append(_m("val_missing_field_at", prefix=prefix, field="video_prompt"))
 
             if project_dir is not None:
                 self._validate_generated_assets(
@@ -1279,6 +1294,9 @@ class DataValidator:
                 errors.append(_m("val_field_must_be_string", field=f"{prefix}: text"))
             elif not text.strip() and needs_replan is not True:
                 errors.append(_m("val_field_must_be_nonempty_string", field=f"{prefix}: text"))
+
+            if "source_text" in unit and not isinstance(unit["source_text"], str):
+                errors.append(_m("val_field_must_be_string", field=f"{prefix}: source_text"))
 
             low, high = self.VALID_UNIT_DURATION_RANGE
             blank_shell = needs_replan is True and (not isinstance(text, str) or not text.strip())

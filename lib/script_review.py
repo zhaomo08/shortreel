@@ -1,8 +1,8 @@
 """script_plan→prompt_authoring 内容确认的核心逻辑：适用性判定、script_plan 路径、内容指纹、确认状态派生，
 以及参考生视频正式 script_plan 的单一写盘出口（``script_plan_write_lock`` / ``write_script_plan_locked``）。
 
-gate 横跨两处消费：SDK 工具（``generate_episode_script`` 的 prompt_authoring 阻塞 enforcement）与 web
-router / service（结构化中间态查看 / 编辑 / 确认）。状态派生只依赖 script_plan 文件 + project dict
+gate 由 web router / service（结构化中间态查看 / 编辑 / 确认，确认即转为正式脚本）、Agent 确认工具与
+工作流状态消费。状态派生只依赖 script_plan 文件 + project dict
 的纯计算；写盘出口另持 ``ProjectManager.file_lock`` 的 per-path 锁，四条写路径（Web 端保存、
 重拆分、晋升、迁移回写）全部汇入，锁、乐观并发比对与 prompt_authoring 草稿清理只存在一处。
 
@@ -24,8 +24,9 @@ import enum
 import hashlib
 import json
 import logging
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -42,15 +43,15 @@ from lib.episode_paths import (
     REFERENCE_VIDEO_SCRIPT_PLAN_FILENAME,
     SCRIPT_PLAN_FILENAMES,
     episode_drafts_dir,
-    episode_script_relpath,
+    episode_script_filename,
 )
 from lib.formal_write import formal_write_transaction, project_metadata_lock
 from lib.json_io import atomic_write_json, load_json_or_none
+from lib.path_safety import try_safe_join
 from lib.project_manager import ProjectManager, find_episode, is_reference_video_project
 from lib.reference_video.duration_migration import migrate_unit_durations
-from lib.script_plan_entries import (
-    SCRIPT_PLAN_REVISION_FIELD as SCRIPT_PLAN_REVISION_FIELD,
-)
+from lib.script_editor import ScriptEditError, resolve_items
+from lib.script_models import get_generated_assets
 from lib.script_plan_entries import (
     ScriptPlanKind as ScriptPlanKind,
 )
@@ -62,7 +63,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 #: 内容确认状态：not_applicable=该集不走 gate；no_script_plan=适用但 script_plan 未产出；
-#: pending_review=script_plan 已产出但未经确认（或确认后内容又变）→ 阻塞 prompt_authoring；confirmed=已确认放行。
+#: pending_review=script_plan 已产出但未经确认（或确认后内容又变）；confirmed=已确认（已转为正式脚本）。
 ReviewStatus = Literal["not_applicable", "no_script_plan", "pending_review", "confirmed"]
 
 #: 确认记录在 episode 条目上的字段名：``{"fingerprint": str, "confirmed_at": ISO8601}``。
@@ -74,10 +75,7 @@ STALE_SCRIPT_PLAN_REVISION_FIELD = "stale_script_plan_revision"
 #: stale 分集的 script_plan 重建完成事实。指纹可能与旧内容相同，不能仅以内容变化推断是否执行过重建。
 STALE_SCRIPT_PLAN_REBUILT_REVISION_FIELD = "stale_script_plan_rebuilt_revision"
 
-# SCRIPT_PLAN_REVISION_FIELD（最终剧本 metadata 记录其实际消费的 script_plan 内容指纹；workflow
-# status 用它识别 script_plan 重新确认后仍残留的旧剧本，避免仅凭「文件存在」误判 prompt_authoring
-# 已完成）的字面量定义在 lib.script_plan_entries——它是条目指纹的整集对位，存量条目的回填按它
-# 开门——由本模块顶部的 import 再导出，既有读法不变。ScriptPlanKind 同样定义在那里，同样再导出。
+# ScriptPlanKind 的字面量定义在 lib.script_plan_entries，由本模块顶部的 import 再导出。
 
 
 def script_plan_kind(project: dict[str, Any]) -> ScriptPlanKind | None:
@@ -452,15 +450,146 @@ def stored_review(project: dict[str, Any], episode: int) -> dict[str, Any]:
     return review if isinstance(review, dict) else {}
 
 
+@dataclass(frozen=True, slots=True)
+class OverwrittenScriptEntry:
+    """覆盖式确认将移除的一条正式脚本条目，及其名下已生成的产物。"""
+
+    entry_id: str
+    has_storyboard: bool
+    has_video: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FormalScriptOverwrite:
+    """内容确认将覆盖的正式脚本：确认后旧条目全部移除，产物按分镜移除的口径撤登记。
+
+    ``fingerprint`` 是读取时正式脚本的内容指纹，对外作 ``revision``：调用方认可覆盖时回传它，
+    与确认时读到的正式脚本不符即视为未认可、按新清单重新拒绝；覆盖写入也以它为基线，认可只对应
+    这一份被列出的内容。
+    """
+
+    fingerprint: str
+    entries: tuple[OverwrittenScriptEntry, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "revision": self.fingerprint,
+            "entries": [
+                {"id": entry.entry_id, "has_storyboard": entry.has_storyboard, "has_video": entry.has_video}
+                for entry in self.entries
+            ],
+            "storyboard_count": sum(entry.has_storyboard for entry in self.entries),
+            "video_count": sum(entry.has_video for entry in self.entries),
+        }
+
+
+def _bound_script_filename(project: Mapping[str, Any], episode: int) -> str | None:
+    """该集 project.json 绑定的剧本文件名（归一到 ``scripts/`` 下的名字）；未绑定时 None。"""
+
+    entry = find_episode(project, episode)
+    binding = entry.get("script_file") if isinstance(entry, dict) else None
+    if not isinstance(binding, str) or not binding:
+        return None
+    return ProjectManager.normalize_script_filename(binding) or None
+
+
+class ForeignFormalScriptError(ValueError):
+    """该集没有可读写的正式脚本位置：绑定不在盘上，而规范路径上那份文件不是本集剧本。
+
+    携带集号与占位的文件名，供调用方给出可定位的提示。继承 ``ValueError`` 让尚未单独处置这一形态
+    的调用点也按「拒绝」而不是按「成功」收场。
+    """
+
+    def __init__(self, episode: int, filename: str) -> None:
+        super().__init__(f"第 {episode} 集的规范剧本路径 scripts/{filename} 上是另一集的剧本，不能当作本集正式脚本读写")
+        self.episode = episode
+        self.filename = filename
+
+
+def formal_script_filename(project_path: Path, project: Mapping[str, Any], episode: int) -> str:
+    """该集正式脚本在 ``scripts/`` 下的文件名。
+
+    project.json 绑定的 ``script_file`` 指向盘上文件时取绑定；绑定缺失、越界或文件不存在时回落规范
+    文件名 ``episode_N.json``。内容确认读覆盖清单与写正式脚本都经这里，两者始终是同一份文件。
+
+    回落只在规范路径空着、或那上面确是本集剧本时成立：迁移跳过的集绑着已消失的旧路径，而规范路径
+    上放着别集剧本，无条件回落会让读拿到别集内容、让写整份重建别集的在世剧本并把本集绑上去。这一
+    形态抛 ``ForeignFormalScriptError``；归属判据（读不成对象或内部集号不符）与 v14→v15 改名前的
+    那次校验一致。
+    """
+    filename = _bound_script_filename(project, episode)
+    if filename is not None:
+        path = try_safe_join(project_path / "scripts", filename)
+        if path is not None and path.is_file():
+            return filename
+    canonical = episode_script_filename(episode)
+    canonical_path = project_path / "scripts" / canonical
+    if canonical_path.is_file():
+        script = load_json_or_none(canonical_path)
+        # 集号按正整数严格判：剧本是裸读进来的，JSON ``true`` 变成 Python ``True``，它既是 ``int``
+        # 又等于 ``1``，按 ``!=`` 比会让脏文件冒充第 1 集通过归属校验。
+        recorded = script.get("episode") if isinstance(script, dict) else None
+        if type(recorded) is not int or recorded != episode:
+            raise ForeignFormalScriptError(episode, canonical)
+    return canonical
+
+
+def formal_script_overwrite(
+    project_path: Path, project: Mapping[str, Any], episode: int
+) -> FormalScriptOverwrite | None:
+    """读取内容确认将覆盖的正式脚本；该集尚无正式脚本时返回 None。
+
+    读的是 ``formal_script_filename`` 解析出的那份剧本，即确认转换将写入的文件。文件存在但读不成
+    剧本（非法 JSON、条目数组损坏）时照样算已有正式脚本、条目列表为空：覆盖它仍需认可。
+
+    规范路径上是别集剧本时按无剧本返回 None——那份内容不属本集，不能列进本集的覆盖清单充数；
+    确认转换会在写盘前以 ``ForeignFormalScriptError`` 拒绝。
+    """
+    try:
+        filename = formal_script_filename(project_path, project, episode)
+    except ForeignFormalScriptError:
+        return None
+    path = project_path / "scripts" / filename
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return FormalScriptOverwrite(fingerprint=hashlib.sha256(raw).hexdigest(), entries=())
+    fingerprint = content_fingerprint_of_data(parsed)
+    if not isinstance(parsed, dict):
+        return FormalScriptOverwrite(fingerprint=fingerprint, entries=())
+    try:
+        items, id_field, _kind = resolve_items(parsed)
+    except ScriptEditError:
+        items, id_field = [], ""
+    entries: list[OverwrittenScriptEntry] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get(id_field), str) or not item[id_field]:
+            continue
+        assets = get_generated_assets(item)
+        entries.append(
+            OverwrittenScriptEntry(
+                entry_id=item[id_field],
+                has_storyboard=bool(assets.get("storyboard_image")),
+                has_video=bool(assets.get("video_clip")),
+            )
+        )
+    return FormalScriptOverwrite(fingerprint=fingerprint, entries=tuple(entries))
+
+
 def prompt_authoring_generated(project_path: Path, project: dict[str, Any], episode: int) -> bool:
     """该集 prompt_authoring 产物（生成的剧本 JSON）是否已存在——存量 grandfather 判据。
 
-    取自 episode 条目的 ``script_file``（缺省回退约定路径 ``scripts/episode_N.json``，与
-    ScriptGenerator 固定写出口径一致）。
+    绑定在场时只认绑定的那份文件，不走 ``formal_script_filename`` 的规范路径回落：绑定文件缺席而
+    规范路径上是别集文件，正是迁移记进报告的跳过形态，据那份别集文件判成「已有产出」会把这一集
+    grandfather 成 confirmed——脚本规划随即转只读、确认动作被锁。未绑定时按规范路径判。
     """
-    ep = find_episode(project, episode) or {}
-    script_file = ep.get("script_file") or episode_script_relpath(episode)
-    return (project_path / script_file).exists()
+    filename = _bound_script_filename(project, episode) or episode_script_filename(episode)
+    path = try_safe_join(project_path / "scripts", filename)
+    return path is not None and path.is_file()
 
 
 def review_status(project_path: Path, project: dict[str, Any], episode: int) -> ReviewStatus:
@@ -483,23 +612,31 @@ def review_status(project_path: Path, project: dict[str, Any], episode: int) -> 
     live = content_fingerprint(path)
     if live is None:
         return "no_script_plan"
+    return "confirmed" if _formal_script_plan_confirmed(project_path, project, episode, live) else "pending_review"
+
+
+def _formal_script_plan_confirmed(project_path: Path, project: dict[str, Any], episode: int, live: str) -> bool:
     stored_fingerprint = stored_review(project, episode).get("fingerprint")
     if stored_fingerprint is not None:
-        return "confirmed" if stored_fingerprint == live else "pending_review"
+        return stored_fingerprint == live
     # 无确认指纹（存量 / 首次）：用 prompt_authoring 产物是否已存在做 grandfather 判据。
     # 过渡态局限：存量集没有指纹基线，无法区分「script_plan 未动」与「script_plan 已重拆但未确认」——
     # 只要旧 prompt_authoring 文件仍在，重拆后的 script_plan 也会被放行、不重新阻塞。这是「不无谓阻塞存量重跑」的
     # 取舍代价，且自愈：用户或 Agent 首次确认后即写入指纹，此后走上面的指纹分支、gate 全程生效。
-    return "confirmed" if prompt_authoring_generated(project_path, project, episode) else "pending_review"
+    return prompt_authoring_generated(project_path, project, episode)
 
 
-def gate_blocks_prompt_authoring(project_path: Path, project: dict[str, Any], episode: int) -> bool:
-    """prompt_authoring 是否应被 gate 阻塞——仅 pending_review 阻塞；not_applicable / no_script_plan / confirmed 放行。
+def formal_script_plan_confirmed(project_path: Path, project: dict[str, Any], episode: int) -> bool:
+    """正式脚本规划是否就是已确认的那一份；是则只读，内容修改改在正式脚本上做。
 
-    no_script_plan 不在此阻塞：prompt_authoring 入口对缺 script_plan 另有「未找到脚本规划文件」的早返提示，
-    本 gate 只负责「script_plan 在但未确认」这一道。
+    与 ``review_status`` 同一判据，但不看待修复草稿：重跑脚本规划留下的草稿在场时，正式脚本规划
+    仍是已确认的那一份，照样只读；重跑写出新内容后指纹不再一致，即恢复可编辑。
     """
-    return review_status(project_path, project, episode) == "pending_review"
+    path = script_plan_path(project_path, project, episode)
+    if path is None:
+        return False
+    live = content_fingerprint(path)
+    return live is not None and _formal_script_plan_confirmed(project_path, project, episode, live)
 
 
 def apply_confirmation(project: dict[str, Any], episode: int, fingerprint: str, confirmed_at: str) -> bool:

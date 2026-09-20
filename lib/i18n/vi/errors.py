@@ -2,6 +2,7 @@ MESSAGES = {
     "project_migration_failed": "Dự án '{name}' chưa hoàn tất nâng cấp dữ liệu nên không thể tạo nội dung. Lý do: {reason}. Hãy sửa trong cuộc trò chuyện với tác nhân AI rồi thử nâng cấp lại",
     "project_not_found": "Dự án '{name}' không tồn tại hoặc chưa được khởi tạo",
     "resource_not_found": "Tài nguyên được yêu cầu không tồn tại",
+    "prompt_template_not_found": "Mẫu prompt '{id}' không tồn tại",
     "overview_ai_response_invalid": "Không thể phân tích phản hồi của AI thành tổng quan dự án, vui lòng thử lại hoặc đổi mô hình/nhà cung cấp",
     "overview_generation_failed": "Tạo tổng quan thất bại, vui lòng thử lại sau hoặc đổi mô hình/nhà cung cấp",
     "video_capabilities_unresolved": "Không xác định được khả năng mô hình video cho dự án '{name}'; vui lòng kiểm tra cấu hình nhà cung cấp",
@@ -19,13 +20,14 @@ MESSAGES = {
     "project_exists": "Dự án '{name}' đã tồn tại",
     "script_not_found": "Kịch bản '{name}' không tồn tại",
     "script_item_not_found": "Không có phân cảnh '{id}' trong kịch bản này",
+    "script_item_remove_last_blocked": "Đây là phân cảnh duy nhất của tập nên không thể gỡ",
+    "storyboard_script_required": "Kịch bản này không phải kịch bản từ ảnh phân cảnh sang video; hãy thêm hoặc xóa đơn vị video tham chiếu trên canvas video tham chiếu",
+    "narration_segment_text_required": "Hãy nhập văn bản lời dẫn trước khi thêm phân cảnh lời dẫn",
     "prompt_preview_missing": "Phân cảnh này chưa có lời nhắc",
     "prompt_preview_invalid": "Không thể kết xuất lời nhắc, hãy kiểm tra định dạng",
     "prompt_preview_pending": "Lời nhắc của phân cảnh này đang chờ tạo: để Agent viết, hoặc tự điền trong trình soạn",
     "script_prompt_pending": "Lời nhắc của phân cảnh '{segment_id}' đang chờ tạo; hãy để Agent viết hoặc tự điền trước khi tạo",
-    "script_conversion_refused": "Tập này chưa thể chuyển thành kịch bản chính thức: hãy xác nhận nội dung và xử lý bản nháp chờ sửa trước",
     "script_conversion_conflict": "Kịch bản chính thức đã bị bên khác sửa trong lúc chuyển đổi, lần này không ghi đè; hãy tải lại rồi thử lại",
-    "script_conversion_invalid_entries": "Chỉ phân cảnh đã lỗi thời mới có thể áp dụng nội dung mới; hãy kiểm tra các phân cảnh đã chọn",
     "scene_not_found": "Cảnh '{id}' không tồn tại",
     "segment_not_found": "Đoạn '{id}' không tồn tại",
     "script_missing": "Kịch bản không tồn tại",
@@ -69,6 +71,14 @@ MESSAGES = {
     ),
     "task_fail_declarative_template_render_failed": "Không thể kết xuất yêu cầu endpoint: {detail}",
     "task_fail_declarative_response_extract_failed": "Không thể trích xuất phản hồi endpoint: {detail}",
+    "task_fail_comfyui_image_drop_unsupported": "Chuỗi tạo thành phẩm của workflow này phụ thuộc vào ảnh do node {node} đọc vào, nên không thể chỉnh lại đồ thị khi thiếu ảnh; hãy bổ sung ảnh hoặc dùng workflow khác",
+    "task_fail_comfyui_upload_failed": "Tải tư liệu lên ComfyUI thất bại: {detail}",
+    "task_fail_comfyui_node_errors": "ComfyUI từ chối workflow này; có {nodes} node báo lỗi, đầu tiên: {summary}",
+    "task_fail_comfyui_job_lost": "ComfyUI không còn biết đến lần chạy này ({prompt_id}); nó không có trong hàng đợi lẫn lịch sử, nhiều khả năng ComfyUI đã khởi động lại — hãy thử lại",
+    "task_fail_comfyui_execution_error": "ComfyUI thất bại khi thực thi: {detail} (node lỗi: {node})",
+    "task_fail_comfyui_interrupted": "Lần chạy trên ComfyUI đã bị gián đoạn; hãy thử lại",
+    "task_fail_comfyui_output_missing": "ComfyUI đã chạy xong nhưng node thành phẩm {nodes} không tạo ra tệp nào; hãy kiểm tra liên kết node của nó và chuỗi tạo thành phẩm của workflow",
+    "task_fail_comfyui_output_type_mismatch": "ComfyUI tạo ra {filename}, không phải tệp {media_type}; hãy trỏ liên kết node thành phẩm tới node xuất thành phẩm",
     "task_fail_artifact_download_failed": "Đã tạo video nhưng tải tệp xuống thất bại; hãy thử tải lại: {detail}",
     "task_fail_cascade_blocked_dependency": "Bị chặn do tác vụ phụ thuộc {dependency_task_id} thất bại: {reason}",
     "prompt_must_be_string_or_scene_object": "prompt phải là chuỗi hoặc đối tượng chứa scene/composition",
@@ -178,6 +188,15 @@ MESSAGES = {
         "Hãy tải lại để xem nội dung mới nhất, hợp nhất thay đổi của bạn rồi lưu lại"
     ),
     "script_review_invalid_content": "Xác thực cấu trúc bản nháp xác nhận nội dung thất bại; vui lòng kiểm tra và thử lại",
+    "script_review_script_plan_confirmed": "Kế hoạch kịch bản đã được xác nhận và không thể chỉnh sửa nữa; hãy chỉnh sửa trên dòng thời gian, hoặc chạy lại kế hoạch kịch bản để làm lại cả tập",
+    "script_review_overwrite_required": "Tập này đã có kịch bản chính thức. Xác nhận sẽ ghi đè: mọi phân cảnh cũ bị xóa, ảnh phân cảnh và video của chúng không còn hiển thị. Hãy đồng ý ghi đè rồi thử lại",
+    "script_review_conversion_refused": "Kế hoạch kịch bản chưa thể chuyển thành kịch bản chính thức nên chưa được xác nhận; hãy kiểm tra thời lượng phân cảnh, lời thoại và trạng thái kế hoạch kịch bản rồi thử lại",
+    "script_review_video_model_unresolved": "Chưa cấu hình mô hình video khả dụng nên không xác định được các mức thời lượng phân cảnh, xác nhận chưa hoàn tất; hãy cấu hình nhà cung cấp video trong Cài đặt → Nhà cung cấp, hoặc chọn mô hình video trong cài đặt dự án rồi thử lại",
+    "script_review_foreign_formal_script": (
+        "Tệp kịch bản được gán cho tập {episode} không còn, còn đường dẫn chuẩn scripts/{filename} lại chứa kịch bản "
+        "của tập khác nên xác nhận chưa hoàn tất — ghi vào đó sẽ dựng lại kịch bản của tập kia; hãy trỏ script_file "
+        "của tập này về đúng kịch bản của nó rồi thử lại"
+    ),
     "script_review_quarantine_unreadable": (
         "Tệp bản nháp cần sửa đã hỏng hoặc sai định dạng, không thể đọc được; hãy để tác nhân chia lại tập này"
     ),
@@ -223,6 +242,29 @@ MESSAGES = {
     "custom_endpoint_not_found": "Endpoint không tồn tại",
     "custom_endpoint_definition_invalid": "Định nghĩa endpoint không qua được kiểm tra, hãy sửa các lỗi được báo rồi thử lại",
     "custom_endpoint_referenced_by_models": "Endpoint này đang được {count} mô hình sử dụng, hãy gỡ các tham chiếu đó trước khi xóa",
+    # ---- Chợ ----
+    "market_source_not_found": "Nguồn chợ không tồn tại",
+    "market_source_official_undeletable": "Không thể xóa nguồn chợ chính thức, nhưng có thể tắt",
+    "market_source_duplicate": "Nguồn chợ này đã được thêm",
+    "market_source_address_empty": "Hãy nhập địa chỉ nguồn chợ",
+    "market_source_address_insecure_scheme": "Địa chỉ nguồn chợ phải dùng https://",
+    "market_source_address_unsupported": "Không nhận dạng được địa chỉ nguồn chợ: hãy dùng owner/repo, owner/repo@ref, URL kho GitHub hoặc liên kết https kết thúc bằng arcreel-market.json",
+    "market_source_fetch_failed": "Không thể thêm nguồn chợ: {status} ({reason})",
+    "market_source_status_never_fetched": "Chưa làm mới",
+    "market_source_status_ok": "Bình thường",
+    "market_source_status_unreachable": "Không truy cập được",
+    "market_source_status_invalid_index": "Chỉ mục không hợp lệ",
+    "market_source_status_unsupported_schema": "Định dạng chỉ mục mới hơn phiên bản ứng dụng hỗ trợ",
+    "market_source_display_name_required": "Tên hiển thị không được để trống",
+    "market_source_order_length_mismatch": "Số lượng trong danh sách sắp xếp không khớp với các nguồn chợ hiện có",
+    "market_source_order_duplicate_ids": "Danh sách sắp xếp có nguồn chợ bị trùng",
+    "market_source_order_ids_mismatch": "Danh sách sắp xếp không khớp với các nguồn chợ hiện có",
+    "market_github_proxy_prefix_invalid": "Tiền tố proxy GitHub raw phải là địa chỉ bắt đầu bằng https:// và không chứa tên người dùng, mật khẩu, chuỗi truy vấn hoặc phân đoạn #",
+    "market_source_disabled": "Nguồn chợ này đã bị tắt; hãy bật lại để lấy các mục của nó",
+    "market_entry_not_found": "Không tìm thấy mục trong chợ",
+    "market_entry_icon_not_found": "Mục chợ này không có biểu tượng",
+    "market_entry_fetch_failed": "Không thể tải tệp của mục từ nguồn chợ ({reason})",
+    "market_entry_asset_invalid": "Tệp của mục do nguồn chợ cung cấp không dùng được ({reason})",
     # ---- Kiểm thử endpoint ----
     "endpoint_test_payload_required": "Thiếu trường payload: khi tải tệp lên, hãy đặt JSON của yêu cầu vào trường biểu mẫu payload",
     "endpoint_test_payload_invalid": "Không phân tích được nội dung yêu cầu, hãy kiểm tra định dạng JSON và kiểu dữ liệu",
@@ -233,6 +275,9 @@ MESSAGES = {
     "endpoint_test_definition_and_model_ref_exclusive": "Chỉ được cung cấp một trong hai: định nghĩa endpoint hoặc mô hình cần chạy thử",
     "endpoint_test_too_many_assets": "Số lượng tệp tài nguyên vượt quá giới hạn {limit}",
     "endpoint_test_credentials_ambiguous": "Chỉ được cung cấp một nguồn thông tin xác thực: chọn nhà cung cấp, hoặc điền trực tiếp địa chỉ API và API Key",
+    "endpoint_test_mode_unsupported_for_kind": "Loại endpoint này ({kind}) không hỗ trợ kiểm tra endpoint đó",
+    "endpoint_test_trial_run_image_unsupported": "Kiểm tra kết nối chưa khả dụng cho endpoint ảnh; hãy dùng xem trước yêu cầu để đối chiếu nội dung sẽ gửi",
+    "endpoint_test_preview_failed": "Không thể kết xuất yêu cầu từ định nghĩa này và bộ tham số này: {detail}",
     "endpoint_test_model_unavailable": "Mô hình này đã bị tắt hoặc không phải mô hình video, không thể chạy kiểm tra kết nối",
     "endpoint_test_provider_base_url_required": "Điểm cuối của mô hình này cần địa chỉ API; hãy điền base_url cho nhà cung cấp trước",
     "model_not_found": "Không tìm thấy mô hình",
@@ -254,6 +299,29 @@ MESSAGES = {
     "endpoint_media_type_mismatch": "media_type của endpoint không khớp: {detail}",
     "backend_creation_failed": "Tạo backend thất bại: {err_msg}",
     "connectivity_check_unsupported_format": "Không hỗ trợ kiểm tra kết nối với {discovery_format}",
+    "connectivity_check_comfyui_ok": "ComfyUI có thể truy cập, phiên bản {version}",
+    "connectivity_check_comfyui_ok_unknown_version": "ComfyUI có thể truy cập; không trả về số phiên bản",
+    "discovery_not_applicable_comfyui": (
+        "Giao thức ComfyUI không có danh sách mô hình để phát hiện: gọi được gì là do chính workflow quyết định. "
+        "Hãy nhập một endpoint ComfyUI và gắn nó vào một dòng mô hình"
+    ),
+    "custom_endpoint_kind_conflicts_with_attachment": (
+        "Định nghĩa thay thế đổi loại endpoint nên không còn khớp với liên kết hiện tại: giao thức của nhà cung cấp cho mô hình {model_id} (nhà cung cấp {provider}) không nhận được nó. Hãy đổi liên kết của dòng mô hình trước, rồi mới thay định nghĩa"
+    ),
+    "custom_endpoint_media_type_conflicts_with_attachment": (
+        "Định nghĩa này tạo ra {media_type}, khác với loại phương tiện hiện tại của endpoint, trong khi mô hình "
+        "{model_id} (nhà cung cấp {provider}) vẫn đang gắn với nó: endpoint quyết định mô hình thuộc luồng nào. "
+        "Hãy gỡ liên kết trước, rồi mới thay thế định nghĩa"
+    ),
+    "comfyui_endpoint_requires_comfyui_provider": (
+        "Endpoint ComfyUI {endpoint} của mô hình {model_id} chỉ dùng được trên nhà cung cấp giao thức ComfyUI"
+    ),
+    "comfyui_provider_requires_comfyui_endpoint": (
+        "Nhà cung cấp giao thức ComfyUI chỉ nhận endpoint ComfyUI; {endpoint} của mô hình {model_id} thì không"
+    ),
+    "capability_overrides_not_supported_for_comfyui": (
+        "Mô hình {model_id} dùng endpoint ComfyUI, năng lực chỉ suy ra từ liên kết node; không hỗ trợ ghi đè năng lực"
+    ),
     "capability_overrides_video_only": (
         "Endpoint {endpoint} của mô hình {model_id} không phải loại video; không hỗ trợ ghi đè năng lực"
     ),
@@ -322,6 +390,7 @@ MESSAGES = {
     "ref_missing_asset": "Tham chiếu đến {type} '{name}' không có trong thư viện tài nguyên dự án, vui lòng tạo trước",
     "ref_duration_exceeded": "Kịch bản dài {total}s, vượt mức thời lượng lớn nhất của {model}; đã tạo ở {duration}s nên video ngắn hơn kịch bản",
     "ref_duration_rounded_up": "Kịch bản dài {total}s, không thuộc các mức thời lượng của {model}; đã tạo ở {duration}s nên video dài hơn kịch bản",
+    "comfyui_multiple_outputs": "Lần chạy này ComfyUI tạo ra {count} tệp; đã giữ {filename}",
     "ref_too_many_images": "Số lượng ảnh tham chiếu {count} vượt giới hạn {max_count} của {model}, đã giữ {max_count} ảnh đầu tiên",
     "ref_payload_too_large": "Dữ liệu ảnh tham chiếu vượt giới hạn của nhà cung cấp, đã thử lại với mức nén bổ sung",
     "ref_payload_floor_exceeded": "Ảnh tham chiếu quá lớn hoặc quá nhiều; ngay cả khi nén ở mức chất lượng thấp nhất vẫn vượt giới hạn kích thước yêu cầu của nhà cung cấp. Vui lòng giảm số lượng ảnh tham chiếu hoặc độ phân giải rồi thử lại",
@@ -467,4 +536,11 @@ MESSAGES = {
     "memory_invalid_filename": "Tên tệp ký ức '{filename}' không hợp lệ: chỉ cho phép tệp .md ở thư mục gốc",
     "memory_file_not_found": "Tệp ký ức '{filename}' không tồn tại",
     "memory_file_too_large": "Tệp ký ức '{filename}' vượt quá giới hạn kích thước (tối đa {limit_kib} KiB)",
+    "market_entry_definition_mismatch": "Chỉ mục và định nghĩa không khớp; không thể cài đặt",
+    "market_entry_definition_changed": "Định nghĩa của mục đã thay đổi sau khi bạn xem xét; hãy mở lại trang xác nhận để xem xét lại",
+    "market_entry_changed_during_fetch": "Nguồn chợ đã được làm mới trong lúc đọc định nghĩa; vui lòng thử lại",
+    "market_entry_requires_newer_app": "Mục này yêu cầu phiên bản ứng dụng ≥ {version}",
+    "market_entry_already_installed": "Mục này đã được cài đặt; chọn điểm cuối của nó để cập nhật",
+    "market_endpoint_already_installed": "Điểm cuối này có bản ghi cài đặt khác và không thể ghi đè",
+    "market_overwrite_target_not_duplicate": "Chỉ có thể ghi đè điểm cuối có cùng tác giả và tên với mục này",
 }

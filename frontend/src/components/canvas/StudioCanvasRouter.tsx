@@ -214,6 +214,47 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentScripts, refreshProject]);
 
+  // 时间线新增 / 移除分镜：服务端按当前剧本 revision 执行，这里不取快照。
+  // 写入一经提交即报告成功：随后的本地刷新失败时只提示重新加载，不让调用方保持可重试，
+  // 否则重试会再新增一条分镜或对已移除的分镜再发一次移除。
+  const refreshAfterStructureEdit = useCallback(async () => {
+    if (!(await refreshProject())) {
+      useAppStore.getState().pushToast(tRef.current("shot_structure_refresh_failed"), "warning");
+    }
+  }, [refreshProject]);
+
+  const handleInsertShot = useCallback(async (
+    afterId: string,
+    novelText: string | undefined,
+    scriptFile?: string,
+  ): Promise<boolean> => {
+    if (!currentProjectName || !currentScripts) return false;
+    const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
+    if (!resolvedFile) return false;
+    try {
+      await API.insertScriptItemAfter(currentProjectName, afterId, resolvedFile, novelText);
+    } catch (err) {
+      useAppStore.getState().pushToast(tRef.current("shot_insert_failed", { message: errMsg(err) }), "error");
+      return false;
+    }
+    await refreshAfterStructureEdit();
+    return true;
+  }, [currentProjectName, currentScripts, refreshAfterStructureEdit]);
+
+  const handleRemoveShot = useCallback(async (itemId: string, scriptFile?: string): Promise<boolean> => {
+    if (!currentProjectName || !currentScripts) return false;
+    const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
+    if (!resolvedFile) return false;
+    try {
+      await API.removeScriptItem(currentProjectName, itemId, resolvedFile);
+    } catch (err) {
+      useAppStore.getState().pushToast(tRef.current("shot_remove_failed", { message: errMsg(err) }), "error");
+      return false;
+    }
+    await refreshAfterStructureEdit();
+    return true;
+  }, [currentProjectName, currentScripts, refreshAfterStructureEdit]);
+
   const handleUpdateEpisodeTitle = useCallback(async (episode: number, title: string) => {
     if (!currentProjectName) return;
     try {
@@ -695,6 +736,8 @@ export function StudioCanvasRouter() {
             capabilities.supportedDurationsWithoutReference ?? undefined;
           const durationWarningReason = (seconds: number) =>
             durationOutOfRangeReason(seconds, capabilities);
+          // 档位空集的两种成因说给用户听的不是同一句：型号没登记时长 vs 这份 workflow 自己定片长。
+          const durationEndpointFixed = capabilities.durationEndpointFixed;
           const hasDraft =
             episode?.script_status === "segmented" || episode?.script_status === "generated";
           const isAd = currentProjectData?.content_mode === "ad";
@@ -752,6 +795,7 @@ export function StudioCanvasRouter() {
                     // unit 时长档位随所选模型能力变化（已按本集参考图路径收窄）
                     durationOptions={durationOptions}
                     durationOptionsNoReference={durationOptionsNoReference}
+                    durationEndpointFixed={durationEndpointFixed}
                   />
                 ) : gridStoryboardEnabled(currentProjectData) ? (
                   <GridImageToVideoCanvas
@@ -794,8 +838,11 @@ export function StudioCanvasRouter() {
                     projectData={currentProjectData}
                     durationOptions={durationOptions}
                     durationWarningReason={durationWarningReason}
+                    durationEndpointFixed={durationEndpointFixed}
                     onUpdatePrompt={awaitedUpdatePrompt}
                     onMoveShot={isAd ? handleMoveShot : undefined}
+                    onInsertShot={handleInsertShot}
+                    onRemoveShot={handleRemoveShot}
                     onGenerateStoryboard={voidPromise(handleGenerateStoryboard)}
                     onGenerateVideo={handleGenerateVideo}
                     onGenerateNarration={voidPromise(handleGenerateNarration)}

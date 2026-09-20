@@ -8,6 +8,7 @@ import {
   Save,
   Scissors,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import { UnitList } from "./UnitList";
 import { UnitRail } from "./UnitRail";
@@ -20,6 +21,7 @@ import { ReferenceDurationConfirmDialog } from "./ReferenceDurationConfirmDialog
 import { ReferenceBatchAdmissionDialog } from "./ReferenceBatchAdmissionDialog";
 import { referenceBatchOutcome } from "./batch-outcome";
 import { NarrationDeliveryChoice } from "@/components/shared/NarrationDeliveryChoice";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { computeVoiceLegacyNotice, VoiceLegacyBanner } from "./VoiceLegacyBanner";
 import { useReferenceDurationGate } from "@/hooks/useReferenceDurationGate";
 import { ReferenceScriptPlanPreviewPanel } from "@/components/canvas/reference/ReferenceScriptPlanPreviewPanel";
@@ -73,6 +75,8 @@ export interface ReferenceVideoCanvasProps {
    * 秒数，不编造档位。
    */
   durationOptions?: number[];
+  /** 档位为空是因为这一维由端点固定（workflow 自己定片长），不是型号没登记时长。 */
+  durationEndpointFixed?: boolean;
   /**
    * 同一模型能力下、不叠加参考图约束的档位（仍按分辨率收窄）。供正文里没有可解析引用的
    * unit 使用——参考图约束按 unit 生效，不能因同集内其它 unit 带图就收窄这类 unit 的可选档位。
@@ -118,6 +122,13 @@ function draftKey(projectName: string, episode: number, unitId: string): string 
   return `${projectName}::${episode}::${unitId}`;
 }
 
+function withoutKey(record: Record<string, string>, key: string): Record<string, string> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 function toastError(e: unknown, format?: (msg: string) => string): void {
   const msg = errMsg(e);
   useAppStore.getState().pushToast(format ? format(msg) : msg, "error");
@@ -158,6 +169,7 @@ export function ReferenceVideoCanvas({
   showPreprocess = true,
   freeDuration = false,
   durationOptions,
+  durationEndpointFixed = false,
   durationOptionsNoReference,
   requestOptions,
 }: ReferenceVideoCanvasProps) {
@@ -176,6 +188,7 @@ export function ReferenceVideoCanvas({
   const loadUnits = useReferenceVideoStore((s) => s.loadUnits);
   const addUnit = useReferenceVideoStore((s) => s.addUnit);
   const patchUnit = useReferenceVideoStore((s) => s.patchUnit);
+  const deleteUnit = useReferenceVideoStore((s) => s.deleteUnit);
   const select = useReferenceVideoStore((s) => s.select);
 
   const units =
@@ -338,6 +351,30 @@ export function ReferenceVideoCanvas({
       toastError(e);
     }
   }, [addUnit, projectName, episode]);
+
+  // 移除比其他写入多挡一类占用：在跑的配音任务同样指向该单元（与时间线分镜的移除守卫一致）。
+  const isUnitRemovalBlocked = useCallback(
+    (unitId: string) => isUnitLocked(unitId) || ttsBusyUnitIds.has(unitId),
+    [isUnitLocked, ttsBusyUnitIds],
+  );
+  const [removeUnitId, setRemoveUnitId] = useState<string | null>(null);
+  const [removingUnit, setRemovingUnit] = useState(false);
+  const handleRemoveUnit = useCallback(async () => {
+    if (!removeUnitId || removingUnit || isUnitRemovalBlocked(removeUnitId)) return;
+    setRemovingUnit(true);
+    try {
+      await deleteUnit(projectName, episode, removeUnitId);
+      // 已移除单元的未保存草稿随之作废：否则离开页面告警常驻，新增单元取回同一 id 时还会显示旧草稿。
+      const key = draftKey(projectName, episode, removeUnitId);
+      setDrafts((current) => withoutKey(current, key));
+      setDurationDrafts((current) => withoutKey(current, key));
+      setRemoveUnitId(null);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setRemovingUnit(false);
+    }
+  }, [deleteUnit, projectName, episode, removeUnitId, removingUnit, isUnitRemovalBlocked]);
 
   const [stackTab, setStackTab] = useState<"editor" | "preview">("editor");
 
@@ -982,6 +1019,7 @@ export function ReferenceVideoCanvas({
               projectName={projectName}
               episode={episode}
               lookup={mentionLookup}
+              onOpenTimeline={() => setTab("units")}
             />
           </div>
         </div>
@@ -1071,7 +1109,10 @@ export function ReferenceVideoCanvas({
                           ))}
                         </select>
                       ) : (
-                        <span className="font-mono tabular-nums" title={t("duration_no_options")}>
+                        <span
+                          className="font-mono tabular-nums"
+                          title={t(durationEndpointFixed ? "duration_not_driven_notice" : "duration_no_options")}
+                        >
                           {selected.duration_seconds}s
                         </span>
                       )}
@@ -1099,6 +1140,16 @@ export function ReferenceVideoCanvas({
                       className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] text-[var(--color-text-2)] hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRemoveUnitId(selected.unit_id)}
+                      disabled={isUnitRemovalBlocked(selected.unit_id)}
+                      aria-label={t("reference_unit_remove")}
+                      title={t("reference_unit_remove")}
+                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
                   </div>
 
@@ -1385,6 +1436,17 @@ export function ReferenceVideoCanvas({
         </div>
       )}
 
+      <ConfirmDialog
+        open={removeUnitId !== null}
+        title={t("reference_unit_remove_title", { id: removeUnitId ?? "" })}
+        description={t("reference_unit_remove_desc")}
+        confirmLabel={t("reference_unit_remove_confirm")}
+        tone="danger"
+        loading={removingUnit}
+        confirmDisabled={removeUnitId !== null && isUnitRemovalBlocked(removeUnitId)}
+        onConfirm={handleRemoveUnit}
+        onCancel={() => setRemoveUnitId(null)}
+      />
       <ReferenceDurationConfirmDialog {...durationGate.dialogProps} />
       <ReferenceBatchAdmissionDialog
         admission={batchAdmission}

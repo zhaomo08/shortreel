@@ -21,7 +21,7 @@ from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequen
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, TypeGuard, cast
 
 import portalocker
 from pydantic import BaseModel, Field
@@ -58,6 +58,7 @@ from lib.episode_ledger import SOURCE_TEXT_SUFFIXES
 from lib.episode_paths import (
     REFERENCE_VIDEO_SCRIPT_PLAN_FILENAME,
     SCRIPT_PLAN_FILENAMES,
+    episode_script_filename,
     episode_script_relpath,
 )
 from lib.episode_target_duration import (
@@ -94,8 +95,6 @@ from lib.reference_video.duration_migration import migrate_script_unit_durations
 from lib.schema_guards import is_int, is_shape, is_str
 from lib.script_editor import ScriptEditError, resolve_items
 from lib.script_models import get_generated_assets
-from lib.script_plan_entries import ScriptPlanKind, backfill_entry_revisions
-from lib.style_templates import LEGACY_STYLE_MAP, resolve_template_prompt
 from lib.validation_messages import ValidationResult
 
 logger = logging.getLogger(__name__)
@@ -193,6 +192,17 @@ def resolve_episode_script_binding(
     ):
         return current_binding
     return None
+
+
+def is_episode_number(value: object) -> TypeGuard[int]:
+    """这个值是不是一个集号。
+
+    集号是正整数。project.json 与剧本 JSON 都可能是裸读进来的，没过结构校验：``True`` 既是
+    ``int`` 又等于 ``1``，``0`` 与负数则不对应任何一集。按 ``isinstance`` 或只比大小都会让这些
+    值一路冒充集号写进账本。集号的判据只此一处，读账本、写盘校验与集元数据同步共用。
+    """
+
+    return type(value) is int and value >= 1
 
 
 def is_reference_video_project(project: Mapping[str, Any]) -> bool:
@@ -691,39 +701,19 @@ class ProjectManager:
 
     # ==================== 分镜剧本操作 ====================
 
-    def create_script(self, project_name: str, title: str, chapter: str) -> dict:
-        """
-        创建新的分镜剧本模板
-
-        Args:
-            project_name: 项目名称
-            title: 小说标题
-            chapter: 章节名称
-
-        Returns:
-            剧本字典
-        """
-        return {
-            "novel": {"title": title, "chapter": chapter},
-            "scenes": [],
-            "metadata": {
-                "created_at": datetime.now(UTC).isoformat(),
-                "updated_at": datetime.now(UTC).isoformat(),
-                "status": "draft",
-            },
-        }
-
     def save_script(
         self,
         project_name: str,
         script: dict,
-        filename: str | None = None,
+        filename: str,
         *,
         validate: bool = True,
         artifact_basis: ArtifactBasisDescriptor | None = None,
         expected_fingerprint: str | _Unset | None = _UNSET,
         cancellation_file_receipts: list[FormalWriteReceipt] | None = None,
         cancellation_manifest_receipts: list[ArtifactEntryRekeyReceipt] | None = None,
+        replaced_resource_ids: Sequence[str] = (),
+        project_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> Path:
         """
         保存分镜剧本
@@ -731,22 +721,19 @@ class ProjectManager:
         Args:
             project_name: 项目名称
             script: 剧本字典
-            filename: 可选的文件名，默认使用章节名
+            filename: 剧本文件名；只接受规范名 `episode_N.json`（可带 `scripts/` 前缀），
+                其余文件名在写盘一致性校验处拒绝
             validate: 是否做「不更坏」结构校验（默认 True，fail-safe）。直连保存不持有
                 改前剧本，由写盘统一入口按需读盘取改前（已存在则不更坏，全新保存则严格校验）。
             artifact_basis: 生成调用开始前冻结的剧本来源 basis；普通编辑不传，按提交时现值解析。
             expected_fingerprint: 可选的正式剧本内容基线；在剧本锁内不匹配时拒绝写入。
+            replaced_resource_ids: 新旧剧本都有、但身份已换成新条目的 id；它们名下的产物登记随本次写入撤销。
+            project_update: 与剧本、集索引同一写事务内对 project.json 的额外修改；仅带集号的剧本可用。
 
         Returns:
             保存的文件路径
         """
-        if filename is not None:
-            filename = self.normalize_script_filename(filename)
-
-        if filename is None:
-            chapter = script["novel"].get("chapter", "chapter_01")
-            filename = f"{chapter.replace(' ', '_')}_script.json"
-
+        filename = self.normalize_script_filename(filename)
         episode = script.get("episode")
 
         with self._script_lock(project_name, filename):
@@ -797,6 +784,7 @@ class ProjectManager:
                         artifact_path=f"scripts/{filename}",
                         resource_ids=resource_ids,
                         removed_resource_ids=tuple(set(previous_resource_ids) - set(resource_ids)),
+                        replaced_resource_ids=replaced_resource_ids,
                         basis=artifact_basis,
                         cancellation_receipts=cancellation_manifest_receipts,
                     )
@@ -818,6 +806,7 @@ class ProjectManager:
                 before=before_script,
                 prepare_on_commit=prepare_on_commit,
                 cancellation_receipts=cancellation_file_receipts,
+                project_update=project_update,
             )
 
     def _commit_script_unlocked(
@@ -831,6 +820,7 @@ class ProjectManager:
         on_commit: Callable[[Path], None] | None = None,
         prepare_on_commit: Callable[[], Callable[[Path], None] | None] | None = None,
         cancellation_receipts: list[FormalWriteReceipt] | None = None,
+        project_update: Callable[[dict[str, Any]], None] | None = None,
     ) -> Path:
         """Commit a script, its project index, and an optional sidecar hook together.
 
@@ -849,6 +839,8 @@ class ProjectManager:
         project_file = self._get_project_file_path(project_name)
         sync_project = project_file.is_file() and isinstance(script.get("episode"), int)
         lock_project = project_file.is_file() and (sync_project or prepare_on_commit is not None)
+        if project_update is not None and not sync_project:
+            raise ValueError("project_update requires an episode script of an existing project")
 
         if lock_project:
             with self._project_lock(project_name):
@@ -869,8 +861,9 @@ class ProjectManager:
                         if self._requires_unique_asset_namespace(project):
                             ensure_project_asset_namespace(project)
                         self._apply_episode_sync(project, script, filename)
+                        if project_update is not None:
+                            project_update(project)
                         self._migrate_legacy_resolution_on_save(project)
-                        self._migrate_legacy_style(project)
                         self._touch_metadata(project)
                         if self._requires_unique_asset_namespace(project):
                             ensure_project_asset_namespace(project)
@@ -1030,7 +1023,6 @@ class ProjectManager:
         norm = self.normalize_script_filename(script_filename)
         with self._script_lock(project_name, norm), self._project_lock(project_name):
             project = self._read_project_raw_unlocked(project_name)
-            self._migrate_legacy_style(project)
             script, _migrated = self._read_script_unlocked(project_name, norm)
             yield project, script
 
@@ -1040,7 +1032,6 @@ class ProjectManager:
 
         with self._project_lock(project_name):
             project = self._read_project_raw_unlocked(project_name)
-            self._migrate_legacy_style(project)
             yield project
 
     def _read_project_raw_unlocked(self, project_name: str) -> dict:
@@ -1110,7 +1101,6 @@ class ProjectManager:
                 if isinstance(script.get("episode"), int):
                     self._apply_episode_sync(project, script, norm)
                 self._migrate_legacy_resolution_on_save(project)
-                self._migrate_legacy_style(project)
                 self._touch_metadata(project)
                 if self._requires_unique_asset_namespace(project):
                     ensure_project_asset_namespace(project)
@@ -1123,23 +1113,53 @@ class ProjectManager:
             )
 
     @staticmethod
-    def require_filename_episode_consistency(script: dict, script_filename: str) -> None:
-        """校验脚本内 `episode` 字段与文件名隐含的集号一致；不一致则 raise ValueError。
+    def filename_episode(script_filename: str) -> int | None:
+        """文件名隐含的集号（`episode[-_\\s]*N`，忽略大小写）；文件名不含集号时返回 None。
 
-        filename 缺集号模式或脚本内无 `episode` int 时静默放行（兼容旧数据）。
+        `episode_0.json` 这种非正数解析结果一律按「不含集号」处理：0 不对应任何一集，认它作归属
+        会让集元数据同步往账本里新建一条 `episode: 0`。
         """
         base_name = ProjectManager.normalize_script_filename(script_filename)
         filename_match = re.search(r"episode[-_\s]*(\d+)", base_name, re.IGNORECASE)
         if filename_match is None:
-            return
-        script_episode = script.get("episode")
-        if not isinstance(script_episode, int):
-            return
-        filename_episode = int(filename_match.group(1))
-        if script_episode != filename_episode:
+            return None
+        episode = int(filename_match.group(1))
+        return episode if is_episode_number(episode) else None
+
+    @staticmethod
+    def canonical_script_episode(script_filename: str) -> int | None:
+        """这份剧本归属哪一集：文件名正是规范名 `episode_N.json` 时为第 N 集，其余一律认不出。
+
+        归属只看文件名，与账本绑定无关：`script_file` 自 v15 起只能是该集的规范路径
+        （见 `lib.project_migrations.v14_to_v15_formal_script_truth`），`episode_1_old.json`、
+        `custom.json` 这类文件不属于任何一集。
+        """
+        base_name = ProjectManager.normalize_script_filename(script_filename)
+        episode = ProjectManager.filename_episode(base_name)
+        if episode is None or base_name != episode_script_filename(episode):
+            return None
+        return episode
+
+    @staticmethod
+    def require_filename_episode_consistency(script: dict, script_filename: str) -> None:
+        """校验文件名是某一集的规范名，且脚本内 `episode` 字段与之一致；否则 raise ValueError。
+
+        非规范名的剧本不属于任何一集，一律拒绝，不按脚本内 `episode` 写盘或登记为集绑定。
+        脚本内无 `episode` int 时只要求文件名是规范名。
+        """
+        base_name = ProjectManager.normalize_script_filename(script_filename)
+        owner_episode = ProjectManager.canonical_script_episode(base_name)
+        if owner_episode is None:
             raise ValueError(
-                f"脚本 {base_name} 内部 episode={script_episode} 与文件名隐含的 "
-                f"episode={filename_episode} 不一致，拒绝操作以避免污染 project.json"
+                f"脚本 {base_name} 的文件名不是规范名（应为 episode_N.json），拒绝操作以避免污染 project.json"
+            )
+        script_episode = script.get("episode")
+        if not is_episode_number(script_episode):
+            return
+        if script_episode != owner_episode:
+            raise ValueError(
+                f"脚本 {base_name} 内部 episode={script_episode} 与它归属的 "
+                f"episode={owner_episode} 不一致，拒绝操作以避免污染 project.json"
             )
 
     def _persist_script_json(self, path: Path, script: dict) -> None:
@@ -1219,9 +1239,9 @@ class ProjectManager:
             更新后的 project 字典
 
         Raises:
-            ValueError: 当文件名隐含的集号与脚本内 `episode` 字段不一致时抛出，
-                避免错误的脚本数据覆盖真实集号条目（例如 episode_10.json 内部
-                错写为 episode=1，会覆盖第 1 集）。
+            ValueError: 当文件名不是规范名 `episode_N.json`，或文件名的集号与脚本内
+                `episode` 字段不一致时抛出，避免错误的脚本数据覆盖真实集号条目
+                （例如 episode_10.json 内部错写为 episode=1，会覆盖第 1 集）。
         """
         # 走 unlocked 变体：本方法被写盘统一入口在持有 `_script_lock` 时调用，
         # `load_script` 的迁移回写会二次取同一把锁而自死锁。
@@ -1241,11 +1261,7 @@ class ProjectManager:
         self.require_filename_episode_consistency(script, base_name)
 
         script_episode = script.get("episode")
-        if isinstance(script_episode, int):
-            episode_num = script_episode
-        else:
-            filename_match = re.search(r"episode[-_\s]*(\d+)", base_name, re.IGNORECASE)
-            episode_num = int(filename_match.group(1)) if filename_match else 1
+        episode_num = script_episode if is_episode_number(script_episode) else self.canonical_script_episode(base_name)
         episode_title = script.get("title", "")
         script_file = f"scripts/{base_name}"
 
@@ -1290,41 +1306,6 @@ class ProjectManager:
                 self._persist_script_json(real, script)
         return script
 
-    def backfill_script_plan_entry_revisions(
-        self,
-        project_name: str,
-        filename: str,
-        *,
-        plan_kind: ScriptPlanKind,
-        plan_revisions: Mapping[str, str],
-        whole_plan_revision: str | None,
-    ) -> tuple[str, ...]:
-        """在剧本锁内为无条目指纹的存量条目补齐指纹并回写，返回被回填的条目 id。
-
-        条目指纹只在提示词编写的装配出口写入，存量剧本因此一条都没有；它们在脚本规划被改动
-        之前必须补齐，否则整集指纹一失配就退回整集口径，整集重写会覆盖用户精修过的视觉层
-        （回填的准入判定见 ``lib.script_plan_entries.backfill_entry_revisions``）。调用方给出
-        当前脚本规划的条目指纹与整集指纹，本方法只管在锁内落盘。
-
-        与 ``load_script`` 的存量迁移同一形状：锁内重读最新内容再判再写（无锁读到的内容可能
-        已被并发写者取代），且不走 ``_write_script_unlocked``——补齐只是格式收编，不该刷新
-        ``metadata.updated_at``、不触发 project.json 同步与变更提示。
-        """
-        norm = self.normalize_script_filename(filename)
-        with self._script_lock(project_name, norm):
-            script, _migrated = self._read_script_unlocked(project_name, norm)
-            backfilled = backfill_entry_revisions(
-                plan_kind,
-                script=script,
-                plan_revisions=plan_revisions,
-                whole_plan_revision=whole_plan_revision,
-            )
-            if not backfilled:
-                return ()
-            real = Path(self._safe_subpath(self.get_project_path(project_name) / "scripts", norm))
-            self._persist_script_json(real, script)
-        return backfilled
-
     def load_script_readonly(self, project_name: str, filename: str) -> dict:
         """Load a script with in-memory compatibility migrations but never persist them."""
         norm = self.normalize_script_filename(filename)
@@ -1363,6 +1344,17 @@ class ProjectManager:
         project_dir = self.get_project_path(project_name)
         scripts_dir = project_dir / "scripts"
         return [f.name for f in scripts_dir.glob("*.json")]
+
+    def _canonical_episode_scripts(self, project_name: str) -> list[str]:
+        """``scripts/`` 下文件名为规范名的剧本，排序后返回：批量引用改写的候选集。
+
+        归属只看文件名（见 ``canonical_script_episode``），取锁前后是同一份判据，无需在锁内
+        重算：非规范名的 JSON 不属于任何一集，改写它既无依据，也会在写盘的集号一致性校验处抛
+        ``ValueError`` 中断整次改名。
+        """
+        return sorted(
+            name for name in self.list_scripts(project_name) if self.canonical_script_episode(name) is not None
+        )
 
     # ==================== 角色管理 ====================
 
@@ -1648,7 +1640,16 @@ class ProjectManager:
         restoring blanket snapshots over a concurrent script edit.
         """
 
-        normalized = tuple(sorted({self.normalize_script_filename(name) for name in script_filenames}))
+        # 点名的剧本里文件名为规范名的全部上锁并改写；其余不属于任何一集，不动。
+        normalized = tuple(
+            sorted(
+                {
+                    name
+                    for name in map(self.normalize_script_filename, script_filenames)
+                    if self.canonical_script_episode(name) is not None
+                }
+            )
+        )
         project_path = self.get_project_path(project_name)
         scripts_dir = project_path / "scripts"
         script_paths = [Path(self._safe_subpath(scripts_dir, name)) for name in normalized]
@@ -1683,13 +1684,16 @@ class ProjectManager:
                         before=before,
                         emit_change=False,
                     )
-                    if isinstance(script.get("episode"), int):
+                    # 只同步账本确实绑着这份剧本的那一集：写盘不借恢复改绑。
+                    script_episode = script.get("episode")
+                    if isinstance(script_episode, int) and resolve_episode_script_binding(
+                        project, script_episode, name, require_indexed=True
+                    ):
                         self._apply_episode_sync(project, script, name)
                     changed.append(name)
 
                 if changed:
                     self._migrate_legacy_resolution_on_save(project)
-                    self._migrate_legacy_style(project)
                     self._touch_metadata(project)
                     if self._requires_unique_asset_namespace(project):
                         ensure_project_asset_namespace(project)
@@ -1862,24 +1866,6 @@ class ProjectManager:
         except FileNotFoundError:
             return False
 
-    @staticmethod
-    def _migrate_legacy_style(project: dict) -> bool:
-        """检测旧 style 值并就地迁移。返回是否发生了变更。"""
-        if "style_template_id" in project:
-            return False  # 已迁移
-        legacy_value = project.get("style", "")
-        if legacy_value not in LEGACY_STYLE_MAP:
-            return False
-        if project.get("style_image"):
-            # 参考图优先：清空旧 style、template_id 置 None
-            project["style_template_id"] = None
-            project["style"] = ""
-        else:
-            new_id = LEGACY_STYLE_MAP[legacy_value]
-            project["style_template_id"] = new_id
-            project["style"] = resolve_template_prompt(new_id)
-        return True
-
     def load_project(self, project_name: str) -> dict:
         """
         加载项目元数据
@@ -1895,34 +1881,16 @@ class ProjectManager:
         if not project_file.exists():
             raise FileNotFoundError(f"项目元数据文件不存在: {project_file}")
 
-        migrated = False
-        with self._project_lock(project_name):
-            # 读-改-写放在同一把锁内，避免并发 save_project 在读与写之间完成
-            # 更新后，迁移写回又把更新覆盖掉。
-            with open(project_file, encoding="utf-8") as f:
-                project = json.load(f)
-            if self._migrate_legacy_style(project):
-                # 不走 save_project 以避免触发 _touch_metadata 污染 updated_at。
-                if self._requires_unique_asset_namespace(project):
-                    ensure_project_asset_namespace(project)
-                atomic_write_json(project_file, project)
-                migrated = True
-        if migrated:
-            emit_project_change_hint(
-                project_name,
-                changed_paths=[self.PROJECT_FILE],
-            )
-        return project
+        with open(project_file, encoding="utf-8") as f:
+            return json.load(f)
 
     def load_project_readonly(self, project_name: str) -> dict:
-        """Load an in-memory migrated project snapshot without locking or persisting it."""
+        """Load an in-memory project snapshot without locking it."""
         project_file = self._get_project_file_path(project_name)
         if not project_file.exists():
             raise FileNotFoundError(f"项目元数据文件不存在: {project_file}")
         with open(project_file, encoding="utf-8") as f:
-            project = json.load(f)
-        self._migrate_legacy_style(project)
-        return project
+            return json.load(f)
 
     @contextmanager
     def _project_lock(self, project_name: str):
@@ -2047,15 +2015,14 @@ class ProjectManager:
         """原子性地更新 project.json：加文件锁 → 读 → 修改 → 原子写回。
 
         避免并发任务（如同时生成多张角色图片）之间的 lost-update 竞态。
-        在同一持锁窗口内统一应用读时迁移（_migrate_legacy_style），返回迁移后的项目元数据 dict，
-        调用方无需再 load_project 一次。
+        返回写回后的项目元数据 dict，调用方无需再 load_project 一次。
 
         Args:
             project_name: 项目名称
             mutate_fn: 接收 project dict 并就地修改的回调函数
 
         Returns:
-            迁移后的项目元数据字典（与 load_project 返回结构一致）
+            写回后的项目元数据字典（与 load_project 返回结构一致）
         """
         project_file = self._get_project_file_path(project_name)
 
@@ -2215,7 +2182,6 @@ class ProjectManager:
         if self._requires_unique_asset_namespace(project):
             ensure_project_asset_namespace(project)
         self._migrate_legacy_resolution_on_save(project)
-        self._migrate_legacy_style(project)
         self._touch_metadata(project)
 
     def update_project_with_file_copies(
@@ -2271,7 +2237,6 @@ class ProjectManager:
                 if self._requires_unique_asset_namespace(project):
                     ensure_project_asset_namespace(project)
                 self._migrate_legacy_resolution_on_save(project)
-                self._migrate_legacy_style(project)
                 self._touch_metadata(project)
 
                 # mutate_fn 可在锁内完成最终名称规划并填充 copies；因此目标唯一性也必须
@@ -2916,7 +2881,7 @@ class ProjectManager:
             raise FileNotFoundError(f"项目不存在: {project_name}")
         project_dir = self.get_project_path(project_name)
 
-        script_files = sorted(self.list_scripts(project_name))
+        script_files = self._canonical_episode_scripts(project_name)
         drafts_root = project_dir / "drafts"
         draft_files = (
             sorted(p for p in drafts_root.glob("episode_*/*.json") if p.name in self._RENAME_DRAFT_FILENAMES)
@@ -3088,7 +3053,13 @@ class ProjectManager:
 
             # —— 落盘（每步幂等，中途失败重跑同一次重命名即可收敛）——
             for filename, script, before in changed_scripts:
-                self._write_script_unlocked(project_name, script, filename, sync_project=False, before=before)
+                self._write_script_unlocked(
+                    project_name,
+                    script,
+                    filename,
+                    sync_project=False,
+                    before=before,
+                )
             for path, payload in changed_drafts:
                 atomic_write_json(path, payload)
             for src, dst in moves:
@@ -3132,7 +3103,7 @@ class ProjectManager:
             raise FileNotFoundError(f"项目不存在: {project_name}")
         project_dir = self.get_project_path(project_name)
 
-        script_files = sorted(self.list_scripts(project_name))
+        script_files = self._canonical_episode_scripts(project_name)
         drafts_root = project_dir / "drafts"
         draft_files = (
             sorted(p for p in drafts_root.glob("episode_*/*.json") if p.name in self._RENAME_DRAFT_FILENAMES)
@@ -3199,7 +3170,13 @@ class ProjectManager:
             )
 
             for filename, script, before in changed_scripts:
-                self._write_script_unlocked(project_name, script, filename, sync_project=False, before=before)
+                self._write_script_unlocked(
+                    project_name,
+                    script,
+                    filename,
+                    sync_project=False,
+                    before=before,
+                )
             for path, payload in changed_drafts:
                 atomic_write_json(path, payload)
             relocation.relocate()

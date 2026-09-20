@@ -3,15 +3,16 @@
 纯 gate 逻辑（适用性 / 指纹 / 状态派生）在 ``lib.script_review``；本层叠加 ProjectManager
 持久化（确认指纹落 project.json ``episodes[i].script_plan_review``）与结构化内容的 Pydantic 校验、落盘。
 
-确认触发 prompt_authoring 的语义是「放行」而非「服务端 launcher」：prompt_authoring（剧本视觉生成）由 Agent 的
-``generate_episode_script`` 工具执行，本服务只负责把内容确认状态翻到 confirmed；该工具读时经
-``lib.script_review.gate_blocks_prompt_authoring`` 校验，pending 时拒绝、confirmed 后放行。
+确认即把脚本规划整份机械转为正式脚本（全部条目待编写），并与确认记录同一次写入落盘；该集已有
+正式脚本时确认就是覆盖，须调用方显式认可。提示词编写（剧本视觉生成）由 Agent 的
+``generate_episode_script`` 工具执行，只读正式脚本，不经内容确认门禁。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,16 +21,17 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from lib import script_review
+from lib.artifact_manifest import ArtifactKey
+from lib.artifact_registration import register_current_artifact_if_provable
 from lib.config.resolver import ConfigResolver, resolve_raw_supported_durations
 from lib.draft_quarantine import QUARANTINE_KIND_PROMPT_AUTHORING, quarantine_path, read_quarantine, violation_entries
 from lib.episode_ledger import discover_episode_files, register_orphan_episode_entries
-from lib.episode_paths import episode_script_relpath
 from lib.episode_target_duration import project_episode_target_duration
 from lib.json_io import load_json_or_none
-from lib.project_manager import ProjectManager, find_episode
+from lib.project_manager import ProjectManager, ScriptWriteConflict
+from lib.script_generator import ScriptGenerator, VideoDurationsUnresolvedError
 from lib.script_models import DramaNormalizedScript, NarrationScriptPlanDraft, ReferenceScriptPlanDraft
-from lib.script_plan_entries import compare_script_with_plan_document
-from lib.speech_composition import SpeechAdmission, admit_script_unit
+from lib.speech_composition import SpeechAdmission, SpeechAdmissionError, admit_script_unit
 from server.media_tools.context import reference_unit_duration_tiers, resolve_video_caps
 
 logger = logging.getLogger(__name__)
@@ -48,11 +50,23 @@ _SCRIPT_PLAN_CONTENT_MODEL: dict[str, type[BaseModel]] = {
 class ScriptReviewError(Exception):
     """gate 操作的领域错误。``code`` 供 router 映射 HTTP 状态与 i18n key；``message`` 为技术细节。"""
 
-    def __init__(self, code: str, message: str = "", *, admission: SpeechAdmission | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str = "",
+        *,
+        admission: SpeechAdmission | None = None,
+        overwrite: dict[str, Any] | None = None,
+        script_filename: str | None = None,
+    ):
         super().__init__(message or code)
         self.code = code
         self.message = message
         self.admission = admission
+        #: ``overwrite_required`` 携带将被覆盖的正式脚本（``FormalScriptOverwrite.to_dict()``）。
+        self.overwrite = overwrite
+        #: ``foreign_formal_script`` 携带占着本集规范路径的那份文件名。
+        self.script_filename = script_filename
 
 
 def _require_changed_speech_admitted(kind: str, previous: object, candidate: object) -> None:
@@ -126,6 +140,9 @@ class ScriptReviewService:
         project = self._register_orphan_episodes(project_name)
         if script_review.find_episode(project, episode) is None:
             raise ScriptReviewError("episode_not_found")
+        # 条目补建前落盘的 script_plan 证明不了来源、未被登记；补建后按现值补登记，确认时的
+        # 整集转换才读得到这份正式 script_plan。
+        register_current_artifact_if_provable(project_path, ArtifactKey.episode_script_plan(episode))
         return project
 
     def _register_orphan_episodes(self, project_name: str) -> dict[str, Any]:
@@ -231,9 +248,6 @@ class ScriptReviewService:
         ``_resolve_supported_durations``），两处不同源的话，gate 里能选的档位会与迁移收编到的
         档位不一致。项目未配置视频型号而解析不到时为 None，呈现层退回只读秒数。
 
-        ``script_entry_currency`` 是正式剧本相对这份 script_plan 的条目时效（见
-        ``_script_entry_currency``）；没有正式剧本或没有可比对的条目时为 None。
-
         档位解析先于落盘读写完成，其余同步 I/O 整段卸到线程：``file_lock`` 是阻塞式文件锁，
         不能跨 await 持有，而档位解析本身要 await 视频能力查询。
         """
@@ -288,59 +302,8 @@ class ScriptReviewService:
             # 项目级「单集目标时长」偏好（秒），未设时 None。审核面板据它渲染「本集合计 / 目标」
             # 对比；随 state 一起回传而非让前端另发一次项目请求，面板拿到的合计与目标出自同一次读取。
             "episode_target_duration": project_episode_target_duration(project),
-            # 比对用的 content 与 fingerprint 取自同一把锁内的同一份落盘内容；剧本本身按其自己的
-            # 读取口径读，不在 script_plan 锁内读——两者是两份文件、两把锁。
-            "script_entry_currency": self._script_entry_currency(project_name, project, episode, content, fingerprint),
-        }
-
-    def _script_entry_currency(
-        self,
-        project_name: str,
-        project: dict[str, Any],
-        episode: int,
-        plan_content: dict[str, Any] | None,
-        plan_fingerprint: str | None,
-    ) -> dict[str, Any] | None:
-        """正式剧本相对当前 script_plan 的条目时效：``stale`` / ``added`` / ``removed`` 三组条目 id 与
-        ``order_changed``；没有可比对的两方时 None。
-
-        口径是无准入的「内容是否变了」——与工作流状态同一个 ``compare_script_with_plan_document``，
-        不是机械转换预演（``conversion-preview``）的「能否转换」：待修复草稿在场、分镜时长不在当前
-        视频型号的档位、存量混排发声都会让预演整体拒绝，而时间线上「剧本内容已更新」的提示在这些
-        期间仍须成立，否则用户让 Agent 重跑规划、规划违约进草稿的那几分钟里整条时间线的提示会消失
-        又恢复。预演仍是「转为正式脚本」对话框的数据来源，两套口径各答各的问题。
-
-        ``stale`` 只列剧本里已有、内容指纹落后于规划的条目（按规划顺序）；规划新增的条目在剧本里
-        没有对应分镜，单列在 ``added``。剧本缺失或读不成对象时 None——时效是两份内容的比对，缺一方
-        就没有答案，不把「读不出」说成「全部一致」。
-        """
-        kind = script_review.script_plan_kind(project)
-        if kind is None or plan_content is None:
-            return None
-        entry = find_episode(project, episode)
-        script_file = entry.get("script_file") if entry is not None else None
-        filename = script_file if isinstance(script_file, str) and script_file else episode_script_relpath(episode)
-        try:
-            script: Any = self.pm.load_script_readonly(project_name, filename)
-        except (OSError, ValueError):
-            return None
-        if not isinstance(script, dict):
-            return None
-        comparison = compare_script_with_plan_document(
-            kind,
-            plan_document=plan_content,
-            script=script,
-            episode=episode,
-            whole_plan_revision=plan_fingerprint,
-        )
-        if comparison is None:
-            return None
-        currency = comparison.currency
-        return {
-            "stale": list(currency.stale_ids),
-            "added": list(currency.new_ids),
-            "removed": list(currency.removed_ids),
-            "order_changed": currency.order_changed,
+            # 确认将覆盖的正式脚本（无则 None）：内容确认页据此把确认渲染为 danger 并列出后果。
+            "script_overwrite": _overwrite_dict(project_path, project, episode) if path is not None else None,
         }
 
     async def get_quarantine_info(self, project_name: str, episode: int) -> dict[str, Any] | None:
@@ -465,6 +428,7 @@ class ScriptReviewService:
         """校验并落盘编辑后的结构化中间态（手动或 Agent 编辑后回写），返回最新状态（重新等待确认）。
 
         内容变更使指纹漂移，``get_state`` 据此自动回到 pending_review——保存即重新需要确认。
+        已确认的脚本规划只读，保存抛 ``script_plan_confirmed``、不落盘；重跑脚本规划写出新内容后恢复可保存。
 
         ``base_fingerprint`` 是编辑方读取内容（``get_state``）时拿到的指纹：给定时在锁内与盘上
         现值比对，不一致（编辑期间另一写入方已改过 script_plan）抛 ``conflict``、不落盘——后写方拿
@@ -507,6 +471,7 @@ class ScriptReviewService:
                     self.pm.file_lock(prompt_authoring_path),
                     script_review.script_plan_write_lock(project_path, episode),
                 ):
+                    self._reject_confirmed_script_plan(project_name, project_path, episode)
                     _require_changed_speech_admitted(kind, _read_json(path), validated)
                     script_review.write_script_plan_locked(
                         project_path, episode, validated, expected_fingerprint=expected
@@ -517,25 +482,81 @@ class ScriptReviewService:
                 # 台词准入判定，让基线过期的保存拿到 conflict 而不是一条它改不动的准入意见。
                 # 比对既已在此做过，落盘出口不再重复比对（默认 UNCHECKED）。
                 with script_review.formal_script_plan_lock(project_path, episode, path):
+                    self._reject_confirmed_script_plan(project_name, project_path, episode)
                     script_review.assert_base_fingerprint(path, expected)
                     _require_changed_speech_admitted(kind, _read_json(path), validated)
                     script_review.write_formal_script_plan_locked(project_path, episode, path, validated)
         except script_review.ScriptPlanWriteConflict as exc:
             raise ScriptReviewError("conflict", str(exc)) from exc
 
-    async def confirm(self, project_name: str, episode: int) -> dict[str, Any]:
-        """把该集内容确认状态翻到 confirmed（记录当前 script_plan 内容指纹），放行 prompt_authoring。
+    def _reject_confirmed_script_plan(self, project_name: str, project_path: Path, episode: int) -> None:
+        """已确认的脚本规划只读：持脚本规划锁时按最新确认记录判定，已确认即拒绝保存。"""
+        project = self.pm.load_project_readonly(project_name)
+        if script_review.formal_script_plan_confirmed(project_path, project, episode):
+            raise ScriptReviewError("script_plan_confirmed")
 
-        无 script_plan / 不适用 / 集条目缺失 / script_plan 内容结构非法 / 有草稿待处置时
-        抛 ScriptReviewError，由 router 映射 4xx。
+    async def confirm(
+        self, project_name: str, episode: int, *, overwrite_revision: str | None = None
+    ) -> dict[str, Any]:
+        """确认该集 script_plan：整份转为正式脚本，并在同一次写入里记录确认指纹，放行 prompt_authoring。
+
+        无 script_plan / 不适用 / 集条目缺失 / script_plan 内容结构非法 / 有草稿待处置 / 转换准入
+        不满足时抛 ScriptReviewError，由 router 映射 4xx。该集已有正式脚本时，``overwrite_revision``
+        须等于其覆盖清单的 ``revision``（调用方认可覆盖的正是这一份）；缺失或不符时抛
+        ``overwrite_required``，携带当前的覆盖清单，不写正式脚本与确认记录。
 
         档位表先于加锁解析（同 ``get_state``）：确认路径同样要对存量草稿做一次读时收编，收编
         用的档位表须与 gate 面板呈现的那份同源，否则确认会把面板上选不到的秒数固化到盘上。
         """
         project = await asyncio.to_thread(self.pm.load_project, project_name)
         supported_durations = await self._resolve_supported_durations(project_name, project)
-        await asyncio.to_thread(self._confirm_sync, project_name, project, episode, supported_durations)
+        project_path = self.pm.get_project_path(project_name)
+        overwrite = await asyncio.to_thread(script_review.formal_script_overwrite, project_path, project, episode)
+        fingerprint = await asyncio.to_thread(self._confirm_sync, project_name, project, episode, supported_durations)
+        if overwrite is not None and overwrite_revision != overwrite.fingerprint:
+            raise ScriptReviewError("overwrite_required", overwrite=overwrite.to_dict())
+        await self._materialize(
+            project_path,
+            episode,
+            plan_fingerprint=fingerprint,
+            script_fingerprint=overwrite.fingerprint if overwrite is not None else None,
+        )
         return await self.get_state(project_name, episode)
+
+    async def _materialize(
+        self, project_path: Path, episode: int, *, plan_fingerprint: str, script_fingerprint: str | None
+    ) -> None:
+        """整集转换与确认记录一起落盘；转换期间脚本规划或正式脚本被改过即按冲突拒绝。"""
+        confirmed_at = datetime.now(UTC).isoformat()
+
+        def _record_confirmation(project: dict[str, Any]) -> None:
+            if not script_review.apply_confirmation(project, episode, plan_fingerprint, confirmed_at):
+                raise ScriptReviewError("episode_not_found")
+
+        generator = await asyncio.to_thread(ScriptGenerator, project_path, config_resolver=self.config_resolver)
+        try:
+            await generator.materialize_script_plan(
+                episode,
+                expected_plan_revision=plan_fingerprint,
+                expected_script_fingerprint=script_fingerprint,
+                project_update=_record_confirmation,
+            )
+        except SpeechAdmissionError as exc:
+            raise ScriptReviewError("speech_admission", admission=exc.admission) from exc
+        except (ScriptWriteConflict, script_review.ScriptPlanWriteConflict) as exc:
+            raise ScriptReviewError("conversion_conflict", str(exc)) from exc
+        except VideoDurationsUnresolvedError as exc:
+            raise ScriptReviewError(
+                "video_model_unresolved",
+                "尚未配置可用的视频模型，无法确定分镜时长档位；请在「全局设置 → 供应商」配置视频供应商，"
+                "或在项目设置中选择视频模型后重新确认",
+            ) from exc
+        except script_review.ForeignFormalScriptError as exc:
+            # 先于下面的 ValueError 分支：绑定失联而规范路径上是别集剧本时，转换在写盘前被拒，
+            # 既不重建那一集的剧本也不改本集的绑定，提示要指向可操作的那一处。
+            raise ScriptReviewError("foreign_formal_script", str(exc), script_filename=exc.filename) from exc
+        except (ValueError, FileNotFoundError) as exc:
+            raise ScriptReviewError("conversion_refused", str(exc)) from exc
 
     def _confirm_sync(
         self,
@@ -543,8 +564,8 @@ class ScriptReviewService:
         project: dict[str, Any],
         episode: int,
         supported_durations: list[int] | None,
-    ) -> None:
-        """``confirm`` 的同步主体：待处置草稿校验、读时收编、结构校验、指纹落盘。"""
+    ) -> str:
+        """``confirm`` 的同步前半：待处置草稿校验、读时收编、结构校验，返回待确认内容的指纹。"""
         project_path = self.pm.get_project_path(project_name)
         path = script_review.script_plan_path(project_path, project, episode)
         if path is None:
@@ -605,14 +626,12 @@ class ScriptReviewService:
             else:
                 # 指纹从校验通过的 content 派生，不二次读盘：确认记录须对应这里校验过的内容。
                 fingerprint = script_review.content_fingerprint_of_data(content)
+        return fingerprint
 
-        confirmed_at = datetime.now(UTC).isoformat()
 
-        def _mutate(p: dict[str, Any]) -> None:
-            if not script_review.apply_confirmation(p, episode, fingerprint, confirmed_at):
-                raise ScriptReviewError("episode_not_found")
-
-        self.pm.update_project(project_name, _mutate)
+def _overwrite_dict(project_path: Path, project: Mapping[str, Any], episode: int) -> dict[str, Any] | None:
+    overwrite = script_review.formal_script_overwrite(project_path, project, episode)
+    return overwrite.to_dict() if overwrite is not None else None
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:

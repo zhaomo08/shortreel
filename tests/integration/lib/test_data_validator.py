@@ -47,6 +47,89 @@ class TestDataValidator:
         assert result.errors == []
         assert "验证通过" in str(result)
 
+    @pytest.mark.parametrize("style", [None, ""], ids=["absent", "empty"])
+    def test_validate_project_accepts_project_without_style(self, tmp_path, style):
+        """未选风格（自定义风格图或尚未选择）的项目是合法状态，风格不是必填字段。"""
+        payload = _project_payload()
+        if style is None:
+            del payload["style"]
+        else:
+            payload["style"] = style
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert result.valid
+        assert result.errors == []
+
+    @pytest.mark.parametrize("style", [None, 123, False, [], {}], ids=["null", "int", "bool", "list", "dict"])
+    def test_validate_project_rejects_non_string_style(self, tmp_path, style):
+        """风格值出现即须为字符串，显式 null 与其他类型都按类型错误报告，不当作未选风格放行。"""
+        payload = _project_payload()
+        payload["style"] = style
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert not result.valid
+        assert any("字段类型错误: style 应为字符串" in error for error in result.errors)
+
+    @pytest.mark.parametrize("style", [None, "", " \n"], ids=["absent", "empty", "whitespace"])
+    def test_validate_project_rejects_selected_template_without_snapshot(self, tmp_path, style):
+        """选定了风格模版的项目必须带展开快照，否则设置页显示已选模版而生成端拿不到风格。"""
+        payload = _project_payload()
+        payload["style_template_id"] = "live_cinematic"
+        if style is None:
+            del payload["style"]
+        else:
+            payload["style"] = style
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert not result.valid
+        assert any("缺少必填字段: style" in error for error in result.errors)
+
+    @pytest.mark.parametrize("template_id", [0, ["live_cinematic"]], ids=["falsy", "truthy"])
+    def test_validate_project_rejects_non_string_template_id(self, tmp_path, template_id):
+        """模版 id 非字符串按类型错误报告，不参与「已选模版须有快照」的判定。"""
+        payload = _project_payload()
+        payload["style_template_id"] = template_id
+        payload["style"] = ""
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert not result.valid
+        assert any("字段类型错误: style_template_id 应为字符串" in error for error in result.errors)
+        assert not any("缺少必填字段: style" in error for error in result.errors)
+
+    def test_validate_project_treats_empty_template_id_as_none(self, tmp_path):
+        """创建接口按真值判定是否展开模版，空串 id 与 null 同义，不要求快照。"""
+        payload = _project_payload()
+        payload["style_template_id"] = ""
+        payload["style"] = ""
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert result.valid
+
+    def test_validate_project_accepts_selected_template_with_snapshot(self, tmp_path):
+        payload = _project_payload()
+        payload["style_template_id"] = "live_cinematic"
+        project_dir = tmp_path / "projects" / "demo"
+        _write_json(project_dir / "project.json", payload)
+
+        result = DataValidator(projects_root=str(tmp_path / "projects")).validate_project("demo")
+
+        assert result.valid
+
     def test_validate_project_reports_missing_and_invalid_fields(self, tmp_path):
         project_dir = tmp_path / "projects" / "demo"
         # title 字段完全缺失才报错;空字符串在新策略下属于合法状态(前端 i18n 兜底)
@@ -637,11 +720,17 @@ class TestDataValidator:
         result = self._drama_episode_with_scene(tmp_path, {})
         assert result.valid
 
-    def test_validate_episode_drama_rejects_non_string_source_text(self, tmp_path):
-        # source_text 非字符串（如数字）→ 校验失败：镜像 Pydantic 的 source_text: str 类型约束
-        result = self._drama_episode_with_scene(tmp_path, {"source_text": 123})
+    @pytest.mark.parametrize("field", ["source_text", "scene_description"])
+    def test_validate_episode_drama_rejects_non_string_text_field(self, tmp_path, field):
+        # 非字符串（如数字）→ 校验失败：镜像 Pydantic 的 str 类型约束
+        result = self._drama_episode_with_scene(tmp_path, {field: 123})
         assert not result.valid
-        assert any("source_text" in error for error in result.errors)
+        assert any(field in error for error in result.errors)
+
+    def test_validate_episode_drama_accepts_scene_description(self, tmp_path):
+        # 转换透传的视觉改编描述为字符串 → 通过（正式分镜 extra=forbid 也接受）
+        result = self._drama_episode_with_scene(tmp_path, {"scene_description": "雨夜天台，阿离背身而立"})
+        assert result.valid
 
     def test_validate_episode_drama_rejects_null_source_text(self, tmp_path):
         # source_text 显式 null → 校验失败：区分「键缺失」（放行、默认空串）与「显式 null」（拒绝），

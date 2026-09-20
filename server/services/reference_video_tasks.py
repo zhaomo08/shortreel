@@ -68,7 +68,7 @@ from lib.thumbnail import extract_video_thumbnail
 from lib.version_manager import VersionManager
 from lib.video_artifact_facts import VideoArtifactCurrencyFacts
 from lib.video_visual_provenance import resolve_video_aspect_ratio
-from lib.visual_artifact_provenance import build_reference_video_artifact_visual_basis
+from lib.visual_artifact_provenance import build_reference_video_artifact_visual_basis, project_basis_style_description
 from server.services.generation_context import AudioLaneRequest, VideoLaneRequest, resolve_generation_context
 from server.services.generation_tasks import get_project_manager
 from server.services.narration_delivery_tasks import (
@@ -111,8 +111,8 @@ def _render_unit_prompt(
 ) -> RenderedUnitPrompt:
     """把 unit 的书写文稿渲染成三段论 backend prompt（见 ``lib.reference_video.prompt_render``）。
 
-    画质/字幕/水印约束由渲染的第三段承担，本路径不追加反向尾词；
-    ``append_video_negative_tail`` 只服务图生视频路径。
+    负向约束由 ``reference_video/unit`` 模版第三段的 ``Avoid`` 行承担，本路径不追加反向尾词；
+    ``storyboard/video`` 模版的 ``Avoid`` 行只服务图生视频路径。
 
     空提示词的*结构校验*已上移到入队守卫点（``TaskSpec.from_request``），两条入队路径
     （WebUI / SDK）在入队时即拒绝空提示词。此处保留一道防御性空检查，因为参考生视频的
@@ -644,6 +644,7 @@ async def execute_reference_video_task(
                     unit=unit,
                     request_assets=staged_request_assets,
                     style=project.get("style"),
+                    style_description=project_basis_style_description(project),
                     aspect_ratio=aspect_ratio,
                 )
             )
@@ -759,6 +760,7 @@ async def execute_reference_video_task(
             visual_basis_digest=visual_basis_digest,
             generate_audio=video.requested_generate_audio,
             poll_timeout_seconds=poll_timeout_seconds,
+            warnings=warnings,
         )
 
         async def _finalize() -> dict[str, Any]:

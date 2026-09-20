@@ -309,6 +309,18 @@ class TestRenameAssetCascade:
         unit = pm_with_assets.load_script("demo", "episode_2.json")["video_units"][0]
         assert unit["text"] == "@[主角甲] 走进 @[场景A]"
 
+    def test_script_without_a_canonical_name_is_left_alone(self, pm_with_assets: ProjectManager) -> None:
+        """文件名不是规范名的 JSON 不属于任何一集，不随资产改名改写。"""
+        pm_with_assets.save_script("demo", _narration_script(), "episode_1.json")
+        scripts_dir = _project_dir(pm_with_assets) / "scripts"
+        orphan = scripts_dir / "custom.json"
+        atomic_write_json(orphan, _narration_script())
+        before = orphan.read_bytes()
+
+        pm_with_assets.rename_asset("demo", "characters", "角色A", "主角甲")
+
+        assert orphan.read_bytes() == before
+
     def test_rename_keeps_reference_integrity(self, pm_with_assets: ProjectManager) -> None:
         from lib.data_validator import DataValidator
 
@@ -972,6 +984,22 @@ class TestDerivativeReferenceCascade:
         ]
         unit = pm_with_assets.load_script("demo", "episode_2.json")["video_units"][0]
         assert unit["text"] == "@[角色A] @[角色A/夜行衣] @[角色A/兽化]"
+
+    def test_derivative_rename_skips_an_unbound_script_without_an_episode_number(
+        self, pm_with_assets: ProjectManager
+    ) -> None:
+        """衍生改名与本体改名同一口径：锁内认不出归属的无集号剧本跳过，不中断整次改名。"""
+        self._register(pm_with_assets, "劲装")
+        pm_with_assets.save_script("demo", self._script_with_derivative_references(), "episode_1.json")
+        scripts_dir = _project_dir(pm_with_assets) / "scripts"
+        unbound = scripts_dir / "custom.json"
+        atomic_write_json(unbound, self._script_with_derivative_references())
+        before = unbound.read_bytes()
+
+        pm_with_assets.rename_asset_derivative("character", "demo", "角色A", "劲装", "夜行衣")
+
+        assert _load_script(pm_with_assets)["segments"][0]["characters_in_segment"] == ["角色A", "角色A/夜行衣"]
+        assert unbound.read_bytes() == before
 
     def test_derivative_rename_keeps_the_description(self, pm_with_assets: ProjectManager) -> None:
         self._register(pm_with_assets, "劲装")

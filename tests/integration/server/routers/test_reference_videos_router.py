@@ -109,6 +109,17 @@ def test_add_unit_creates_minimal_entry(reference_videos_client: TestClient):
     assert payload["unit"]["text"] == "镜头1：@张三 推门"
 
 
+def test_added_unit_written_by_the_user_is_not_pending_authoring(reference_videos_client: TestClient):
+    resp = reference_videos_client.post(
+        "/api/v1/projects/demo/reference-videos/episodes/1/units",
+        json={"prompt": "镜头1：@张三 推门", "duration_seconds": 3},
+    )
+    assert resp.status_code == 201, resp.text
+
+    units = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units").json()["units"]
+    assert [unit.get("pending_authoring", False) for unit in units] == [False]
+
+
 def test_add_unit_refuses_a_blank_body(reference_videos_client: TestClient):
     """正文是单元的唯一内容真相：空正文的单元不可执行，创建时即以 needs_replan 拒绝。"""
     response = reference_videos_client.post(
@@ -356,6 +367,44 @@ def test_patch_unit_derives_nfc_reference_for_nfd_registered_name(reference_vide
     )
     assert resp.status_code == 200, resp.text
     assert _derived_references(reference_videos_client, resp.json()["unit"]) == [("character", name_nfc)]
+
+
+def _seed_unit_with_source_text(reference_videos_client: TestClient) -> str:
+    from server.routers import reference_videos as router_mod
+
+    uid = _seed_unit(reference_videos_client)
+    pm = router_mod.get_project_manager()
+    script = pm.load_script("demo", "episode_1.json")
+    script["video_units"][0]["source_text"] = "张三推开了门。"
+    pm.save_script("demo", script, "episode_1.json")
+    return uid
+
+
+def test_unit_responses_carry_source_text(reference_videos_client: TestClient):
+    uid = _seed_unit_with_source_text(reference_videos_client)
+
+    listed = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units")
+    patched = reference_videos_client.patch(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}",
+        json={"prompt": "镜头1：@张三 关门"},
+    )
+
+    assert listed.json()["units"][0]["source_text"] == "张三推开了门。"
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["unit"]["source_text"] == "张三推开了门。"
+
+
+def test_patch_unit_rejects_source_text(reference_videos_client: TestClient):
+    uid = _seed_unit_with_source_text(reference_videos_client)
+
+    resp = reference_videos_client.patch(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}",
+        json={"source_text": "改写的原文"},
+    )
+
+    assert resp.status_code == 422
+    listed = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units")
+    assert listed.json()["units"][0]["source_text"] == "张三推开了门。"
 
 
 def test_patch_unknown_unit_404(reference_videos_client: TestClient):

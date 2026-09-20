@@ -342,6 +342,21 @@ class TestAdScriptModels:
                 }
             )
 
+    def test_pending_ad_shot_may_omit_prompts(self):
+        """待编写分镜（手动新增）不带提示词字段也能校验通过；非待编写分镜仍须两侧齐备。"""
+        base = {"shot_id": "E1S02", "section": "demo", "duration_seconds": 4, "voiceover_text": "口播"}
+
+        pending = AdShot.model_validate({**base, "pending_authoring": True})
+
+        assert (pending.image_prompt, pending.video_prompt) == (None, None)
+        with pytest.raises(ValidationError):
+            AdShot.model_validate(base)
+
+    def test_ad_response_schema_still_requires_prompts(self):
+        required = AdEpisodeScript.model_json_schema()["$defs"]["AdShot"]["required"]
+
+        assert {"image_prompt", "video_prompt"} <= set(required)
+
     def test_ad_episode_script_builds_with_shots(self):
         script = AdEpisodeScript(
             title="新品速干杯",
@@ -576,7 +591,7 @@ class TestLLMSchemaExclusion:
         from lib.script_models import NarrationEpisodeScript
 
         keys = self._all_keys(NarrationEpisodeScript.model_json_schema())
-        for forbidden in ("note", "generated_assets", "end_frame_image"):
+        for forbidden in ("note", "generated_assets", "end_frame_image", "pending_authoring"):
             assert forbidden not in keys, f"{forbidden} 不应出现在 LLM schema 中"
         # 顶层 duration_seconds 由 caller 重算
         assert "duration_seconds" not in NarrationEpisodeScript.model_json_schema()["properties"]
@@ -585,7 +600,7 @@ class TestLLMSchemaExclusion:
         from lib.script_models import DramaEpisodeScript
 
         keys = self._all_keys(DramaEpisodeScript.model_json_schema())
-        for forbidden in ("note", "generated_assets", "end_frame_image"):
+        for forbidden in ("note", "generated_assets", "end_frame_image", "pending_authoring"):
             assert forbidden not in keys
         assert "duration_seconds" not in DramaEpisodeScript.model_json_schema()["properties"]
         # utterances 是 LLM 可见的一等字段（drama 口播序列的落点），取代旧 voiceover
@@ -596,14 +611,14 @@ class TestLLMSchemaExclusion:
         from lib.script_models import AdEpisodeScript
 
         keys = self._all_keys(AdEpisodeScript.model_json_schema())
-        for forbidden in ("note", "generated_assets", "end_frame_image"):
+        for forbidden in ("note", "generated_assets", "end_frame_image", "pending_authoring"):
             assert forbidden not in keys
 
     def test_reference_video_schema_excludes_runtime_fields(self):
         from lib.script_models import ReferenceVideoScript
 
         keys = self._all_keys(ReferenceVideoScript.model_json_schema())
-        for forbidden in ("note", "generated_assets", "duration_override"):
+        for forbidden in ("note", "generated_assets", "duration_override", "pending_authoring"):
             assert forbidden not in keys
         assert "duration_seconds" not in ReferenceVideoScript.model_json_schema()["properties"]
 

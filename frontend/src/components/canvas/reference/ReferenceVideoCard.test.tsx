@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ReferenceVideoCard } from "./ReferenceVideoCard";
 import { useProjectsStore } from "@/stores/projects-store";
@@ -83,6 +83,20 @@ describe("ReferenceVideoCard", () => {
     expect(ta.value).toBe("line1\nline2");
   });
 
+  it("shows the unit source text read-only beside the editor", () => {
+    render(<ControlledCard unit={mkUnit({ source_text: "张三推开了门。" })} />);
+
+    const region = screen.getByRole("region", { name: "对应原文" });
+    expect(within(region).getByText("张三推开了门。")).toBeInTheDocument();
+    expect(within(region).queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
+  it("shows an empty source text state for manually added units", () => {
+    render(<ControlledCard unit={mkUnit()} />);
+
+    expect(within(screen.getByRole("region", { name: "对应原文" })).getByText("（无对应原文）")).toBeInTheDocument();
+  });
+
   it("highlights inline speech marks in the editor overlay", () => {
     // 高亮层与预览（ScriptHighlight）同口径：记号原文逐字保留，只加底色与说话人 title。
     const unit = mkUnit({ text: "门开了。@[张三]：{我来了}", duration_seconds: 3 });
@@ -93,6 +107,19 @@ describe("ReferenceVideoCard", () => {
     render(<ControlledCard unit={mkUnit({ text: "夜色渐深。{很久以前……}" })} />);
     const voiceover = document.querySelector('[title="画外音"]');
     expect(voiceover?.textContent).toBe("{很久以前……}");
+  });
+
+  it("shows the pending-authoring hint until authoring clears the flag", () => {
+    const { rerender } = render(<ControlledCard unit={mkUnit({ text: "", pending_authoring: true })} />);
+    expect(screen.getByText(/^待编写/)).toBeInTheDocument();
+
+    rerender(<ControlledCard unit={mkUnit({ text: "", pending_authoring: false })} />);
+    expect(screen.queryByText(/^待编写/)).not.toBeInTheDocument();
+  });
+
+  it("does not show the pending-authoring hint for units without the flag, even with an empty body", () => {
+    render(<ControlledCard unit={mkUnit({ text: "" })} />);
+    expect(screen.queryByText(/^待编写/)).not.toBeInTheDocument();
   });
 
   it("fires onChange with the new prompt text on every edit", async () => {

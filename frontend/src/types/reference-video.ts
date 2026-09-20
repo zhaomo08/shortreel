@@ -67,6 +67,10 @@ export interface ReferenceVideoUnit {
   generated_assets: UnitGeneratedAssets;
   /** Problem shell or mixed-speech marker; generation is blocked until repaired. */
   needs_replan?: boolean;
+  /** Pending authoring: the unit's body has not been written by prompt authoring yet. Read-only. */
+  pending_authoring?: boolean;
+  /** Source text carried over from the script plan on content confirmation. Read-only; empty or absent for manually added units. */
+  source_text?: string;
 }
 
 export interface ReferenceRequestOptions {
