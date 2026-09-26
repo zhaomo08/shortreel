@@ -11,12 +11,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from lib.project_migrations.runner import migrate_project_dir
-from lib.project_migrations.v7_to_v8_artifact_manifest import migrate_v7_to_v8
+from lib.project.project_migrations.runner import migrate_project_dir
+from lib.project.project_migrations.v7_to_v8_artifact_manifest import migrate_v7_to_v8
 from server.auth import CurrentUserInfo, get_current_user
 from server.error_handlers import register_error_handlers
 from tests.auth_deps import AUTH_DEPENDENCIES
-from tests.fakes import fake_reference_request_projector
+from tests.factories import make_video_request_facts
+from tests.fakes import fake_reference_request_facts, fake_reference_request_projector
 from tests.speech_contract_cases import SPEECH_CONTRACT_CASES, SpeechContractCase
 
 
@@ -70,10 +71,10 @@ def reference_videos_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     migrate_project_dir(proj_dir)
 
     # Patch project_manager 的根目录
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
-    custom_pm = ProjectManager(projects_root)
+    custom_pm = ProjectManager(tmp_path)
     monkeypatch.setattr(router_mod, "get_project_manager", lambda: custom_pm)
     monkeypatch.setattr(router_mod, "tts_task_in_progress", AsyncMock(return_value=False))
     # 公共 request projection 的 resolver 需要 DB；路由测试注入 in-process 能力适配器。
@@ -89,7 +90,7 @@ def reference_videos_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_list_units_empty(reference_videos_client: TestClient):
     resp = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units")
     assert resp.status_code == 200
-    assert resp.json() == {"units": []}
+    assert resp.json() == {"units": [], "unit_capabilities": {}}
 
 
 def test_list_units_404_for_unknown_project(reference_videos_client: TestClient):
@@ -130,7 +131,8 @@ def test_add_unit_refuses_a_blank_body(reference_videos_client: TestClient):
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["problems"][0]["code"] == "needs_replan"
     assert reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units").json() == {
-        "units": []
+        "units": [],
+        "unit_capabilities": {},
     }
 
 
@@ -157,10 +159,14 @@ def test_patch_unit_rejects_a_stored_reference_list(reference_videos_client: Tes
 
 
 def test_add_unit_without_duration_falls_back_to_model_slot(
-    reference_videos_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    reference_videos_client: TestClient, set_video_request_facts
 ):
     """请求不给时长 → 取项目能力解析出的档位首项（与执行层解析申请秒数的回退序同源）。"""
-    _patch_supported_durations(monkeypatch, [6, 9])
+    set_video_request_facts(
+        make_video_request_facts(
+            route="reference_video", generation_type="r2v", supported_durations=(6, 9), allowed_durations=(6, 9)
+        )
+    )
     resp = reference_videos_client.post(
         "/api/v1/projects/demo/reference-videos/episodes/1/units",
         json={"prompt": "镜头1：@张三 推门"},
@@ -169,25 +175,35 @@ def test_add_unit_without_duration_falls_back_to_model_slot(
     assert resp.json()["unit"]["duration_seconds"] == 6
 
 
-def test_add_unit_derives_references_from_text_before_selecting_duration_bucket(
-    reference_videos_client: TestClient, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("prompt", "bucket", "expected"),
+    [
+        ("镜头1：@[张三] 推门", "r2v", 9),
+        ("镜头1：@[李四] 回头", "i2v", 5),
+        ("镜头1：空镜", "i2v", 5),
+    ],
+)
+def test_add_unit_default_duration_follows_the_bucket_of_its_available_images(
+    reference_videos_client: TestClient,
+    tmp_path: Path,
+    set_video_request_facts,
+    prompt: str,
+    bucket: str,
+    expected: int,
 ):
-    """默认时长按正文派生出的参考图定桶：正文提到已登记资产即走 r2v 档。"""
-    from server.routers import reference_videos as router_mod
-    from server.services.reference_video_tasks import ProjectDurationContext
-
-    ctx = ProjectDurationContext(supported_durations=(6, 9), resolution=None, provider_id="", model_name=None)
-    resolve_context = AsyncMock(return_value=ctx)
-    monkeypatch.setattr(router_mod, "resolve_project_duration_context", resolve_context)
+    """默认时长按可用参考图定桶，与同一响应的逐单元结论同桶：登记了却缺图的引用落 i2v 档。"""
+    set_video_request_facts(_bucket_facts())
+    _register_character_without_sheet(tmp_path, "李四")
 
     response = reference_videos_client.post(
-        "/api/v1/projects/demo/reference-videos/episodes/1/units",
-        json={"prompt": "镜头1：@[张三] 推门"},
+        "/api/v1/projects/demo/reference-videos/episodes/1/units", json={"prompt": prompt}
     )
 
     assert response.status_code == 201, response.text
-    assert response.json()["unit"]["duration_seconds"] == 6
-    assert resolve_context.await_args.kwargs["generation_type"] == "r2v"
+    body = response.json()
+    assert body["unit_capability"]["hydrated_capability"] == bucket
+    assert body["unit"]["duration_seconds"] == expected
+    assert expected in body["unit_capability"]["allowed_durations"]
 
 
 @pytest.mark.parametrize("duration_seconds", [0, -1])
@@ -209,7 +225,8 @@ def test_add_unit_atomically_rejects_mixed_speech(reference_videos_client: TestC
     assert response.status_code == 409
     assert response.json()["detail"]["problems"][0]["code"] == "mixed_speech"
     assert reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units").json() == {
-        "units": []
+        "units": [],
+        "unit_capabilities": {},
     }
 
 
@@ -224,7 +241,7 @@ def _seed_unit(reference_videos_client: TestClient) -> str:
 
 def _derived_references(reference_videos_client: TestClient, unit: dict[str, Any]) -> list[tuple[str, str]]:
     """执行期会用到的参考图引用：正文的唯一派生出口，不落盘。"""
-    from lib.reference_video.request_projection import unit_reference_declarations
+    from lib.script.reference_video.request_projection import unit_reference_declarations
     from server.routers import reference_videos as router_mod
 
     project = router_mod.get_project_manager().load_project("demo")
@@ -527,7 +544,7 @@ def test_generate_unit_use_tts_returns_the_current_cross_tier_quote_before_enque
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from server.routers import reference_videos as router_mod
-    from server.services.cost_estimation import VideoRequestQuote
+    from server.services.admission.cost_estimation import VideoRequestQuote
 
     unit_id = _seed_unit(reference_videos_client)
     _patch_supported_durations(monkeypatch, [4, 8, 12])
@@ -630,7 +647,7 @@ def test_generate_unit_bucket_capability_error_returns_400(
 ):
     """公共投影返回 r2v 能力 blocker 时提交入口不入队。"""
     from lib.i18n import _ as i18n_message
-    from lib.reference_video.request_projection import ProjectionProblem
+    from lib.script.reference_video.request_projection import ProjectionProblem
 
     uid = _seed_unit(reference_videos_client)
     enqueued: list[dict] = []
@@ -779,21 +796,8 @@ def _projection_with_durations(durations: list[int]):
 
 def _patch_supported_durations(monkeypatch: pytest.MonkeyPatch, durations: list[int]) -> None:
     from server.routers import reference_videos as router_mod
-    from server.services.reference_video_tasks import ProjectDurationContext
 
     monkeypatch.setattr(router_mod, "project_reference_unit_request", _projection_with_durations(durations))
-    monkeypatch.setattr(
-        router_mod,
-        "resolve_project_duration_context",
-        AsyncMock(
-            return_value=ProjectDurationContext(
-                supported_durations=tuple(durations),
-                resolution="1080p",
-                provider_id="fake",
-                model_name="fake-model",
-            )
-        ),
-    )
 
 
 def _precheck(reference_videos_client: TestClient, unit_id: str):
@@ -857,7 +861,7 @@ def test_precheck_prices_the_latest_tts_tier_against_the_selected_visual(
     expected_amount: float,
 ) -> None:
     from server.routers import reference_videos as router_mod
-    from server.services.cost_estimation import VideoRequestQuote
+    from server.services.admission.cost_estimation import VideoRequestQuote
 
     unit_id = _seed_unit(reference_videos_client)
     _patch_supported_durations(monkeypatch, [4, 8, 12])
@@ -939,7 +943,7 @@ def test_precheck_use_tts_while_regenerating_returns_canonical_problem(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An active explicit regeneration shadows the old formal audio for Web requests."""
-    from lib.reference_video.request_projection import ProjectionProblem
+    from lib.script.reference_video.request_projection import ProjectionProblem
     from server.routers import reference_videos as router_mod
 
     unit_id = _seed_unit(reference_videos_client)
@@ -993,8 +997,8 @@ def test_precheck_uses_actual_tts_duration_as_floor(
     uid = created.json()["unit"]["unit_id"]  # 剧本 3s，实际旁白 9.5s
     _patch_supported_durations(monkeypatch, [4, 8, 12])
 
-    from lib.artifact_manifest import ArtifactComparison, ArtifactStatus
-    from lib.narration_delivery import NarrationAudioEvidence, TtsSynthesisSettings, prepare_narration_delivery
+    from lib.artifacts.artifact_manifest import ArtifactComparison, ArtifactStatus
+    from lib.speech.narration_delivery import NarrationAudioEvidence, TtsSynthesisSettings, prepare_narration_delivery
 
     async def _project_with_current_tts(**kwargs):
         preparation = prepare_narration_delivery(
@@ -1018,7 +1022,7 @@ def test_precheck_uses_actual_tts_duration_as_floor(
         )
         return await _projection_with_durations([4, 8, 12])(**kwargs)
 
-    from lib.speech_composition import admit_script_unit
+    from lib.speech.speech_composition import admit_script_unit
     from server.routers import reference_videos as router_mod
 
     async def _options_identity(**kwargs):
@@ -1318,17 +1322,17 @@ BATCH_ENDPOINT = "/api/v1/projects/demo/reference-videos/episodes/1/units/genera
 def _record_finished_clip(unit_id: str) -> None:
     """把一个 unit 的成片落成生产里的完整形态：落盘 + 剧本登记 + 清单登记冻结依据。"""
 
-    from lib.artifact_manifest import (
+    from lib.artifacts.artifact_manifest import (
         ArtifactKey,
         ArtifactManifest,
         ProjectArtifactManifestAdapter,
         compose_video_artifact_basis,
     )
-    from lib.project_manager import ProjectManager
-    from lib.reference_video.request_projection import resolve_reference_assets
-    from lib.speech_artifact_provenance import build_video_duration_basis, build_video_speech_basis
-    from lib.speech_composition import admit_script_unit
-    from lib.visual_artifact_provenance import build_reference_video_artifact_visual_basis
+    from lib.artifacts.visual_artifact_provenance import build_reference_video_artifact_visual_basis
+    from lib.project.project_manager import ProjectManager
+    from lib.script.reference_video.request_projection import resolve_reference_assets
+    from lib.speech.speech_artifact_provenance import build_video_duration_basis, build_video_speech_basis
+    from lib.speech.speech_composition import admit_script_unit
     from server.routers import reference_videos as router_mod
 
     pm: ProjectManager = router_mod.get_project_manager()
@@ -1382,9 +1386,9 @@ def _patch_batch_admission(
     ``fail_enqueue_after`` 让第 N 次之后的入队抛错，用来复现顺序入队中途中断。
     """
 
-    from lib.reference_video.request_projection import ReferenceRequestOptions
-    from server.services import video_batch_admission as admission_mod
-    from server.services.cost_estimation import VideoRequestQuote
+    from lib.script.reference_video.request_projection import ReferenceRequestOptions
+    from server.services.admission import video_batch_admission as admission_mod
+    from server.services.admission.cost_estimation import VideoRequestQuote
 
     async def _no_active(**_kwargs):
         return list(active_tasks or [])
@@ -1420,7 +1424,7 @@ def _patch_batch_admission(
         enqueued.append(kwargs)
         return {"task_id": f"task-{len(enqueued)}", "deduped": False}
 
-    monkeypatch.setattr("lib.generation_queue_client.enqueue_task_only", _enqueue_task_only)
+    monkeypatch.setattr("lib.generation.generation_queue_client.enqueue_task_only", _enqueue_task_only)
     return enqueued
 
 
@@ -1643,7 +1647,7 @@ def test_generate_batch_repeating_an_admitted_request_reports_dedup(
         created.append(str(kwargs["resource_id"]))
         return {"task_id": "task-1", "deduped": deduped}
 
-    monkeypatch.setattr("lib.generation_queue_client.enqueue_task_only", _enqueue_task_only)
+    monkeypatch.setattr("lib.generation.generation_queue_client.enqueue_task_only", _enqueue_task_only)
 
     first = reference_videos_client.post(BATCH_ENDPOINT, json={"narration_delivery": "post_production"})
     second = reference_videos_client.post(BATCH_ENDPOINT, json={"narration_delivery": "post_production"})
@@ -1662,7 +1666,7 @@ def test_generate_batch_post_production_does_not_consult_tts(
     _patch_batch_admission(monkeypatch, durations=[3, 6, 9])
     probed: list[object] = []
 
-    from server.services import video_batch_admission as admission_mod
+    from server.services.admission import video_batch_admission as admission_mod
 
     async def _tts(**kwargs):
         probed.append(kwargs)
@@ -1684,7 +1688,7 @@ def test_generate_batch_use_tts_resolves_every_target_against_current_tts(
     unit_id = _seed_unit(reference_videos_client)
     enqueued = _patch_batch_admission(monkeypatch, durations=[3, 6, 9])
 
-    from server.services import video_batch_admission as admission_mod
+    from server.services.admission import video_batch_admission as admission_mod
 
     probed: list[list[str]] = []
     deliveries: list[str] = []
@@ -1753,7 +1757,7 @@ def test_generate_batch_regenerates_a_unit_whose_recorded_clip_is_gone(
     second = _seed_second_unit(reference_videos_client)
     enqueued = _patch_batch_admission(monkeypatch, durations=[3, 6, 9])
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     pm: ProjectManager = router_mod.get_project_manager()
@@ -1778,8 +1782,8 @@ def test_generate_batch_creates_zero_tasks_when_one_artifact_state_is_unreadable
 ) -> None:
     """产物状态读不出的 unit 属于这次请求：它带着自己的问题进准入，整批停下，健康的 unit 不计费。"""
 
-    from lib.artifact_manifest import ArtifactBlocker, ArtifactStatus
-    from lib.generation_result import GenerationCandidate, GenerationTargetState
+    from lib.artifacts.artifact_manifest import ArtifactBlocker, ArtifactStatus
+    from lib.generation.generation_result import GenerationCandidate, GenerationTargetState
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1818,7 +1822,7 @@ def test_generate_batch_creates_zero_tasks_when_one_artifact_state_is_unreadable
 def test_reference_unit_task_spec_rejects_a_non_string_text() -> None:
     """脏值正文报可入队性问题，而不是在读正文时把整批打成 500。"""
 
-    from server.services.video_batch_admission import reference_unit_task_spec
+    from server.services.admission.video_batch_admission import reference_unit_task_spec
 
     with pytest.raises(ValueError, match="text 必须是字符串"):
         reference_unit_task_spec({"unit_id": "E1U1", "text": 42}, "scripts/episode_1.json")
@@ -1829,7 +1833,7 @@ def test_generate_batch_reports_malformed_units_instead_of_shrinking_the_batch(
 ) -> None:
     """缺 id、重复 id、脏 duration 的 unit 都进结论：把它们丢出目标集合，健康的 unit 会独自计费。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1868,7 +1872,7 @@ def test_generate_batch_explicit_ids_ignore_unrelated_malformed_units(
 ) -> None:
     """点名重做的目标集合由调用方给定：剧本别处的坏条目不参与判定，不否决这次点名。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1896,7 +1900,7 @@ def test_generate_batch_reports_non_object_units_instead_of_dropping_them(
 ) -> None:
     """非对象条目同样成不了目标：它被记名报告，健康的 unit 不会独自入队计费。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1925,7 +1929,7 @@ def test_generate_batch_reports_a_non_scalar_unit_id(
 ) -> None:
     """unit_id 是对象/数组时在入队前拒收：它能混过字符串化进队列，执行期比对原值才找不到 unit。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1955,7 +1959,7 @@ def test_generate_batch_reports_a_duplicated_unit_id(
 ) -> None:
     """同一个 unit_id 出现两次时无从判定要做哪一条：整批拒收，不默认拿第一份去计费。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -1994,7 +1998,7 @@ def test_generate_batch_reports_a_numeric_unit_id(
 ) -> None:
     """数字 unit_id 同样在入队前拒收：字符串化后执行期按原值比对找不到 unit。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -2023,7 +2027,7 @@ def test_a_duplicate_marker_never_shadows_a_requested_id(
 ) -> None:
     """点名了一个剧本里没有的名字时，重复条目的诊断名不能与它撞上：两条结论各占一行。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -2055,7 +2059,7 @@ def test_a_duplicate_marker_never_shadows_a_real_unit_id(
 ) -> None:
     """重复条目按 `id#序号` 记名，剧本里恰好有同名 unit 时另起一个名字。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -2086,7 +2090,7 @@ def test_generate_batch_refuses_a_path_like_unit_id_before_enqueue(
 ) -> None:
     """unit_id 带路径片段的条目在建任务之前拒收：交给 worker 拼路径时才拒，健康的兄弟已经在跑并计费。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     first = _seed_unit(reference_videos_client)
@@ -2114,7 +2118,7 @@ def test_generate_batch_reports_a_non_list_video_units_container(
 ) -> None:
     """video_units 不是数组时报成结构问题：遍历它会把请求打成 500，假值又会被当作空批次报成通过。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     _seed_unit(reference_videos_client)
@@ -2152,7 +2156,7 @@ def test_generate_batch_reports_a_falsy_video_units_container(
 ) -> None:
     """video_units 是假值（如 false）时同样报成结构问题，不被当作空批次报成通过。"""
 
-    from lib.project_manager import ProjectManager
+    from lib.project.project_manager import ProjectManager
     from server.routers import reference_videos as router_mod
 
     _seed_unit(reference_videos_client)
@@ -2172,3 +2176,205 @@ def test_generate_batch_reports_a_falsy_video_units_container(
     assert enqueued == []
     codes = {item["unit_id"]: [problem["code"] for problem in item["problems"]] for item in body["units"]}
     assert codes["video_units"] == ["generation_unit_request_invalid"]
+
+
+def test_prompt_preview_renders_draft_with_projected_references_without_saving(
+    reference_videos_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    from server.routers import reference_videos as router_mod
+
+    monkeypatch.setattr(
+        router_mod,
+        "project_reference_unit_request",
+        fake_reference_request_projector(durations=(3, 6, 9), max_reference_images=1),
+    )
+    uid = _seed_unit(reference_videos_client)
+    url = f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}"
+    draft = "@[酒馆] 门口，@[张三] 推开门。"
+    response = reference_videos_client.post(f"{url}/prompt-preview", json={"prompt": draft})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["unavailable"] is None
+    assert "<酒馆>@图片1" in body["text"]
+    assert "@图片2" not in body["text"]
+    assert "<酒馆> 门口，<张三> 推开门。" in body["text"]
+    assert body["references"] == [{"type": "scene", "name": "酒馆", "path": "scenes/酒馆.png"}]
+    assert any("上限 1" in warning for warning in body["warnings"])
+    saved = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units").json()
+    assert saved["units"][0]["text"] == "镜头1：@张三 推门"
+
+    reference_videos_client.patch(url, json={"prompt": draft})
+    precheck = reference_videos_client.get(f"{url}/duration-precheck").json()
+    assert precheck["hydrated_capability"] == "r2v"
+    assert precheck["problems"][0]["code"] == "reference_images_clamped"
+    assert precheck["problems"][0]["message"] in body["warnings"]
+
+
+def test_prompt_preview_fails_closed_when_capabilities_cannot_resolve(
+    reference_videos_client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    from server.routers import reference_videos as router_mod
+
+    async def _unavailable_request_facts(generation_type):
+        raise RuntimeError("provider configuration unavailable")
+
+    monkeypatch.setattr(
+        router_mod,
+        "project_reference_unit_request",
+        fake_reference_request_projector(request_facts=_unavailable_request_facts),
+    )
+    uid = _seed_unit(reference_videos_client)
+    response = reference_videos_client.post(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}/prompt-preview",
+        json={"prompt": "@[张三] 推门"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["text"] is None
+    assert body["references"] == []
+    assert body["unavailable"]
+    assert body["unavailable"] != "reference_capability_unavailable"
+    assert body["warnings"] == []
+
+
+@pytest.mark.parametrize("prompt", ["", "   "])
+def test_prompt_preview_empty_draft_does_not_fall_back_to_saved_text(reference_videos_client: TestClient, prompt: str):
+    uid = _seed_unit(reference_videos_client)
+    response = reference_videos_client.post(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}/prompt-preview", json={"prompt": prompt}
+    )
+    assert response.status_code == 200
+    assert response.json()["text"] is None
+    assert response.json()["unavailable"] == "该单元还没有填写正文"
+
+
+@pytest.mark.parametrize("suffix", ["/episodes/2/units/E1U1", "/episodes/1/units/missing"])
+def test_prompt_preview_unknown_target_is_404(reference_videos_client: TestClient, suffix: str):
+    response = reference_videos_client.post(
+        f"/api/v1/projects/demo/reference-videos{suffix}/prompt-preview", json={"prompt": "正文"}
+    )
+    assert response.status_code == 404
+
+
+def test_prompt_preview_requires_authentication(reference_videos_client: TestClient):
+    cast(FastAPI, reference_videos_client.app).dependency_overrides.pop(get_current_user)
+    response = reference_videos_client.post(
+        "/api/v1/projects/demo/reference-videos/episodes/1/units/E1U1/prompt-preview", json={"prompt": "正文"}
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("audio_exists", [False, True])
+def test_prompt_preview_binds_only_available_audio_from_projected_voice_capabilities(
+    reference_videos_client: TestClient, monkeypatch: pytest.MonkeyPatch, audio_exists: bool
+):
+    from server.routers import reference_videos as router_mod
+
+    monkeypatch.setattr(
+        router_mod,
+        "project_reference_unit_request",
+        fake_reference_request_projector(
+            request_facts=fake_reference_request_facts(
+                durations=(3,),
+                voice_consistency="native",
+                max_reference_audio_count=1,
+                reference_audio_per_image=True,
+            )
+        ),
+    )
+    pm = router_mod.get_project_manager()
+    project = pm.load_project("demo")
+    project["characters"]["张三"]["reference_audio"] = "characters/refs_audio/张三.mp3"
+    project["characters"]["张三"]["voice_style"] = "低沉"
+    project["style_description"] = "暖色电影质感"
+    pm.save_project("demo", project)
+    if audio_exists:
+        audio = pm.get_project_path("demo") / "characters/refs_audio/张三.mp3"
+        audio.parent.mkdir()
+        audio.write_bytes(b"audio")
+    uid = _seed_unit(reference_videos_client)
+    response = reference_videos_client.post(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{uid}/prompt-preview",
+        json={"prompt": "@[张三] 推门。\n@[张三]：{进来吧}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "<张三>@图片1" in body["text"]
+    assert "<张三>说 {进来吧}" in body["text"]
+    assert "声音特征：低沉" in body["text"]
+    assert "暖色电影质感" in body["text"]
+    assert ("@音频1" in body["text"]) is audio_exists
+    assert any("音频当前不可用" in warning for warning in body["warnings"]) is not audio_exists
+
+
+def _bucket_facts() -> dict[str, Any]:
+    """两桶配置不同的视频请求事实：读侧逐单元档位必须随所落的桶变化。"""
+    return {
+        "i2v": make_video_request_facts(
+            route="reference_video", generation_type="i2v", supported_durations=(5, 10), allowed_durations=(5, 10)
+        ),
+        "r2v": make_video_request_facts(
+            route="reference_video", generation_type="r2v", supported_durations=(3, 6, 9), allowed_durations=(9,)
+        ),
+    }
+
+
+def _register_character_without_sheet(tmp_path: Path, name: str) -> None:
+    project_json = tmp_path / "projects" / "demo" / "project.json"
+    project = json.loads(project_json.read_text(encoding="utf-8"))
+    project["characters"][name] = {"description": "x"}
+    project_json.write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
+
+
+def test_list_units_reports_the_server_side_bucket_of_each_unit(
+    reference_videos_client: TestClient, tmp_path: Path, set_video_request_facts
+):
+    """画布按服务端逐单元结果取档：有可用图落 r2v，登记了却缺图的落 i2v 并点名不可用引用。"""
+    set_video_request_facts(_bucket_facts())
+    _register_character_without_sheet(tmp_path, "李四")
+    unit_ids = [
+        reference_videos_client.post(
+            "/api/v1/projects/demo/reference-videos/episodes/1/units",
+            json={"prompt": prompt, "duration_seconds": 3},
+        ).json()["unit"]["unit_id"]
+        for prompt in ("镜头1：@[张三] 推门", "镜头2：@[李四] 回头", "镜头3：空镜")
+    ]
+
+    body = reference_videos_client.get("/api/v1/projects/demo/reference-videos/episodes/1/units").json()
+
+    assert [unit["unit_id"] for unit in body["units"]] == unit_ids
+    with_image, missing_image, no_reference = (body["unit_capabilities"][unit_id] for unit_id in unit_ids)
+    assert (with_image["declared_capability"], with_image["hydrated_capability"]) == ("r2v", "r2v")
+    assert with_image["allowed_durations"] == [9]
+    assert with_image["problems"] == []
+    assert (missing_image["declared_capability"], missing_image["hydrated_capability"]) == ("r2v", "i2v")
+    assert missing_image["allowed_durations"] == [5, 10]
+    assert missing_image["unavailable_references"] == [{"type": "character", "name": "李四"}]
+    assert [problem["code"] for problem in missing_image["problems"]] == [
+        "reference_asset_missing",
+        "reference_capability_changed",
+    ]
+    assert (no_reference["declared_capability"], no_reference["hydrated_capability"]) == ("i2v", "i2v")
+    assert no_reference["allowed_durations"] == [5, 10]
+    assert no_reference["problem"] is None
+
+
+def test_unit_writes_return_the_refreshed_capability(reference_videos_client: TestClient, set_video_request_facts):
+    """新建与改正文的响应带回该单元的最新定桶结论，画布无需重拉列表即可换档位。"""
+    set_video_request_facts(_bucket_facts())
+    created = reference_videos_client.post(
+        "/api/v1/projects/demo/reference-videos/episodes/1/units",
+        json={"prompt": "镜头1：空镜", "duration_seconds": 5},
+    ).json()
+    assert created["unit_capability"]["hydrated_capability"] == "i2v"
+    assert created["unit_capability"]["allowed_durations"] == [5, 10]
+
+    patched = reference_videos_client.patch(
+        f"/api/v1/projects/demo/reference-videos/episodes/1/units/{created['unit']['unit_id']}",
+        json={"prompt": "镜头1：@[张三] 推门"},
+    ).json()
+
+    assert patched["unit"]["text"] == "镜头1：@[张三] 推门"
+    assert patched["unit_capability"]["hydrated_capability"] == "r2v"
+    assert patched["unit_capability"]["allowed_durations"] == [9]

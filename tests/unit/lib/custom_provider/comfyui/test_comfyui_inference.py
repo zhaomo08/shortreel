@@ -29,6 +29,8 @@ SAMPLES = {
     "two_stage_sdxl_svd": "video",
     "kijai_wanvideo_flf2v": "video",
     "wan_vace_flf2v": "video",
+    "minimax_h3_ref2v": "video",
+    "minimax_h3_i2v": "video",
     "flux_kontext_edit": "image",
     "qwen_image_edit_2509": "image",
     "sdxl_batch_t2i": "image",
@@ -300,6 +302,32 @@ def test_reference_images_record_the_entry_they_feed_in_list_order():
     assert [t["consumer"]["input"] for t in targets] == ["image1", "image2"]
 
 
+def test_autogrow_reference_slots_record_the_entry_they_feed():
+    """海螺 H3 的参考图是可增生的 ``ref_images.ref_image_N``，逐槽记下它接到哪个口。
+
+    ``consumer`` 只由推断得出、不随绑定保存下来，故这条断言守的是「重导入一份已用过的 workflow
+    时仍推得出它」：推不出来，张数少于槽位时就只能重复填充最后一张。
+    """
+    result = infer_sample("minimax_h3_ref2v")
+    targets = [c.target for c in result.keys["reference_images"].candidates if c.selected]
+    assert [t["node"] for t in targets] == [str(node) for node in range(401, 410)]
+    assert [t["consumer"]["input"] for t in targets] == [f"ref_images.ref_image_{slot}" for slot in range(9)]
+
+
+def test_minimax_h3_first_and_last_frames_are_told_apart_by_their_named_ports():
+    """海螺 H3 图生视频的首尾帧入口叫 ``first_frame`` / ``last_frame``，读图节点不带标题标记也认得出。
+
+    首尾帧条目不记 ``consumer``，接到哪个口只体现在连线追溯信号上；这两张图也不会被当成参考图。
+    """
+    result = infer_sample("minimax_h3_i2v")
+    for key, node, port in (("start_image", "401", "first_frame"), ("end_image", "402", "last_frame")):
+        selected = [c for c in result.keys[key].candidates if c.selected]
+        assert [(c.node, c.input) for c in selected] == [(node, "image")], key
+        traced = [dict(hit.params) for c in selected for hit in c.signals if hit.signal is BindingSignal.LINK_TRACE]
+        assert traced == [{"consumer": "136", "input": port}], key
+    assert offered(result, "reference_images") == []
+
+
 def test_an_entry_that_cannot_be_rewired_warns_about_repeated_filling():
     """名录外的读图入口摘不掉也 bypass 不了，张数少于格子数时只能重复最后一张。"""
     workflow = sample_workflow("wan_vace_flf2v")
@@ -381,11 +409,22 @@ def test_the_seed_entry_defaults_to_a_fresh_value_every_submission():
     assert infer_sample("wan21_t2v").keys["seed"].selected_targets[0]["policy"] == "random"
 
 
-def test_a_video_saver_outranks_an_image_saver_in_the_same_graph():
+@pytest.mark.parametrize("class_type", ["SaveImage", "SaveImageAdvanced", "SaveAnimatedWEBP", "SaveWEBM"])
+def test_a_saver_that_cannot_export_a_video_container_is_never_offered(class_type: str):
+    """产物候选只列导出 ISO BMFF 的保存节点：推到一个产不出成片容器的节点上，等到取件才判不符。"""
     workflow = sample_workflow("wan21_t2v")
-    workflow["59"] = {"class_type": "SaveImage", "inputs": {"filename_prefix": "still", "images": ["8", 0]}}
+    workflow["59"] = {"class_type": class_type, "inputs": {"filename_prefix": "still", "images": ["8", 0]}}
     result = infer_sample("wan21_t2v", workflow=workflow)
     assert landings(result, "output") == [("58", None)]
+    assert ("59", None) not in offered(result, "output")
+
+
+def test_an_animated_webp_saver_is_never_offered_as_an_image_output():
+    """动图不是分镜图：当成图入库只会得到一张首帧。"""
+    workflow = sample_workflow("sdxl_batch_t2i")
+    workflow["59"] = {"class_type": "SaveAnimatedWEBP", "inputs": {"filename_prefix": "anim", "images": ["8", 0]}}
+    result = infer_sample("sdxl_batch_t2i", workflow=workflow)
+    assert ("59", None) not in offered(result, "output")
 
 
 def test_a_preview_node_never_becomes_the_output():

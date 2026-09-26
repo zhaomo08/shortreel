@@ -1,11 +1,11 @@
+from lib.infra.text_metrics import count_reading_units
 from lib.output_language import (
     DEFAULT_LANGUAGE_CODE,
     SUPPORTED_LANGUAGE_CODES,
     language_display_name,
     resolve_language_code,
 )
-from lib.speech_rate import SPEECH_RATE_UPS_BY_LANGUAGE, speech_rate_units_per_second
-from lib.text_metrics import count_reading_units
+from lib.speech.speech_rate import SPEECH_RATE_UPS_BY_LANGUAGE, speech_rate_units_per_second
 
 
 def test_every_supported_language_has_a_speech_rate() -> None:

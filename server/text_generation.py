@@ -9,7 +9,6 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import ExitStack
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -17,22 +16,42 @@ from typing import Any, NamedTuple, cast
 
 from pydantic import BaseModel, ValidationError
 
-from lib import script_review
-from lib.artifact_manifest import (
+from lib.artifacts.artifact_manifest import (
     ArtifactBasis,
-    ArtifactEntryRekeyReceipt,
-    ArtifactKey,
-    ProjectArtifactManifestAdapter,
 )
-from lib.artifact_provenance import ScriptPlanPromptVariant, build_script_plan_request
-from lib.artifact_registration import ArtifactRegistrationReceipt
-from lib.asset_types import BUCKET_KEY, asset_name_comparison_key
-from lib.async_thread import run_noninterruptible_sync, run_sync_transaction
+from lib.artifacts.artifact_provenance import ScriptPlanPromptVariant, build_script_plan_request
+from lib.artifacts.formal_write import formal_write_transaction
+from lib.backends.providers import CallPurpose
+from lib.backends.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextTaskType
+from lib.backends.text_backends.base import TextGenerationRequest as BackendTextGenerationRequest
+from lib.backends.text_generator import TextGenerator
 from lib.config.resolver import ConfigResolver
-from lib.content_digest import prefixed_sha256_file
-from lib.custom_provider.duration_presets import DEFAULT_FALLBACK
-from lib.db import async_session_factory
-from lib.draft_quarantine import (
+from lib.episode.episode_paths import (
+    SCRIPT_PLAN_FILENAMES,
+    episode_drafts_dir,
+    episode_script_filename,
+    episode_source_relpath,
+)
+from lib.generation.video_request_facts import (
+    VideoRequestFacts,
+    VideoRequestFactsError,
+    VideoRequestFactsFailure,
+    planning_durations,
+    require_video_request_facts,
+)
+from lib.i18n import _ as translate
+from lib.infra.async_thread import run_sync_transaction
+from lib.infra.content_digest import prefixed_sha256_file
+from lib.infra.path_safety import PathTraversalError, safe_join
+from lib.infra.schema_guards import is_int, is_str
+from lib.infra.text_utils import strip_json_code_fences
+from lib.project.asset_types import BUCKET_KEY, asset_name_comparison_key
+from lib.project.project_manager import ProjectManager, is_reference_video_project
+from lib.prompts.prompt_builders_reference import build_reference_units_split_prompt
+from lib.prompts.prompt_builders_script import build_narration_split_prompt, build_normalize_prompt
+from lib.references.reference_catalog import ReferenceCatalog, build_reference_catalog
+from lib.script import script_review
+from lib.script.draft_quarantine import (
     PROMOTE_TOOL_NAME,
     QUARANTINE_KIND_DRAMA_SCRIPT_PLAN,
     QUARANTINE_KIND_NARRATION_SCRIPT_PLAN,
@@ -44,27 +63,13 @@ from lib.draft_quarantine import (
     quarantine_path,
     read_quarantine,
 )
-from lib.draft_violation import DraftViolation, collect_violations
-from lib.episode_paths import (
-    SCRIPT_PLAN_FILENAMES,
-    episode_drafts_dir,
-    episode_script_filename,
-    episode_source_relpath,
-)
-from lib.formal_write import FormalWriteReceipt, formal_write_transaction, project_metadata_lock
-from lib.i18n import _ as translate
-from lib.path_safety import PathTraversalError, safe_join
-from lib.project_manager import ProjectManager, is_reference_video_project
-from lib.prompt_builders_reference import build_reference_units_split_prompt
-from lib.prompt_builders_script import build_narration_split_prompt, build_normalize_prompt
-from lib.providers import CallPurpose
-from lib.reference_catalog import ReferenceCatalog, build_reference_catalog
-from lib.reference_video.draft_validation import (
+from lib.script.draft_violation import DraftViolation, collect_violations
+from lib.script.reference_video.draft_validation import (
     validate_dialogue_load,
     validate_source_text_anchor,
     validate_unit_text,
 )
-from lib.reference_video.script_preview import (
+from lib.script.reference_video.script_preview import (
     WARN_REFERENCE_AUDIO_OVERFLOW,
     WARN_SILENT_EPISODE,
     WARN_SILENT_MODEL,
@@ -74,33 +79,27 @@ from lib.reference_video.script_preview import (
     derive_voice_bindings,
     unit_lacks_scene_reference,
 )
-from lib.reference_video.text_parser import extract_mentions
-from lib.reference_video.voice_settings import VoiceRenderSettings
-from lib.schema_guards import is_int, is_str
-from lib.script_generator import PromptAuthoringTargetError, ScriptGenerator
-from lib.script_models import (
+from lib.script.reference_video.text_parser import extract_mentions
+from lib.script.reference_video.unit_capabilities import hydrate_reference_units
+from lib.script.reference_video.voice_settings import VoiceRenderSettings
+from lib.script.script_generator import PromptAuthoringTargetError, ScriptGenerator
+from lib.script.script_models import (
     NarrationScriptPlanDraft,
     build_drama_normalized_script_model,
     build_reference_units_script_plan_model,
 )
-from lib.speech_composition import admit_script_unit
-from lib.speech_rate import project_speech_rate_override
-from lib.storyboard_mentions import render_storyboard_mention_warnings, storyboard_mention_warnings
-from lib.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextTaskType
-from lib.text_backends.base import TextGenerationRequest as BackendTextGenerationRequest
-from lib.text_generator import TextGenerator
-from lib.text_utils import strip_json_code_fences
-from server.services.video_caps import (
-    constrained_caps_durations,
-    reference_unit_duration_tiers,
-    resolve_video_caps,
-)
+from lib.script.storyboard_mentions import render_storyboard_mention_warnings, storyboard_mention_warnings
+from lib.speech.speech_composition import admit_script_unit
+from lib.speech.speech_rate import project_speech_rate_override
+from server.services.tasks.video_caps import reference_request_facts_lookup, storyboard_request_facts
 
 logger = logging.getLogger(__name__)
 
+# Agent 附加 instructions 的长度上限：超长会失控 token 用量并稀释模型对原文的处理，超限按参数错误提前拒绝。
+# 上限对附加指令文本足够宽松，仅挡病态输入；文本生成与分集规划共用。
 MAX_INSTRUCTIONS_LEN = 4000
 
-#: 提示词编写工具收到已取消的 ``scope`` 参数时的拒绝说明，内嵌工具与远程 MCP 共用。
+#: 提示词编写工具收到已取消的 ``scope`` 参数时的拒绝说明，由其请求模型给出。
 SCOPE_REMOVED_MESSAGE = (
     "scope 参数已取消：generate_episode_script 默认只编写正式脚本中全部待编写的条目；"
     "要重写已有提示词的条目，请用 entry_ids 点名这些条目；要整集重做，请重跑脚本规划并重新完成内容确认。"
@@ -142,123 +141,6 @@ class TextGenerationResult:
     #: locale-neutral 的 ``{"key", "params"}`` 提示条目（如画面描述里没绑定参考图的 ``@[名称]``），
     #: 与任务 ``result.warnings`` 同一形态，读侧按语言渲染。
     warnings: list[dict[str, Any]] = dataclass_field(default_factory=list)
-
-
-class CompensableTextGenerationResult(TextGenerationResult):
-    """Text result carrying runtime-only cancellation compensation."""
-
-    __slots__ = ("_cancel_compensation", "payload")
-
-    def __init__(
-        self,
-        message: str,
-        cancel_compensation: Callable[[], None],
-        *,
-        payload: dict[str, Any] | None = None,
-        warnings: list[dict[str, Any]] | None = None,
-    ) -> None:
-        super().__init__(message, list(warnings or []))
-        object.__setattr__(self, "_cancel_compensation", cancel_compensation)
-        object.__setattr__(self, "payload", payload)
-
-    def compensate_cancelled(self) -> None:
-        self._cancel_compensation()
-
-
-@dataclass(frozen=True, slots=True)
-class _ScriptPlanCancellationReceipt:
-    project_path: Path
-    lock_paths: tuple[Path, ...]
-    files: FormalWriteReceipt
-    manifest: ArtifactRegistrationReceipt
-
-    def compensate_cancelled(self) -> None:
-        self._compensate(self.lock_paths)
-
-    def compensate_cancelled_while_draft_locked(self) -> None:
-        self._compensate(self.lock_paths[1:])
-
-    def _compensate(self, lock_paths: tuple[Path, ...]) -> None:
-        pm = ProjectManager(str(self.project_path.parent))
-        with ExitStack() as locks:
-            for path in lock_paths:
-                locks.enter_context(pm.file_lock(path))
-            with project_metadata_lock(self.project_path):
-                adapter = self.manifest.adapter
-                key = self.manifest.key
-                if adapter is None or key is None:
-                    raise RuntimeError("script_plan cancellation receipt has no Manifest target")
-                if self.manifest.changed and adapter.get_entry(key) != self.manifest.registered:
-                    return
-                if not self.files.compensate_cancelled():
-                    return
-                self.manifest.compensate_cancelled()
-
-
-@dataclass(frozen=True, slots=True)
-class _EpisodeScriptCancellationReceipt:
-    project_path: Path
-    episode: int
-    files: FormalWriteReceipt
-    manifest: ArtifactEntryRekeyReceipt
-
-    def compensate_cancelled(self) -> None:
-        script_path = self.project_path / "scripts" / f"episode_{self.episode}.json"
-        pm = ProjectManager(str(self.project_path.parent))
-        with pm.file_lock(script_path), project_metadata_lock(self.project_path):
-            if not self.manifest.matches_current() or not self.files.matches_current():
-                return
-            if not self.files.compensate_cancelled():
-                return
-            self.manifest.compensate()
-
-
-async def _run_compensable_script_plan_commit(
-    commit: Callable[..., None],
-    /,
-    *args: Any,
-) -> _ScriptPlanCancellationReceipt:
-    receipts: list[_ScriptPlanCancellationReceipt] = []
-    try:
-        await run_sync_transaction(commit, *args, receipts)
-    except asyncio.CancelledError:
-        if receipts:
-            await run_noninterruptible_sync(receipts[0].compensate_cancelled_while_draft_locked)
-        raise
-    if len(receipts) != 1:
-        raise RuntimeError("script_plan commit did not return cancellation state")
-    return receipts[0]
-
-
-async def _run_compensable_quarantine(
-    project_path: Path,
-    episode: int,
-    kind: str,
-    content: dict[str, Any],
-    violations: list[DraftViolation],
-    source: str | None,
-    base_fingerprint: str | None,
-) -> str:
-    receipts: list[FormalWriteReceipt] = []
-    try:
-        report = await run_sync_transaction(
-            _quarantine_invalid_script_plan_generation,
-            project_path,
-            episode,
-            kind,
-            content,
-            violations,
-            source,
-            base_fingerprint,
-            receipts,
-        )
-    except asyncio.CancelledError:
-        if receipts:
-            await run_noninterruptible_sync(receipts[0].compensate_cancelled)
-        raise
-    if len(receipts) != 1:
-        raise RuntimeError("quarantine write did not return cancellation state")
-    return report
 
 
 class TextGenerationError(Exception):
@@ -327,50 +209,26 @@ def _commit_generated_reference_script_plan(
     expected_fingerprint: str | None,
     basis: ArtifactBasis,
     before_commit: Callable[[], None] | None = None,
-    cancellation_receipts: list[_ScriptPlanCancellationReceipt] | None = None,
 ) -> None:
     if before_commit is not None:
         before_commit()
     draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
     prompt_authoring_path = quarantine_path(project_path, episode, QUARANTINE_KIND_PROMPT_AUTHORING)
     formal_path = script_review.official_reference_script_plan_path(project_path, episode)
-    adapter = ProjectArtifactManifestAdapter(project_path)
-    key = ArtifactKey.episode_script_plan(episode)
-    pm = ProjectManager(str(project_path.parent))
-    file_receipts: list[FormalWriteReceipt] = []
-    with pm.file_lock(prompt_authoring_path), script_review.script_plan_write_lock(project_path, episode):
-        previous = adapter.get_entry(key)
-        with formal_write_transaction(
-            formal_path,
-            prompt_authoring_path,
-            draft_path,
-            cancellation_receipts=file_receipts,
-        ):
-            script_review.write_script_plan_locked(
-                project_path,
-                episode,
-                content,
-                expected_fingerprint=expected_fingerprint,
-                basis=basis,
-            )
-            clear_quarantine(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
-        registered = adapter.get_entry(key)
-    if cancellation_receipts is None:
-        return
-    cancellation_receipts.append(
-        _ScriptPlanCancellationReceipt(
-            project_path=project_path,
-            lock_paths=(draft_path, prompt_authoring_path, formal_path),
-            files=file_receipts[0],
-            manifest=ArtifactRegistrationReceipt(
-                adapter=adapter,
-                key=key,
-                registered=registered,
-                previous=previous,
-                changed=registered != previous,
-            ),
+    pm = ProjectManager.for_project_dir(project_path)
+    with (
+        pm.file_lock(prompt_authoring_path),
+        script_review.script_plan_write_lock(project_path, episode),
+        formal_write_transaction(formal_path, prompt_authoring_path, draft_path),
+    ):
+        script_review.write_script_plan_locked(
+            project_path,
+            episode,
+            content,
+            expected_fingerprint=expected_fingerprint,
+            basis=basis,
         )
-    )
+        clear_quarantine(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
 
 
 def _commit_single_script_plan(
@@ -381,45 +239,21 @@ def _commit_single_script_plan(
     content: dict[str, Any],
     expected_fingerprint: Any,
     basis: ArtifactBasis | None,
-    cancellation_receipts: list[_ScriptPlanCancellationReceipt] | None = None,
 ) -> None:
     draft_path = quarantine_path(project_path, episode, kind)
-    adapter = ProjectArtifactManifestAdapter(project_path)
-    key = ArtifactKey.episode_script_plan(episode)
-    file_receipts: list[FormalWriteReceipt] = []
-    with script_review.formal_script_plan_lock(project_path, episode, script_plan_path):
-        previous = adapter.get_entry(key)
-        with formal_write_transaction(
+    with (
+        script_review.formal_script_plan_lock(project_path, episode, script_plan_path),
+        formal_write_transaction(script_plan_path, draft_path),
+    ):
+        script_review.write_formal_script_plan_locked(
+            project_path,
+            episode,
             script_plan_path,
-            draft_path,
-            cancellation_receipts=file_receipts,
-        ):
-            script_review.write_formal_script_plan_locked(
-                project_path,
-                episode,
-                script_plan_path,
-                content,
-                expected_fingerprint=expected_fingerprint,
-                basis=basis,
-            )
-            clear_quarantine(project_path, episode, kind)
-        registered = adapter.get_entry(key)
-    if cancellation_receipts is None:
-        return
-    cancellation_receipts.append(
-        _ScriptPlanCancellationReceipt(
-            project_path=project_path,
-            lock_paths=(draft_path, script_plan_path),
-            files=file_receipts[0],
-            manifest=ArtifactRegistrationReceipt(
-                adapter=adapter,
-                key=key,
-                registered=registered,
-                previous=previous,
-                changed=registered != previous,
-            ),
+            content,
+            expected_fingerprint=expected_fingerprint,
+            basis=basis,
         )
-    )
+        clear_quarantine(project_path, episode, kind)
 
 
 def _quarantine_invalid_script_plan_generation(
@@ -430,12 +264,8 @@ def _quarantine_invalid_script_plan_generation(
     violations: list[DraftViolation],
     source: str | None,
     base_fingerprint: str | None,
-    cancellation_receipts: list[FormalWriteReceipt] | None = None,
 ) -> str:
-    with formal_write_transaction(
-        quarantine_path(project_path, episode, kind),
-        cancellation_receipts=cancellation_receipts,
-    ):
+    with formal_write_transaction(quarantine_path(project_path, episode, kind)):
         return quarantine_and_report(
             project_path,
             episode,
@@ -458,20 +288,43 @@ def _instructions(value: Any) -> str | None:
     return value.strip() or None
 
 
-async def fetch_video_caps(
+def _project_default_duration(project: dict[str, Any]) -> int | None:
+    """用户在项目里配置的默认秒数原样值；非法值按未配置。"""
+    raw = project.get("default_duration")
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip().isdigit():
+        return int(raw.strip())
+    return None
+
+
+def _video_facts_failure_text(failure: VideoRequestFactsFailure) -> str:
+    """视频请求事实解析不出时回给 Agent 的说明：问题码与参数就是失败契约，与预检、执行同码。"""
+    return f"❌ 视频时长档位无法解析：{failure.summary()}；请在设置中配置可用的视频模型后重试"
+
+
+async def fetch_storyboard_durations(
     project: dict[str, Any],
     *,
-    generation_mode: str | None = None,
     config_resolver: ConfigResolver | None = None,
 ) -> tuple[int | None, list[int]]:
-    if config_resolver is None:
-        caps = await resolve_video_caps(project)
-    else:
-        caps = await resolve_video_caps(project, config_resolver=config_resolver)
-    durations = [int(duration) for duration in caps.get("supported_durations") or []]
-    durations = constrained_caps_durations(project, caps, durations, generation_mode=generation_mode)
-    default = caps.get("default_duration")
-    return (int(default) if isinstance(default, int | float) else None), durations
+    """分镜路线剧本规划的 ``(default_duration, supported_durations)``，档位取分镜桶的视频请求事实。
+
+    ``supported_durations`` 已按项目分辨率经时长联动约束收窄（时长由端点固定时借规划档位），与
+    分镜预检、执行同一份结果：型号声明的全集不含「分辨率↔时长」约束，未收窄的集合交给 LLM 会产出
+    执行期必然被拒的时长。事实解析不出（未配置模型、档位缺失 / 无效、收成空集）即抛
+    :class:`VideoRequestFactsError`，不回退到任何档位。
+
+    ``default_duration`` 非档位成员时按 None 处理（即回到「auto」档，由模型按内容节奏选）：项目存的
+    是用户配置的原样值，收窄后它可能落在集合外，而 ``build_normalize_prompt`` 对非成员 default 是
+    fail-loud 的——不归 None 会把「已保存的越界默认时长」变成整个工具的硬失败。
+    """
+    facts = require_video_request_facts(await storyboard_request_facts(project, config_resolver))
+    durations = planning_durations(facts)
+    default = _project_default_duration(project)
+    return (default if default in durations else None), durations
 
 
 def _parse_script_plan_json(response_text: str, model: type[BaseModel], *, label: str, top_shape: str) -> dict:
@@ -639,35 +492,30 @@ async def generate_episode_script(
             project_path,
             config_resolver=config_resolver,
         )
-        file_receipts: list[FormalWriteReceipt] = []
-        manifest_receipts: list[ArtifactEntryRekeyReceipt] = []
+        # 正式剧本已存在时只编写条目；ad 项目尚无正式剧本才整份生成。
+        formal_existed = await asyncio.to_thread(
+            (
+                project_path
+                / "scripts"
+                / script_review.formal_script_filename(project_path, generator.project_json, episode)
+            ).exists
+        )
         rewritten: list[str] = []
-        try:
-            result_path = await generator.generate(
-                episode=episode,
-                instructions=instructions,
-                entry_ids=request.entry_ids,
-                rewritten_entry_ids=rewritten,
-                cancellation_file_receipts=file_receipts,
-                cancellation_manifest_receipts=manifest_receipts,
-            )
-        except asyncio.CancelledError:
-            if len(file_receipts) == len(manifest_receipts) == 1:
-                receipt = _EpisodeScriptCancellationReceipt(
-                    project_path,
-                    episode,
-                    file_receipts[0],
-                    manifest_receipts[0],
-                )
-                await run_noninterruptible_sync(receipt.compensate_cancelled)
-            raise
+        result_path = await generator.generate(
+            episode=episode,
+            instructions=instructions,
+            entry_ids=request.entry_ids,
+            rewritten_entry_ids=rewritten,
+        )
     except PromptAuthoringTargetError as exc:
         # 点名的条目不在正式剧本内是调用方的错：报「拒绝生成」而不是让它冒成 internal_error，
         # 后者会引导 Agent 原样重试同一份必然失败的参数。
         raise TextGenerationError(f"❌ 编写范围无效: {exc}") from exc
+    except VideoRequestFactsError as exc:
+        raise TextGenerationError(_video_facts_failure_text(exc.failure)) from exc
     except FileNotFoundError as exc:
         raise TextGenerationError(f"❌ 文件错误: {exc}") from exc
-    if not rewritten and not file_receipts:
+    if not rewritten and formal_existed:
         redo = "要整份重做请先移除正式脚本" if generator.content_mode == "ad" else "要整集重做请重跑脚本规划并重新确认"
         return TextGenerationResult(
             f"✅ 第 {episode} 集没有待编写的条目，未调用文本模型，正式脚本未改动: {result_path}\n"
@@ -677,12 +525,7 @@ async def generate_episode_script(
     summary = f"✅ 剧本生成完成: {result_path}\n   本次编写条目: {rewritten_note}"
     warnings = await asyncio.to_thread(_rewritten_mention_warnings, projects, project_name, result_path, rewritten)
     summary += _unbound_mentions_note(warnings)
-    if not file_receipts and not manifest_receipts:
-        return TextGenerationResult(summary, warnings)
-    if len(file_receipts) != 1 or len(manifest_receipts) != 1:
-        raise RuntimeError("episode script commit did not return cancellation state")
-    receipt = _EpisodeScriptCancellationReceipt(project_path, episode, file_receipts[0], manifest_receipts[0])
-    return CompensableTextGenerationResult(summary, receipt.compensate_cancelled, warnings=warnings)
+    return TextGenerationResult(summary, warnings)
 
 
 def _rewritten_mention_warnings(
@@ -695,7 +538,7 @@ def _rewritten_mention_warnings(
     if not rewritten:
         return []
     try:
-        project = projects.load_project_readonly(project_name)
+        project = projects.load_project(project_name)
         script = projects.load_script_readonly(project_name, result_path.name)
     except (OSError, ValueError):
         # 剧本已落盘，回执不能因为读回失败（文件缺失、I/O 故障、JSON 不合法）而失败。
@@ -720,7 +563,7 @@ async def confirm_script_review(
     projects: ProjectManager,
     config_resolver: ConfigResolver,
 ) -> TextGenerationResult:
-    from server.services.script_review import ScriptReviewError, ScriptReviewService
+    from server.services.project.script_review import ScriptReviewError, ScriptReviewService
 
     try:
         state = await ScriptReviewService(projects, config_resolver=config_resolver).confirm(
@@ -735,6 +578,8 @@ async def confirm_script_review(
                 "正式脚本在此期间又有变化时会按新清单再次拒绝。",
                 exc.overwrite,
             ) from exc
+        if exc.problem is not None:
+            raise TextGenerationError(_video_facts_failure_text(exc.problem)) from exc
         raise TextGenerationError(f"❌ 无法完成 script_plan 内容确认（{exc.code}）：{exc.message or exc.code}") from exc
     return TextGenerationResult(
         f"✅ 第 {episode} 集 script_plan 已确认并整份转为正式脚本，全部分镜待编写，"
@@ -747,49 +592,6 @@ async def confirm_script_review(
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_caps_with_fallback(
-    project: dict[str, Any],
-    episode: int,
-    *,
-    config_resolver: ConfigResolver | None = None,
-) -> tuple[int | None, list[int]]:
-    """Script normalization is best-effort: prompt生成 不该被能力查询失败堵住。
-
-    Soft-fallbacks to ``duration_presets.DEFAULT_FALLBACK`` so the LLM still
-    receives a usable duration constraint set if the resolver hiccups —— 与
-    自定义供应商写入层的保守默认同一真相源，避免软回退口径含供应商未必支持的时长。
-
-    时长已按项目分辨率经联动约束收窄。参考图约束不在此施加：走参考生视频的项目 script_plan 用
-    参考生视频变体（见 ``_fetch_reference_caps_with_fallback``），本 helper
-    服务的 drama normalize / narration 拆分两个工具按分工不服务该路径。
-
-    ``default_duration`` 非返回集合成员时按 None 处理（即回到「auto」档，由模型按内容节奏选）：
-    项目存的是用户配置的原样值，收窄后（或软回退到 ``DEFAULT_FALLBACK`` 后）它可能落在集合外，
-    而 ``build_normalize_prompt`` 对非成员 default 是 fail-loud 的——不归 None 会把「已保存的
-    越界默认时长」变成整个工具的硬失败。与 ``_fetch_reference_caps_with_fallback`` 同口径。
-    """
-    try:
-        if config_resolver is None:
-            default_int, durations = await fetch_video_caps(project, generation_mode=None)
-        else:
-            default_int, durations = await fetch_video_caps(
-                project,
-                generation_mode=None,
-                config_resolver=config_resolver,
-            )
-    except (FileNotFoundError, ValueError) as exc:
-        logger.info("video_capabilities 不可解析，使用 fallback %s：%s", DEFAULT_FALLBACK, exc)
-        return None, list(DEFAULT_FALLBACK)
-    except Exception as exc:
-        logger.warning("video_capabilities 查询异常，使用 fallback %s：%s", DEFAULT_FALLBACK, exc)
-        return None, list(DEFAULT_FALLBACK)
-    if not durations:
-        durations = list(DEFAULT_FALLBACK)
-    if default_int is not None and default_int not in durations:
-        default_int = None
-    return default_int, durations
-
-
 async def generate_drama_script_plan(
     request: TextGenerationRequest,
     *,
@@ -800,7 +602,7 @@ async def generate_drama_script_plan(
     episode = request.episode
     instructions = _instructions(request.instructions)
     project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project_readonly, project_name)
+    project = await asyncio.to_thread(projects.load_project, project_name)
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
             _load_script_plan_source_with_basis,
@@ -814,10 +616,8 @@ async def generate_drama_script_plan(
         raise TextGenerationError(f"❌ {exc}") from exc
 
     try:
-        default_duration, supported_durations = await _fetch_caps_with_fallback(
-            project,
-            episode,
-            config_resolver=config_resolver,
+        default_duration, supported_durations = await fetch_storyboard_durations(
+            project, config_resolver=config_resolver
         )
         prompt = build_normalize_prompt(
             novel_text=novel_text,
@@ -846,7 +646,7 @@ async def generate_drama_script_plan(
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_DRAMA_SCRIPT_PLAN)
         script_plan_path = episode_drafts_dir(project_path, episode) / SCRIPT_PLAN_FILENAMES["drama"]
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -875,10 +675,10 @@ async def generate_drama_script_plan(
             else:
                 scene["needs_replan"] = True
 
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             _assert_draft_revision(draft_path, draft_baseline)
             try:
-                cancellation_receipt = await _run_compensable_script_plan_commit(
+                await run_sync_transaction(
                     _commit_single_script_plan,
                     project_path,
                     episode,
@@ -901,12 +701,11 @@ async def generate_drama_script_plan(
                     )
                 ) from exc
 
-        return CompensableTextGenerationResult(
-            _drama_script_plan_result_text(script_plan_path, raw_scenes, action="生成"),
-            cancellation_receipt.compensate_cancelled,
-        )
+        return TextGenerationResult(_drama_script_plan_result_text(script_plan_path, raw_scenes, action="生成"))
     except TextGenerationError:
         raise
+    except VideoRequestFactsError as exc:
+        raise TextGenerationError(_video_facts_failure_text(exc.failure)) from exc
     except Exception as exc:
         raise TextGenerationError(f"generate_script_plan 失败: {exc}") from exc
 
@@ -919,23 +718,21 @@ async def generate_drama_script_plan(
 class ReferenceSplitCaps(NamedTuple):
     """rv 拆分用的视频能力：两套逐 unit 档位 + 派生上限 + 用户偏好 + 声音输入档。
 
-    ``reference_durations`` / ``text_durations`` 是带 / 不带 ``@`` 引用的 unit 各自的生效档位，
+    ``reference_durations`` / ``text_durations`` 是有 / 没有可用参考图的 unit 各自的生效档位，
     ``durations`` 是二者的并集——schema 枚举与 prompt 候选集合取并集，因为落在任一套内的时长都
-    可能合法；归属哪一套要等正文里的 `@[名称]` 提及确定后才知道。三者相等即该型号在当前分辨率下未声明
-    生效的「参考图↔时长」联动约束，多数型号如此。
+    可能合法；归属哪一套要等正文里的 `@[名称]` 提及按此刻可用的参考图水合后才知道。三者相等即该型号
+    在当前分辨率下未声明生效的「参考图↔时长」联动约束，多数型号如此。
 
-    ``voice`` 是同一次能力解析派生出的声音输入档，供声音相关的容忍 warning 消费——与时长档位同源
-    于这一次解析，分两次查会让同一份产物的档位与声音提示描述不同时刻的配置。能力解析故障回退时
-    档位相关的几位落到 ``VoiceRenderSettings`` 的字段默认，唯 ``requested_generate_audio`` 仍带着
-    本集的无声意图（该位不依赖能力接口，回退分支独立解析后写回，见
-    ``_fetch_reference_caps_with_fallback``）。携带值对象而非原始能力 dict：下游只需要声音那几位，
-    穿一整个 dict 过接口会把能力 key 名耦合扩散到消费侧。
+    ``voice`` 是 r2v 桶视频请求事实派生出的声音输入档，供声音相关的容忍 warning 消费——与时长档位
+    同源于这一次求值，分两次查会让同一份产物的档位与声音提示描述不同时刻的配置。携带值对象而非
+    事实对象本身：下游只需要声音那几位，穿整个事实过接口会把字段名耦合扩散到消费侧。
     """
 
     default_duration: int | None
     durations: list[int]
     reference_durations: list[int]
     text_durations: list[int]
+    text_problem: VideoRequestFactsFailure | None
     max_duration: int
     max_refs: int | None
     voice: VoiceRenderSettings
@@ -945,88 +742,65 @@ class ReferenceSplitCaps(NamedTuple):
         return self.reference_durations if has_references else self.text_durations
 
 
-async def _fetch_reference_caps_with_fallback(
+async def _fetch_reference_split_caps(
     project: dict[str, Any],
-    episode: int,
     *,
     config_resolver: ConfigResolver | None = None,
 ) -> ReferenceSplitCaps:
-    """解析 rv 拆分所需的视频能力（见 ``ReferenceSplitCaps``）。
-
-    与 ``_fetch_caps_with_fallback`` 同口径 best-effort：resolver 故障时回退
-    ``duration_presets.DEFAULT_FALLBACK``、``max_refs`` 视为未声明。
+    """解析 rv 拆分所需的视频能力（见 ``ReferenceSplitCaps``），读 r2v 与 i2v 两桶的视频请求事实。
 
     unit 是一次生成调用的单元，拆分阶段定的时长就是真正发给供应商的那个值，故档位取**经时长
-    联动约束收窄后**的集合：不收窄的话（海螺 1080p 只接受 6 秒）script_plan 会按全集拆出超标的 unit，
-    prompt_authoring 的枚举 schema 再把它判非法。
+    联动约束收窄后**的集合（时长由端点固定的桶借规划档位）：不收窄的话（海螺 1080p 只接受 6 秒）
+    script_plan 会按全集拆出超标的 unit，prompt_authoring 的枚举 schema 再把它判非法。
 
-    收窄逐 unit 分两套（``reference_unit_duration_tiers``）：「参考图↔时长」约束只对真的带参考图
-    的请求生效，整集一律按带图收窄会把无引用 unit 本可申请的短档也收掉。schema 枚举与 prompt
-    候选取两套的并集——落在任一套内的时长都可能合法，具体归属由该 unit 正文里的 `@[名称]`
-    提及决定，在正文解析之后逐 unit 判（见 ``_collect_reference_flat_violations``）。
-    ``max_duration`` 随之是并集的最大值。
+    收窄逐 unit 分两套：「参考图↔时长」约束只对真的带参考图的请求生效，整集一律按带图收窄会把无
+    引用 unit 本可申请的短档也收掉。schema 枚举与 prompt 候选取两套的并集——落在任一套内的时长都
+    可能合法，具体归属由该 unit 正文提及且此刻可用的参考图决定，在正文解析之后逐 unit 判（见
+    ``_collect_reference_flat_violations``）。``max_duration`` 随之是并集的最大值。
+
+    r2v 桶（本路线的主桶）解析不出即抛 :class:`VideoRequestFactsError`，不回退到任何档位；i2v 桶
+    解析不出时无图档位为空、失败原样带在 ``text_problem`` 里，落 i2v 的 unit 逐条报违约。
     ``default_duration`` 非并集成员（用户配置漂移）按 None 处理，避免 prompt 自相矛盾。
     """
-    try:
-        if config_resolver is None:
-            caps = await resolve_video_caps(project)
-        else:
-            caps = await resolve_video_caps(project, config_resolver=config_resolver)
-    except Exception as exc:
-        logger.warning("video_capabilities 查询异常，使用 fallback %s：%s", DEFAULT_FALLBACK, exc)
-        caps = {}
-        # requested_generate_audio 不依赖能力接口（见 generation_context.py 同名字段注释），
-        # 能力解析失败也不能连带丢失，否则本该报的 WARN_SILENT_EPISODE 会静默消失。
-        try:
-            resolver = config_resolver or ConfigResolver(async_session_factory)
-            caps["requested_generate_audio"] = await resolver.video_generate_audio_for_project(project)
-        except Exception as inner_exc:
-            # 与其余能力字段的「不明时不额外收紧」相反：这里不明时收紧到 False——静默丢掉
-            # 一次声音提示，好过在双重解析失败时把用户的无声意图错读成有声。
-            logger.warning("video_generate_audio 独立解析也失败，声音提示按无声降级：%s", inner_exc)
-            caps["requested_generate_audio"] = False
-    durations = [int(d) for d in caps.get("supported_durations") or []]
-    if not durations:
-        durations = list(DEFAULT_FALLBACK)
-    with_refs, without_refs = await reference_unit_duration_tiers(
-        project,
-        caps,
-        durations,
-        config_resolver=config_resolver,
-    )
+    request_facts = reference_request_facts_lookup(project, config_resolver)
+    with_ref_facts = require_video_request_facts(await request_facts("r2v"))
+    without_ref_facts = await request_facts("i2v")
+    with_refs = planning_durations(with_ref_facts)
+    without_refs = planning_durations(without_ref_facts) if isinstance(without_ref_facts, VideoRequestFacts) else []
     unit_durations = sorted(set(with_refs) | set(without_refs))
-    max_duration = max(unit_durations)
-    raw_refs = caps.get("max_reference_images")
-    max_refs = int(raw_refs) if isinstance(raw_refs, int | float) else None
-    raw_default = caps.get("default_duration")
-    default = int(raw_default) if isinstance(raw_default, int | float) else None
-    if default is not None and default not in unit_durations:
-        default = None
+    default = _project_default_duration(project)
     return ReferenceSplitCaps(
-        default_duration=default,
+        default_duration=default if default in unit_durations else None,
         durations=unit_durations,
         reference_durations=sorted(set(with_refs)),
         text_durations=sorted(set(without_refs)),
-        max_duration=max_duration,
-        max_refs=max_refs,
-        voice=VoiceRenderSettings.from_caps(caps),
+        text_problem=without_ref_facts if isinstance(without_ref_facts, VideoRequestFactsFailure) else None,
+        max_duration=max(unit_durations),
+        max_refs=with_ref_facts.max_reference_images,
+        voice=VoiceRenderSettings.from_request_facts(with_ref_facts),
     )
 
 
 def _validate_unit_duration_tier(label: str, duration: int, *, has_references: bool, caps: ReferenceSplitCaps) -> None:
-    """按该 unit 的引用状态判时长是否落在生效档位内，出档抛 ``DraftViolation``。
+    """按该 unit 此刻是否有可用参考图判时长是否落在生效档位内，出档抛 ``DraftViolation``。
 
-    schema 的枚举卡的是两套档位的并集，一个带引用的 unit 因此仍可能取到只有无引用 unit 才
+    schema 的枚举卡的是两套档位的并集，一个带可用参考图的 unit 因此仍可能取到只有无图 unit 才
     合法的秒数——那样的 unit 执行期申请不到，等到入队才失败已无统一纠正入口。错误消息给出
     两条出路（换档位 / 去引用），与 prompt 里的教学同一口径。
 
     抛的是内容违约而非 ``ValueError``：这一类同样是 Agent 改一改草稿就能修好的，走草稿
     的修复闭环，不该退回丢弃重抽。
     """
+    if not has_references and caps.text_problem is not None:
+        raise DraftViolation(
+            f"{label} 无参考图视频档位未知（{caps.text_problem.code}）；请在设置中配置可用的图生视频模型",
+            code=caps.text_problem.code,
+            label=label,
+        )
     tiers = caps.tiers_for(has_references=has_references)
     if duration in tiers:
         return
-    state = "带 `@` 资产引用" if has_references else "无 `@` 资产引用"
+    state = "带可用参考图" if has_references else "无可用参考图"
     remedy = (
         "；请改取该档位内的时长，或把次要资产融入描述文字、不用 `@` 引用"
         if has_references
@@ -1057,6 +831,7 @@ def _collect_reference_flat_violations(
     flat_units: list[dict[str, Any]],
     project: dict[str, Any],
     *,
+    project_path: Path,
     episode: int,
     novel_text: str,
     caps: ReferenceSplitCaps,
@@ -1069,21 +844,26 @@ def _collect_reference_flat_violations(
     台词量念得完。收齐而非首个即抛：报告要能一次列全所有坏 unit，否则 Agent 每修一处就要再跑
     一轮才知道下一处。
 
-    时长档位与正文合并为一个入口：适用哪套档位取决于该 unit 正文里有没有 `@[名称]` 提及——
-    正文解析不出时无从判档位，此时报出的也只会是同一个问题的另一种说法。
+    时长档位与正文合并为一个入口：适用哪套档位取决于该 unit 正文提及的引用此刻有没有可用参考图
+    （文件存在且产物清单认领，与内容确认面板、执行同判据）——正文解析不出时无从判档位，此时报出的
+    也只会是同一个问题的另一种说法。
     """
     # 台词口播量的语速与 prompt 侧同源：项目级覆盖优先，否则按语言默认。
     speech_rate_override = project_speech_rate_override(project)
+    hydrations = hydrate_reference_units(project, project_path, flat_units)
     violations: list[DraftViolation] = []
-    for index, flat in enumerate(flat_units, start=1):
+    for index, (flat, hydration) in enumerate(zip(flat_units, hydrations, strict=True), start=1):
         label = _reference_unit_label(episode, index)
         duration = flat["duration_seconds"]
         source_text = flat["source_text"]
         text = flat["text"]
+        with_reference_images = hydration.hydrated_generation_type == "r2v"
 
-        def _check_text_and_tier(la: str = label, tx: str = text, d: int = duration) -> None:
-            refs = validate_unit_text(la, tx, project, max_refs=caps.max_refs)
-            _validate_unit_duration_tier(la, d, has_references=bool(refs), caps=caps)
+        def _check_text_and_tier(
+            la: str = label, tx: str = text, d: int = duration, with_images: bool = with_reference_images
+        ) -> None:
+            validate_unit_text(la, tx, project, max_refs=caps.max_refs)
+            _validate_unit_duration_tier(la, d, has_references=with_images, caps=caps)
 
         violations.extend(
             collect_violations(
@@ -1287,7 +1067,7 @@ def _narration_segment_label(segment: dict[str, Any], index: int) -> str:
 def _normalize_for_coverage(text: str) -> str:
     """Unicode NFC 归一后把连续空白折叠为单个空格，只消除编码与空白差异，不删除空白本身。
 
-    NFC 与 ``lib.episode_ledger.normalize_source_text`` 定义的源文坐标系一致，也与参考生视频
+    NFC 与 ``lib.episode.episode_ledger.normalize_source_text`` 定义的源文坐标系一致，也与参考生视频
     ``_normalize_for_anchor`` 同口径：带组合附加符的语种（如 vi）源文可能以 NFD 落盘、模型
     回写 NFC，不归一会把纯编码形式差异判成删字改字，而覆盖违约会落成草稿、堵住内容确认
     确认与 prompt_authoring 生成。
@@ -1456,7 +1236,7 @@ async def generate_reference_script_plan(
     episode = request.episode
     instructions = _instructions(request.instructions)
     project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project_readonly, project_name)
+    project = await asyncio.to_thread(projects.load_project, project_name)
 
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
@@ -1474,11 +1254,7 @@ async def generate_reference_script_plan(
         characters = cast(dict[str, Any], prompt_inputs["characters"])
         scenes = cast(dict[str, Any], prompt_inputs["scenes"])
         props = cast(dict[str, Any], prompt_inputs["props"])
-        split_caps = await _fetch_reference_caps_with_fallback(
-            project,
-            episode,
-            config_resolver=config_resolver,
-        )
+        split_caps = await _fetch_reference_split_caps(project, config_resolver=config_resolver)
         prompt = build_reference_units_split_prompt(
             novel_text=novel_text,
             project_overview=cast(dict[str, Any], prompt_inputs["project_overview"]),
@@ -1508,7 +1284,7 @@ async def generate_reference_script_plan(
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
         formal_script_plan_path = script_review.official_reference_script_plan_path(project_path, episode)
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -1534,6 +1310,7 @@ async def generate_reference_script_plan(
         violations = _collect_reference_flat_violations(
             flat_units,
             project,
+            project_path=project_path,
             episode=episode,
             novel_text=novel_text,
             caps=split_caps,
@@ -1542,9 +1319,10 @@ async def generate_reference_script_plan(
         unit_texts = [flat_unit["text"] for flat_unit in flat_units]
         soft_violations = _reference_soft_violation_lines(unit_texts, project, episode=episode, voice=split_caps.voice)
         if violations:
-            async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+            async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
                 _assert_draft_revision(draft_path, draft_baseline)
-                report = await _run_compensable_quarantine(
+                report = await run_sync_transaction(
+                    _quarantine_invalid_script_plan_generation,
                     project_path,
                     episode,
                     QUARANTINE_KIND_SCRIPT_PLAN,
@@ -1565,10 +1343,10 @@ async def generate_reference_script_plan(
             episode=episode,
             max_refs=split_caps.max_refs,
         )
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             _assert_draft_revision(draft_path, draft_baseline)
             try:
-                cancellation_receipt = await _run_compensable_script_plan_commit(
+                await run_sync_transaction(
                     _commit_generated_reference_script_plan,
                     project_path,
                     episode,
@@ -1589,17 +1367,18 @@ async def generate_reference_script_plan(
                         exc.actual,
                     )
                 ) from exc
-        return CompensableTextGenerationResult(
+        return TextGenerationResult(
             _reference_result_text(
                 script_review.official_reference_script_plan_path(project_path, episode),
                 raw_units,
                 soft_violations,
                 action="拆分",
-            ),
-            cancellation_receipt.compensate_cancelled,
+            )
         )
     except TextGenerationError:
         raise
+    except VideoRequestFactsError as exc:
+        raise TextGenerationError(_video_facts_failure_text(exc.failure)) from exc
     except Exception as exc:
         raise TextGenerationError(f"generate_script_plan 失败: {exc}") from exc
 
@@ -1614,7 +1393,7 @@ async def generate_narration_script_plan(
     episode = request.episode
     instructions = _instructions(request.instructions)
     project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project_readonly, project_name)
+    project = await asyncio.to_thread(projects.load_project, project_name)
 
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
@@ -1632,10 +1411,8 @@ async def generate_narration_script_plan(
         characters = cast(dict[str, Any], prompt_inputs["characters"])
         scenes = cast(dict[str, Any], prompt_inputs["scenes"])
         props = cast(dict[str, Any], prompt_inputs["props"])
-        default_duration, supported_durations = await _fetch_caps_with_fallback(
-            project,
-            episode,
-            config_resolver=config_resolver,
+        default_duration, supported_durations = await fetch_storyboard_durations(
+            project, config_resolver=config_resolver
         )
         prompt = build_narration_split_prompt(
             novel_text=novel_text,
@@ -1658,7 +1435,7 @@ async def generate_narration_script_plan(
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_NARRATION_SCRIPT_PLAN)
         script_plan_path = _narration_script_plan_path(project_path, episode)
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -1694,9 +1471,10 @@ async def generate_narration_script_plan(
             source_scope=_coverage_source_scope(request.source, episode=episode),
         )
         if violations:
-            async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+            async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
                 _assert_draft_revision(draft_path, draft_baseline)
-                report = await _run_compensable_quarantine(
+                report = await run_sync_transaction(
+                    _quarantine_invalid_script_plan_generation,
                     project_path,
                     episode,
                     QUARANTINE_KIND_NARRATION_SCRIPT_PLAN,
@@ -1707,10 +1485,10 @@ async def generate_narration_script_plan(
                 )
             raise TextGenerationError(report)
 
-        async with ProjectManager(str(project_path.parent)).async_file_lock(draft_path):
+        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
             _assert_draft_revision(draft_path, draft_baseline)
             try:
-                cancellation_receipt = await _run_compensable_script_plan_commit(
+                await run_sync_transaction(
                     _commit_single_script_plan,
                     project_path,
                     episode,
@@ -1733,11 +1511,10 @@ async def generate_narration_script_plan(
                     )
                 ) from exc
 
-        return CompensableTextGenerationResult(
-            _narration_script_plan_result_text(script_plan_path, raw_segments, action="拆分"),
-            cancellation_receipt.compensate_cancelled,
-        )
+        return TextGenerationResult(_narration_script_plan_result_text(script_plan_path, raw_segments, action="拆分"))
     except TextGenerationError:
         raise
+    except VideoRequestFactsError as exc:
+        raise TextGenerationError(_video_facts_failure_text(exc.failure)) from exc
     except Exception as exc:
         raise TextGenerationError(f"generate_script_plan 失败: {exc}") from exc

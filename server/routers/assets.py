@@ -15,15 +15,18 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
-from lib.api_errors import NotFoundError
-from lib.artifact_activation import register_artifact_entries_atomically, resolve_current_artifact_target
-from lib.artifact_manifest import ArtifactKey
-from lib.asset_derivatives import (
+from lib.artifacts.artifact_activation import register_artifact_entries_atomically, resolve_current_artifact_target
+from lib.artifacts.artifact_manifest import ArtifactKey
+from lib.db import async_session_factory
+from lib.db.models.asset import AssetDerivative
+from lib.db.repositories.asset_repo import AssetRepository
+from lib.infra.api_errors import NotFoundError
+from lib.project.asset_derivatives import (
     derivative_artifact_key,
     derivative_sheet_relative_path,
     derivative_table,
 )
-from lib.asset_types import (
+from lib.project.asset_types import (
     ASSET_SPECS,
     BUCKET_KEY,
     DERIVATIVES_FIELD,
@@ -37,11 +40,8 @@ from lib.asset_types import (
     resolve_asset_key,
     validate_asset_name,
 )
-from lib.db import async_session_factory
-from lib.db.models.asset import AssetDerivative
-from lib.db.repositories.asset_repo import AssetRepository
-from lib.i18n import Translator
-from lib.project_manager import ProjectManager, get_project_manager
+from lib.project.project_manager import ProjectManager, get_project_manager
+from server.i18n import Translator
 from server.routers._asset_router_factory import localize_project_asset_name_conflict
 
 logger = logging.getLogger(__name__)
@@ -88,12 +88,12 @@ async def _serialize_one(repo: AssetRepository, asset) -> dict:
 
 
 async def _copy_into_global_pool(source: Path, asset_type: str, default_ext: str) -> str:
-    """把一个文件拷进 ``_global_assets/{type}/``，返回相对 projects_root 的登记路径。"""
+    """把一个文件拷进全局资产库的 ``{type}/`` 下，返回相对数据根的登记路径。"""
     ext = source.suffix.lower() or default_ext
-    root = get_project_manager().get_global_assets_root() / asset_type
-    uid = uuid.uuid4().hex
-    await asyncio.to_thread(shutil.copyfile, source, root / f"{uid}{ext}")
-    return f"_global_assets/{asset_type}/{uid}{ext}"
+    pm = get_project_manager()
+    target = pm.get_global_assets_root() / asset_type / f"{uuid.uuid4().hex}{ext}"
+    await asyncio.to_thread(shutil.copyfile, source, target)
+    return target.relative_to(pm.data_root).as_posix()
 
 
 def _project_file_if_present(project_dir: Path, rel_path: str) -> Path | None:
@@ -117,16 +117,15 @@ async def _save_upload(file: UploadFile, asset_type: str, _t: Translator) -> str
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=_t("asset_upload_too_large"))
 
-    root = get_project_manager().get_global_assets_root() / asset_type
-    uid = uuid.uuid4().hex
-    target = root / f"{uid}{ext}"
+    pm = get_project_manager()
+    target = pm.get_global_assets_root() / asset_type / f"{uuid.uuid4().hex}{ext}"
     await asyncio.to_thread(target.write_bytes, data)
-    # 存相对路径（相对 projects_root）
-    return f"_global_assets/{asset_type}/{uid}{ext}"
+    # 存相对数据根的路径
+    return target.relative_to(pm.data_root).as_posix()
 
 
 def _delete_global_asset_file(rel_path: str) -> None:
-    path = get_project_manager().projects_root / rel_path
+    path = get_project_manager().data_root / rel_path
     try:
         path.unlink()
     except FileNotFoundError:
@@ -427,7 +426,7 @@ async def from_project(
             },
         )
 
-    # 5) 拷贝源 sheet / 参考音频到 _global_assets/{type}/{uuid}.{ext}
+    # 5) 拷贝源 sheet / 参考音频到 global_assets/{type}/{uuid}.{ext}
     # 两次拷贝共用一个失败边界：任一失败都清理已落盘的另一个文件，不留孤儿。
     new_image_path: str | None = None
     new_audio_path: str | None = None
@@ -602,7 +601,7 @@ async def apply_to_project(
         copy_src: Path | None = None
         copy_dst: Path | None = None
         if a.image_path:
-            src = project_manager.projects_root / a.image_path
+            src = project_manager.data_root / a.image_path
             if src.exists() and src.is_file():
                 ext = src.suffix.lower() or ".png"
                 rel_sheet = f"{bucket_key}/{desired_name}{ext}"
@@ -628,7 +627,7 @@ async def apply_to_project(
         copy_audio_src: Path | None = None
         copy_audio_dst: Path | None = None
         if a.type == "character" and a.audio_path:
-            audio_src = project_manager.projects_root / a.audio_path
+            audio_src = project_manager.data_root / a.audio_path
             if audio_src.exists() and audio_src.is_file():
                 audio_ext = audio_src.suffix.lower() or ".wav"
                 rel_audio = f"characters/refs_audio/{desired_name}{audio_ext}"
@@ -656,7 +655,7 @@ async def apply_to_project(
             for derivative in derivatives_by_asset.get(a.id, ()):
                 derivative_src: Path | None = None
                 if derivative.image_path:
-                    candidate = project_manager.projects_root / derivative.image_path
+                    candidate = project_manager.data_root / derivative.image_path
                     if candidate.exists() and candidate.is_file():
                         derivative_src = candidate
                     else:
@@ -791,16 +790,18 @@ async def apply_to_project(
     if plans:
 
         def _register_imported_sheet_claims(_project_file: Path) -> None:
-            keys = {ArtifactKey.asset_sheet(plan["asset"].type, plan["desired_name"]) for plan in plans}
-            keys |= {
+            owner_keys = {ArtifactKey.asset_sheet(plan["asset"].type, plan["desired_name"]) for plan in plans}
+            derivative_keys = {
                 derivative_artifact_key(plan["desired_name"], derivative_name)
                 for plan in plans
                 for derivative_name in plan["derivative_sheet_names"]
             }
-            register_artifact_entries_atomically(
-                project_dir,
-                {key: resolve_current_artifact_target(project_dir, key) for key in keys},
-            )
+            owner_entries = {key: resolve_current_artifact_target(project_dir, key) for key in owner_keys}
+            derivative_entries = {
+                key: resolve_current_artifact_target(project_dir, key, pending_entries=owner_entries)
+                for key in derivative_keys
+            }
+            register_artifact_entries_atomically(project_dir, owner_entries | derivative_entries)
 
         try:
             await asyncio.to_thread(

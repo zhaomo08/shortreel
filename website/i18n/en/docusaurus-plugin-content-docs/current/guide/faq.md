@@ -73,7 +73,7 @@ docker compose pull
 docker compose up -d
 ```
 
-ArcReel automatically runs database and project-structure migrations at startup. A normal update does not intentionally delete mounted data directories, but you should still back up the project directory, database, and credential files before updating. Do not substitute cleanup commands that delete data volumes for a normal update.
+ArcReel automatically runs database and project-structure migrations at startup. A normal update does not intentionally delete mounted data directories, but you should still back up the data root and the database before updating. ArcReel does not support downgrades; going back to an older version requires restoring the backup taken before the update. When upgrading from a version that predates the data root layout change, see [Data Root Layout Migration](../ops/deployment.md#data-root-layout-migration) for the Compose volume changes. Do not substitute cleanup commands that delete data volumes for a normal update.
 
 The About section of the Settings page can check for a new version and open its release page, but it does not upgrade the server from the Web UI.
 
@@ -81,12 +81,11 @@ The About section of the Settings page can check for a new version and open its 
 
 The main data for a default Docker deployment is stored in its Compose directory:
 
-- `projects/`: projects, assets, and the default SQLite database
+- `projects/`: the data root, containing projects, assets, the default SQLite database, logs, and Vertex credential files; see [Persistent Directories](../ops/deployment.md#sqlite-volumes) for its layout
 - `.env`: login and deployment configuration
-- `vertex_keys/`: Vertex credential files
 - `claude_data/`: Agent session data
 
-A production PostgreSQL deployment also requires a PostgreSQL database backup. A full-instance backup must cover the project directory, database, and required credentials. Use `pg_dump` / `pg_restore` for PostgreSQL. Copy SQLite only after stopping the service, or use SQLite's online backup mechanism.
+A production PostgreSQL deployment also requires a PostgreSQL database backup. A full-instance backup must cover the data root and the database. Use `pg_dump` / `pg_restore` for PostgreSQL. Copy SQLite only after stopping the service, or use SQLite's online backup mechanism.
 
 A project ZIP from the Web UI is suitable for migrating an individual project, but it does not include global provider configuration, account configuration, task records, cost records, or Agent sessions. It is not a substitute for a full-instance backup.
 
@@ -220,7 +219,7 @@ Do not judge completion solely from the phase number in the header. Assets in th
 
 ### What should I do when a task is queued, running, failed, canceled, or interrupted by a service restart? {#task-states}
 
-Image, video, and audio jobs use independent task channels. You can cancel an individual queued or running task; a running task first enters the “Canceling” state. If you cancel a task with dependencies, the UI warns about downstream tasks that may be affected. Canceling a running task only stops ArcReel-side processing. The upstream task may continue, and any incurred cost is not automatically refunded. Check the provider console when necessary.
+Image, video, and audio jobs use independent task channels. Only queued tasks can be canceled. Once a task starts running, it can no longer be canceled: the provider call already sent runs to completion and its result is saved as an artifact, so the cost already incurred is not wasted. If you are not satisfied with the result, switch back to an earlier version in the version history or regenerate. If you cancel a task with dependencies, the UI lists the queued downstream tasks that will be canceled with it.
 
 The task panel does not have one retry button that works for every task type. After a failure, expand the error details, correct the configuration or input, then regenerate from the corresponding asset, storyboard, or video action. Do not click Generate repeatedly before understanding the cause.
 

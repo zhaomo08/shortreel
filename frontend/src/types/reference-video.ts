@@ -1,12 +1,13 @@
 /**
- * Reference-to-video unit types — mirrors lib/script_models.py Pydantic models.
+ * Reference-to-video unit types — mirrors lib/script/script_models.py Pydantic models.
  *
  * One "unit" produces one rendered video clip. Its body (`text`) is the single
  * source of truth: reference images are resolved from the `@[名称]` mentions at
  * execution time and never persisted or transported.
  */
 
-import type { TransitionType } from "./script";
+import type { DurationExclusionReason, VideoCapabilityProblem } from "./project";
+import type { RenderedPromptPreview, TransitionType } from "./script";
 import type {
   AdmissionProblem,
   VideoRequestCostQuote,
@@ -15,7 +16,7 @@ import type {
 
 export type AssetKind = "product" | "character" | "scene" | "prop";
 
-/** Project.json sheet field for each asset kind. Mirrors lib/asset_types.py SHEET_KEY. */
+/** Project.json sheet field for each asset kind. Mirrors lib/project/asset_types.py SHEET_KEY. */
 export const SHEET_FIELD: Record<AssetKind, "product_sheet" | "character_sheet" | "scene_sheet" | "prop_sheet"> = {
   product: "product_sheet",
   character: "character_sheet",
@@ -25,7 +26,7 @@ export const SHEET_FIELD: Record<AssetKind, "product_sheet" | "character_sheet" 
 
 /**
  * Raw persisted status value returned by the backend in `generated_assets.status`.
- * Mirrors lib/script_models.py:GeneratedAssets.status Pydantic Literal exactly.
+ * Mirrors lib/script/script_models.py:GeneratedAssets.status Pydantic Literal exactly.
  * Note: "storyboard_ready" never appears for reference_video units — it's a legacy
  * storyboard-mode value retained in the shared GeneratedAssets model.
  */
@@ -64,7 +65,8 @@ export interface ReferenceVideoUnit {
   duration_seconds: number;
   transition_to_next: TransitionType;
   note: string | null;
-  generated_assets: UnitGeneratedAssets;
+  /** 尚未生成过任何产物的单元不带这一节——后端只在生成时写入，故读侧一律按可能缺席处理。 */
+  generated_assets?: UnitGeneratedAssets;
   /** Problem shell or mixed-speech marker; generation is blocked until repaired. */
   needs_replan?: boolean;
   /** Pending authoring: the unit's body has not been written by prompt authoring yet. Read-only. */
@@ -76,6 +78,40 @@ export interface ReferenceVideoUnit {
 export interface ReferenceRequestOptions {
   narration_delivery?: "post_production" | "use_tts";
 }
+
+/** 任务类型桶：无可用参考图落 i2v，有则落 r2v。 */
+export type ReferenceVideoBucket = "i2v" | "r2v";
+
+export interface ReferenceDeclaredResource {
+  type: string;
+  name: string;
+}
+
+/**
+ * 服务端对一个单元的定桶结论——镜像 lib/script/reference_video/unit_capabilities.py 的信封。
+ *
+ * 桶按**可用参考图**（水合后）判定，与执行侧同一判据；前端不按「名字已登记」自判。
+ * `problem` 是所落桶的视频请求事实失败；`problems` 是声明引用与可用参考图分裂的阻断问题
+ * （未登记 / 缺图 / 桶改变），`unavailable_references` 点名缺图的引用。
+ */
+export interface ReferenceUnitCapability {
+  unit_id: string;
+  declared_capability: ReferenceVideoBucket;
+  hydrated_capability: ReferenceVideoBucket;
+  declared_references: ReferenceDeclaredResource[];
+  unavailable_references: ReferenceDeclaredResource[];
+  unregistered_references: string[];
+  /** 所落桶收窄后的档位；事实失败时为 null。端点固定时为合法空集。 */
+  allowed_durations: number[] | null;
+  excluded_durations: Record<string, DurationExclusionReason> | null;
+  duration_endpoint_fixed: boolean;
+  duration_endpoint_fixed_reason: string | null;
+  problem: VideoCapabilityProblem | null;
+  problems: ReferenceProjectionProblem[];
+}
+
+/** 按 `unit_id` 索引的逐单元结论。 */
+export type ReferenceUnitCapabilityMap = Record<string, ReferenceUnitCapability>;
 
 export interface ReferenceGenerationRequestOptions extends ReferenceRequestOptions {
   /** Exact video tier accepted for this request; omitted when no cross-tier confirmation is needed. */
@@ -198,7 +234,7 @@ export interface ScriptPreview {
 
 /**
  * reference_video script_plan 结构化中间态（内容确认的可审 / 可改对象）。映射后端
- * lib/script_models.py 的 ReferenceScriptPlanUnit / ReferenceScriptPlanDraft：script_plan 定内容层
+ * lib/script/script_models.py 的 ReferenceScriptPlanUnit / ReferenceScriptPlanDraft：script_plan 定内容层
  * （unit 边界 + unit 时长 + 单元正文），prompt_authoring 视觉编排由用户确认后才触发。
  */
 export interface ReferenceScriptPlanUnit {
@@ -218,7 +254,7 @@ export interface ReferenceScriptPlanDraft {
 /**
  * script_plan 的扁平草稿结构（草稿装的是这个，不是落盘的 `ReferenceScriptPlanDraft`）：
  * `unit_id` 机器派生，落盘前才有——草稿中只有时长 + 原文锚 + 一段引用语法正文。
- * Mirrors lib/script_models.py ReferenceScriptPlanFlatUnit。
+ * Mirrors lib/script/script_models.py ReferenceScriptPlanFlatUnit。
  */
 export interface ReferenceScriptPlanFlatUnit {
   duration_seconds: number;
@@ -227,7 +263,7 @@ export interface ReferenceScriptPlanFlatUnit {
 }
 
 /**
- * 草稿违约条目。Mirrors lib/draft_quarantine.py::violation_entries。
+ * 草稿违约条目。Mirrors lib/script/draft_quarantine.py::violation_entries。
  * `label` 是定位前缀，形如 `"unit E1U02"`（参考生视频，数组下标 = 派生 unit 序号 - 1）或
  * `"segment E1S03"`（narration，与 `segment_id` 对应）；集级违约无定位、为空串。
  * `line` 是该单元正文内 0-based 原始行号（与 `useUnitPromptHighlight.ts` 的 `sourceLine` 同
@@ -257,4 +293,10 @@ export interface ScriptReviewQuarantine {
   /** null 仅在草稿文件已损坏、无法解析信封形状时出现——`violations` 会带一条说明。 */
   content: Record<string, unknown> | null;
   violations: ScriptReviewViolation[];
+}
+
+
+/** 当前草稿按模型能力投影后的最终文本与实发图片，图片顺序对应提示词中的图号。 */
+export interface ReferenceUnitPromptPreview extends RenderedPromptPreview {
+  references: { type: AssetKind; name: string; path: string }[];
 }

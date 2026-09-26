@@ -2,8 +2,8 @@
  * Project-related type definitions.
  *
  * Maps to backend models in:
- * - lib/project_manager.py (ProjectOverview, project.json structure)
- * - lib/workflow_state.py (ProjectStatus / EpisodeMeta read-time fields, from the project summary)
+ * - lib/project/project_manager.py (ProjectOverview, project.json structure)
+ * - lib/workflow/workflow_state.py (ProjectStatus / EpisodeMeta read-time fields, from the project summary)
  * - server/routers/projects.py (ProjectSummary list response)
  */
 
@@ -146,7 +146,7 @@ export interface EpisodeMeta {
   videos?: ArtifactCount;
 }
 
-/** 角色声音绑定方式；与后端 `lib.character_voice.CharacterVoiceBinding` 一一对应，取值增减须两侧同步。 */
+/** 角色声音绑定方式；与后端 `lib.speech.character_voice.CharacterVoiceBinding` 一一对应，取值增减须两侧同步。 */
 export type CharacterVoiceBinding = "prompt" | "reference_audio";
 
 /** 未声明时的取值：提示词软约束。参考音频是可选增强，须由用户显式选择才生效。 */
@@ -272,8 +272,8 @@ export interface ImportProjectResponse {
 export type DurationExclusionReason = "resolution" | "reference";
 
 /**
- * 一次约束上下文下的时长收窄结果与成因，服务端 `lib/config/resolver.py::duration_constraints_report`
- * 算好回传；前端只查表，不持有收窄规则。
+ * 一次约束上下文下的时长收窄结果与成因，由服务端该桶的视频请求事实
+ * （`lib/generation/video_request_facts.py`）算好回传；前端只查表，不持有收窄规则。
  */
 export interface DurationConstraints {
   /** 求值用的生效分辨率；null = 未按分辨率收窄。 */
@@ -281,10 +281,24 @@ export interface DurationConstraints {
   uses_reference_images: boolean;
   /** 收窄结果，升序。 */
   allowed: number[];
-  /** 同分辨率下不走参考图路径的收窄结果，升序；参考生视频画布为无参考图的单元换用它。 */
-  allowed_without_reference_images: number[];
+  /**
+   * 无参考图的视频单元实际会执行的那个桶（i2v）自己的时长收窄结果，升序；参考生视频画布为
+   * 无参考图的单元换用它。项目没配 i2v 桶时为 null（未知，不谎报）：这类项目里这些单元本就
+   * 无法执行，画布按「档位未知」降级而不是拿到一份落差一个参考图约束的假档位。
+   */
+  allowed_without_reference_images: number[] | null;
+  excluded_without_reference_images?: Record<string, DurationExclusionReason> | null;
+  without_reference_problem?: VideoCapabilityProblem | null;
+  without_reference_duration_endpoint_fixed?: boolean;
+  without_reference_duration_endpoint_fixed_reason?: "endpoint" | null;
   /** 全集中被剔除的时长（键为秒数字符串）→ 成因。 */
   excluded: Record<string, DurationExclusionReason>;
+}
+
+export interface VideoCapabilityProblem {
+  code: string;
+  params: Record<string, unknown>;
+  action: string;
 }
 
 /**
@@ -311,4 +325,5 @@ export interface VideoCapabilities {
   duration_constraints: DurationConstraints;
   /** 时长这一维由端点固定（ComfyUI workflow 自己定片长）：档位为空集不是「声明缺失」。 */
   duration_endpoint_fixed?: boolean;
+  duration_endpoint_fixed_reason?: "endpoint" | null;
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { UnitPreviewPanel } from "./UnitPreviewPanel";
-import type { ReferenceVideoUnit } from "@/types";
+import type { ReferenceVideoUnit, UnitGeneratedAssets } from "@/types";
 
 // VersionTimeMachine 的 busy 只关面板内的恢复按钮，触发按钮的可用性不变；替身把这个
 // 入参渲染成可断言的属性，避免为了读它去展开面板、加载版本列表。
@@ -30,7 +30,9 @@ function versionMachineBusy(): boolean {
   return screen.getByTestId("version-time-machine").dataset.busy === "true";
 }
 
-function mkUnit(overrides: Partial<ReferenceVideoUnit> = {}): ReferenceVideoUnit {
+function mkUnit(
+  overrides: Partial<ReferenceVideoUnit> = {},
+): ReferenceVideoUnit & { generated_assets: UnitGeneratedAssets } {
   return {
     unit_id: "E1U1",
     text: "x",
@@ -140,10 +142,9 @@ describe("UnitPreviewPanel", () => {
       expect(versionMachineBusy()).toBe(true);
     });
 
-    it("取消中置 busy——占用比 running 状态活得更久", () => {
-      // cancelling 期间不展示为生成中（status 不是 running），但 worker 仍可能在写
-      // 成片文件，占用判定仍成立；仅看 status 会漏禁用
-      render(<UnitPreviewPanel unit={mkUnit()} projectName="proj" busy cancelling />);
+    it("占用命中而 status 仍是旧失败行时置 busy", () => {
+      // 重试的乐观窗口内旧失败行仍在，status 不是 running；仅看 status 会漏禁用
+      render(<UnitPreviewPanel unit={mkUnit()} projectName="proj" status="failed" busy />);
       expect(versionMachineBusy()).toBe(true);
     });
 

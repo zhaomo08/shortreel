@@ -4,9 +4,9 @@
 或选中后在合成时才失败。这个分支只接 CPA 与国外供应商，OpenAI 是唯一的 TTS 来源。
 """
 
-from lib.audio_backends import get_registered_backends
+from lib.backends.audio_backends import get_registered_backends
+from lib.backends.providers import PROVIDER_OPENAI
 from lib.config.registry import PROVIDER_REGISTRY, ModelInfo
-from lib.providers import PROVIDER_OPENAI
 
 
 def _openai_audio_models() -> dict[str, ModelInfo]:

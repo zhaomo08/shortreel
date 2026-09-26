@@ -5,42 +5,50 @@
 都没写进去，模型收到的是「props 'reason' 的内容必须是对象」。
 """
 
-from server.agent_runtime.sdk_tools.patch_project import _without_narration_entries
+import pytest
+from pydantic import ValidationError
+
+from server.tool_runtime import PatchProjectRequest
 
 
 def test_narration_string_is_dropped_and_assets_survive() -> None:
-    args = {
-        "table": "props",
-        "entries": {
-            "手机": {"description": "一部智能手机"},
-            "奶茶": {"description": "一杯奶茶"},
-            "reason": "Add missing props from source text",
-        },
-    }
-    assert _without_narration_entries(args)["entries"] == {
-        "手机": {"description": "一部智能手机"},
-        "奶茶": {"description": "一杯奶茶"},
-    }
+    request = PatchProjectRequest.model_validate(
+        {
+            "table": "props",
+            "entries": {
+                "手机": {"description": "一部智能手机"},
+                "奶茶": {"description": "一杯奶茶"},
+                "reason": "Add missing props from source text",
+            },
+        }
+    )
+    assert request.entries == {"手机": {"description": "一部智能手机"}, "奶茶": {"description": "一杯奶茶"}}
 
 
 def test_an_asset_actually_named_reason_is_kept() -> None:
     """判据是值的形状不是键名：资产名由用户自由命名，按名字剥会误伤。"""
-    args = {"table": "props", "entries": {"reason": {"description": "一块写着 reason 的牌子"}}}
-    assert _without_narration_entries(args) == args
+    entries = {"reason": {"description": "一块写着 reason 的牌子"}}
+    assert PatchProjectRequest.model_validate({"table": "props", "entries": entries}).entries == entries
 
 
 def test_untouched_when_nothing_looks_like_narration() -> None:
-    args = {"table": "props", "entries": {"手机": {"description": "一部智能手机"}}}
-    assert _without_narration_entries(args) == args
+    entries = {"手机": {"description": "一部智能手机"}}
+    assert PatchProjectRequest.model_validate({"table": "props", "entries": entries}).entries == entries
 
 
-def test_all_non_objects_go_downstream_for_the_real_error() -> None:
+def test_all_non_objects_are_not_stripped_to_empty() -> None:
     """整个 entries 都不是对象时不是说明混入，剥成空反而把真错误藏了。"""
-    args = {"table": "props", "entries": {"手机": "一部智能手机"}}
-    assert _without_narration_entries(args) == args
+    request = PatchProjectRequest.model_validate({"table": "props", "entries": {"手机": "一部智能手机"}})
+    assert request.entries == {"手机": "一部智能手机"}
 
 
 def test_other_branches_pass_through() -> None:
     """settings / overview 分支不带 entries，不该被这层碰到。"""
-    args = {"settings": {"source_language": "zh"}}
-    assert _without_narration_entries(args) == args
+    assert PatchProjectRequest.model_validate({"settings": {"source_language": "zh"}}).settings == {
+        "source_language": "zh"
+    }
+
+
+def test_unknown_top_level_keys_still_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PatchProjectRequest.model_validate({"settings": {"source_language": "zh"}, "typo": 1})

@@ -6,7 +6,7 @@
 
 import pytest
 
-from lib.asset_inventory import AssetInventoryInvalidRequest, _prepare_entries
+from lib.project.asset_inventory import AssetInventoryInvalidRequest, _prepare_entries
 
 
 def test_narration_bucket_is_dropped_and_real_buckets_survive() -> None:

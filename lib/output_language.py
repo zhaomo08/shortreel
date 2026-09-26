@@ -5,15 +5,15 @@
 这个分支同时做中文与英文投放，梗概用哪种语言写和成片要哪种语言是两件事——中文梗概
 做英文片是常态，所以语言由建项目时选定并存进项目，识别结果只作存档。
 
-``source_language`` 存语言码：语速表（``lib.speech_rate``）、阅读单位
-（``lib.text_metrics``）与工具入参校验（``server.tool_runtime``）都拿它当键。
+``source_language`` 存语言码：语速表（``lib.speech.speech_rate``）、阅读单位
+（``lib.infra.text_metrics``）与工具入参校验（``server.tool_runtime``）都拿它当键。
 提示词里要的是语言名——模板写作「所有字符串值必须使用 {target_language}」，填语言码
 会读成「必须使用 en」——由 :func:`language_display_name` 换算。
 """
 
 from __future__ import annotations
 
-#: 合法的成片语言码，与 ``server.tool_runtime`` 的入参校验、``lib.speech_rate``
+#: 合法的成片语言码，与 ``server.tool_runtime`` 的入参校验、``lib.speech.speech_rate``
 #: 的语速表同一套。
 SUPPORTED_LANGUAGE_CODES: tuple[str, ...] = ("zh", "en", "vi")
 

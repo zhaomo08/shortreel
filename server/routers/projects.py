@@ -1,7 +1,7 @@
 """
 项目管理路由
 
-处理项目的 CRUD 操作，复用 lib/project_manager.py
+处理项目的 CRUD 操作，复用 lib/project/project_manager.py
 
 本模块多数处理器以 ``except Exception`` 兜底为 500。领域异常（``ApiError`` 及其子类）
 可以在被兜底覆盖的写盘闭包内抛出（如 backend 字段校验、脚本结构校验），因此各处理器的
@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 if TYPE_CHECKING:
-    from server.services.jianying_draft_service import JianyingDraftService
+    from server.services.presentation.jianying_draft_service import JianyingDraftService
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi import Path as FastAPIPath
@@ -36,34 +36,41 @@ from starlette.background import BackgroundTask
 
 logger = logging.getLogger(__name__)
 
-from lib.api_errors import ApiError, BadRequestError, NotFoundError, UnprocessableError
-from lib.asset_fingerprints import compute_asset_fingerprints
-from lib.asset_types import asset_name_comparison_key
-from lib.character_voice import PROJECT_FIELD as CHARACTER_VOICE_BINDING_FIELD
-from lib.character_voice import VALID_CHARACTER_VOICE_BINDINGS
-from lib.config.resolver import ConfigResolver, VideoBucketCapabilityError
+from lib.agent.profile_manifest import ContentMode
+from lib.config.resolver import (
+    ConfigResolver,
+    VideoBucketCapabilityError,
+    caps_generation_mode,
+    video_bucket_for_generation_mode,
+)
 from lib.db import async_session_factory
-from lib.episode_target_duration import (
+from lib.episode.episode_target_duration import (
     EPISODE_TARGET_DURATION_FIELD,
     MAX_EPISODE_TARGET_DURATION,
     MIN_EPISODE_TARGET_DURATION,
     is_valid_episode_target_duration,
 )
-from lib.i18n import Translator
-from lib.json_io import domain_error_on_value_error
+from lib.generation.video_request_facts import ResolutionOverride, VideoRequestFactsError
+from lib.i18n import render_generation_input_error
+from lib.infra.api_errors import ApiError, BadRequestError, NotFoundError, UnprocessableError
+from lib.infra.json_io import domain_error_on_value_error
 from lib.output_language import LANGUAGE_FOLLOWS_SOURCE_FIELD
-from lib.profile_manifest import ContentMode
-from lib.project_change_hints import project_change_source
-from lib.project_manager import EmptySourceError, EpisodeScriptReboundError, SourceKind, get_project_manager
-from lib.script_batch_edit import ScriptBatchEditCommand, ScriptBatchEditor, blank_item_after, script_revision
-from lib.script_editor import resolve_items
-from lib.script_references import annotate_derivative_references
-from lib.speech_rate import MAX_SPEECH_RATE_UPS, MIN_SPEECH_RATE_UPS, SPEECH_RATE_FIELD, is_valid_speech_rate
-from lib.style_templates import is_known_template, resolve_template_prompt
-from lib.workflow_plan import WorkflowPlan, WorkflowPlanRequest
-from lib.workflow_state import ProjectSummary, WorkflowRequestError, WorkflowStateService, WorkflowStatus
+from lib.project.asset_fingerprints import compute_asset_fingerprints
+from lib.project.asset_types import asset_name_comparison_key
+from lib.project.project_change_hints import project_change_source
+from lib.project.project_manager import EmptySourceError, EpisodeScriptReboundError, SourceKind, get_project_manager
+from lib.prompts.style_templates import is_known_template, resolve_template_prompt
+from lib.script.script_batch_edit import ScriptBatchEditCommand, ScriptBatchEditor, blank_item_after, script_revision
+from lib.script.script_editor import resolve_items
+from lib.script.script_references import annotate_derivative_references
+from lib.speech.character_voice import PROJECT_FIELD as CHARACTER_VOICE_BINDING_FIELD
+from lib.speech.character_voice import VALID_CHARACTER_VOICE_BINDINGS
+from lib.speech.speech_rate import MAX_SPEECH_RATE_UPS, MIN_SPEECH_RATE_UPS, SPEECH_RATE_FIELD, is_valid_speech_rate
+from lib.workflow.workflow_plan import WorkflowPlan, WorkflowPlanRequest
+from lib.workflow.workflow_state import ProjectSummary, WorkflowRequestError, WorkflowStateService, WorkflowStatus
 from server.auth import CurrentUser, create_download_token, verify_download_token
 from server.dependencies import require_project_migration_ok
+from server.i18n import Translator
 from server.routers._reorder import full_permutation_error
 from server.routers._script_edits import (
     execute_current_script_edit,
@@ -71,13 +78,18 @@ from server.routers._script_edits import (
     script_batch_status,
 )
 from server.routers._validators import split_video_backend_query, validate_backend_value
-from server.services import workflow_planner as workflow_plan_service
-from server.services.project_archive import (
+from server.services.admission.prompt_preview import ScriptItemNotFound, preview_item_prompts
+from server.services.project import workflow_planner as workflow_plan_service
+from server.services.project.project_archive import (
     ProjectArchiveService,
     ProjectArchiveValidationError,
 )
-from server.services.project_cover import resolve_project_cover
-from server.services.prompt_preview import ScriptItemNotFound, preview_item_prompts
+from server.services.project.project_cover import resolve_project_cover
+from server.services.tasks.video_caps import (
+    annotate_reference_no_image_caps,
+    capability_request_facts,
+    duration_constraints_payload,
+)
 
 router = APIRouter()
 
@@ -177,14 +189,14 @@ SpeechRateOverride = Annotated[float | None, BeforeValidator(_reject_bool_speech
 
 #: 创建 / PATCH 请求上的成片语言字段类型。``"auto"`` 表示跟随源文——落盘时翻成
 #: ``language_follows_source=True``，语言事实由概述生成时的识别结果补上；三个语言码
-#: 表示锁定，取值域与 ``lib.speech_rate`` 的语速表同一套。None 表示不改动。
+#: 表示锁定，取值域与 ``lib.speech.speech_rate`` 的语速表同一套。None 表示不改动。
 SourceLanguage = Literal["auto", "zh", "en", "vi"] | None
 
 
 def _validated_episode_target_duration(value: int, _t: Translator) -> int:
     """把创建 / PATCH 传入的单集目标时长收进硬区间，越界即 422。
 
-    区间与 ``lib.episode_target_duration`` 的读时守卫、``patch_project`` 的强制转换、
+    区间与 ``lib.episode.episode_target_duration`` 的读时守卫、``patch_project`` 的强制转换、
     前端输入校验同一把尺（``is_valid_episode_target_duration``），不在这里另写边界数字。
     """
     if not is_valid_episode_target_duration(value):
@@ -202,7 +214,7 @@ def _validated_episode_target_duration(value: int, _t: Translator) -> int:
 def _validated_speech_rate(value: float, _t: Translator) -> float:
     """把创建 / PATCH 传入的口播语速估算收进硬区间，越界即 422。
 
-    区间与 ``lib.speech_rate`` 的读时守卫、前端输入校验同一把尺（``is_valid_speech_rate``），
+    区间与 ``lib.speech.speech_rate`` 的读时守卫、前端输入校验同一把尺（``is_valid_speech_rate``），
     不在这里另写边界数字。
     """
     rate = float(value)
@@ -238,7 +250,7 @@ class CreateProjectRequest(BaseModel):
     # 宫格分镜开关：只改变分镜图的生产方式，不是独立生成模式；仅 storyboard 生成模式有意义，
     # 创建后可经项目 PATCH 随时切换。ad 项目拒绝开启。
     grid_storyboard: bool = False
-    # 口播语速估算（阅读单位 / 秒）项目级覆盖：空 = 回退 lib.speech_rate 的语言默认。
+    # 口播语速估算（阅读单位 / 秒）项目级覆盖：空 = 回退 lib.speech.speech_rate 的语言默认。
     # 与 TTS 的 narration_speed（供应商配音倍率）无关，两者不联动。
     speech_rate_units_per_second: SpeechRateOverride = None
     style_template_id: str | None = None
@@ -463,7 +475,7 @@ async def export_project_archive(
 
 
 def get_jianying_draft_service() -> JianyingDraftService:
-    from server.services.jianying_draft_service import JianyingDraftService
+    from server.services.presentation.jianying_draft_service import JianyingDraftService
 
     return JianyingDraftService(get_project_manager())
 
@@ -514,8 +526,8 @@ async def export_jianying_draft(
     draft_path = _validate_draft_path(draft_path, _t)
 
     # 3. 调用服务
-    from server.services.jianying_draft_service import NoCompletedSegmentsError
-    from server.services.presentation_read_model import PresentationUnavailableError
+    from server.services.presentation.jianying_draft_service import NoCompletedSegmentsError
+    from server.services.presentation.presentation_read_model import PresentationUnavailableError
 
     try:
         zip_path = await svc.export_episode_draft(
@@ -560,7 +572,7 @@ async def list_projects(summaries: WorkflowStateServiceDep):
         projects = []
         for name in manager.list_projects():
             try:
-                # 尝试加载项目元数据
+                # 列举之后被删除的项目不再列出
                 if manager.project_exists(name):
                     project = manager.load_project(name)
                     # 一次性预加载每集剧本，喂给 cover + status 两路下游，去除重复 JSON I/O。
@@ -613,17 +625,6 @@ async def list_projects(summaries: WorkflowStateServiceDep):
                             "style_image": project.get("style_image"),
                             "thumbnail": thumbnail,
                             "status": status,
-                        }
-                    )
-                else:
-                    # 没有 project.json 的项目
-                    projects.append(
-                        {
-                            "name": name,
-                            "title": "",
-                            "style": "",
-                            "thumbnail": None,
-                            "status": {},
                         }
                     )
             except Exception as e:
@@ -683,7 +684,7 @@ async def create_project(
                 if value:
                     validate_backend_value(value, field_name)
 
-            # 口播语速估算：可选，未填则不落盘（缺省即回退 lib.speech_rate 的语言默认）。
+            # 口播语速估算：可选，未填则不落盘（缺省即回退 lib.speech.speech_rate 的语言默认）。
             # 在 create_project 之前判，越界请求不留下半成品项目目录。
             speech_rate = (
                 None
@@ -761,37 +762,56 @@ async def get_video_capabilities(
 
     `video_backend`（"provider/model"）用于设置表单里尚未保存的候选模型：不带该参数时按已
     落盘配置解析，带上则按候选模型 × 本项目的生成模式解析，使 voice_consistency 等二维派生值
-    对应用户当前选中的模型而非上一次保存的模型。裸 provider（无 "/"）按其 registry
+    对应用户当前选中的模型而非上一次保存的模型；候选身份先过所属桶能力闸。裸 provider（无 "/"）按其 registry
     默认视频 model 补全，与 project.json 存量裸 provider 覆盖同口径（见 `_parse_project_provider`）。
 
-    `resolution` / `uses_reference_images` 是时长联动约束的求值上下文，决定响应里
-    `duration_constraints` 的收窄结果与成因：缺省按项目已保存档位与生成模式求值（工作台），
-    表单里编辑中的未保存值显式带上（设置页）；`resolution` 传空串表示表单里选了「自动」，
-    不回退到已保存档位。收窄规则只在 `lib.config.resolver`，前端不复算。
+    `resolution` / `uses_reference_images` 是表单里编辑中的未保存值：`uses_reference_images` 决定
+    按哪个任务类型桶解析（缺省按项目生成模式），`resolution` 作为「覆盖分辨率」交给该桶的视频请求
+    事实求值，响应里的 `duration_constraints` 即这次求值的收窄结果与成因。缺省按项目已保存档位求值
+    （工作台）；`resolution` 传空串表示表单里选了「自动」：不回退到已保存档位，按项目未存档位解析
+    （自定义供应商仍取模型默认档）。
 
     能力按项目生成模式定轴、全项目同一口径，故无需集号：生成模式创建即定、之后不可更改。
     """
     resolver = ConfigResolver(async_session_factory)
+    resolution_override = None if resolution is None else ResolutionOverride(resolution or None)
     try:
+        project = get_project_manager().load_project(name)
+        generation_type = (
+            ("r2v" if uses_reference_images else "i2v")
+            if uses_reference_images is not None
+            else video_bucket_for_generation_mode(caps_generation_mode(project))
+        )
         if video_backend:
             provider_id, model_id = split_video_backend_query(video_backend)
-            project = get_project_manager().load_project(name)
-            return await resolver.video_capabilities_for_model(
-                provider_id,
-                model_id,
-                project,
-                resolution=resolution,
-                uses_reference_images=uses_reference_images,
+            project = {**project, f"video_provider_{generation_type}": f"{provider_id}/{model_id}"}
+            await resolver.resolve_video_backend(project, None, generation_type=generation_type)
+            caps = await resolver.video_capabilities_for_model(
+                provider_id, model_id, project, generation_type=generation_type
             )
-        return await resolver.video_capabilities(
-            name, resolution=resolution, uses_reference_images=uses_reference_images
+            if (caps["provider_id"], caps["model"]) != (provider_id, model_id):
+                raise BadRequestError("video_capability_reference_unavailable", provider=provider_id, model=model_id)
+        else:
+            caps = await resolver.video_capabilities_for_project(project, generation_type=generation_type)
+        request_facts = await capability_request_facts(
+            project,
+            generation_type=generation_type,
+            config_resolver=resolver,
+            resolution_override=resolution_override,
         )
+        caps["duration_constraints"] = duration_constraints_payload(request_facts)
+        if caps.get("generation_mode") == "reference_video":
+            await annotate_reference_no_image_caps(caps, project, request_facts, config_resolver=resolver)
+        return caps
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except VideoBucketCapabilityError as exc:
         # 任务类型桶解析闸的报错自带 errors 目录 key 与渲染参数，转成结构化 400 让用户看到修复指引，
         # 不被下面的通用 422 文案吞掉（ValueError 子类，须先于其捕获）
         raise BadRequestError(exc.code, **exc.params) from exc
+    except VideoRequestFactsError as exc:
+        # 视频请求事实的问题码即 errors 目录 key（ValueError 子类，须先于其捕获）
+        raise UnprocessableError(exc.code, **exc.params) from exc
     except ValueError as exc:
         # 异常原文只进日志：str(exc) 混英文技术细节，直接插进翻译文案会让 en/vi 界面混入未译原文
         logger.warning("项目 '%s' 视频模型能力解析失败: %s", name, exc)
@@ -1227,7 +1247,9 @@ async def preview_script_item_prompts(
     def _side(rendered):
         return {
             "text": rendered.text,
-            "unavailable": _t(rendered.unavailable) if rendered.unavailable else None,
+            "unavailable": render_generation_input_error(rendered.unavailable, rendered.unavailable_params, _t)
+            if rendered.unavailable
+            else None,
             "is_text_form": rendered.is_text_form,
             # 渲染时产生的提示（如参考图超限裁剪）与任务结果的 warnings 同源，同样按请求语言渲染成成品文案
             "warnings": [_t(warning["key"], **warning["params"]) for warning in rendered.warnings],

@@ -4,7 +4,7 @@
 处理分镜图、视频、角色图、线索图的生成请求。
 所有生成请求入队到 GenerationQueue，由 GenerationWorker 异步执行。
 
-错误处理：路由函数体只保留 happy path。领域异常（``lib.api_errors``）与 lib 层异常
+错误处理：路由函数体只保留 happy path。领域异常（``lib.infra.api_errors``）与 lib 层异常
 （``FileNotFoundError`` / ``ScriptEditError`` / ``TaskSpecValidationError`` / 未预期异常）
 由 app 级 exception handler 统一映射为 HTTP 响应并脱敏（见 ``server/error_handlers.py``）。
 """
@@ -16,22 +16,40 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from lib.api_errors import BadRequestError, ConflictError, NotFoundError
-from lib.artifact_activation import (
+from lib.artifacts.artifact_activation import (
     active_artifact_currency_resolver,
     artifact_is_usable,
     resolve_artifact_episode,
     resolve_usable_storyboard_video_inputs,
 )
-from lib.artifact_manifest import ArtifactKey
-from lib.asset_derivatives import DERIVATIVE_TASK_TYPE, DerivativeSheetSource, resolve_derivative_sheet_source
-from lib.asset_types import ASSET_SPECS, resolve_asset_key, validate_asset_name
+from lib.artifacts.artifact_manifest import ArtifactKey
 from lib.config.resolver import ConfigResolver, video_bucket_for_generation_mode
-from lib.generation_queue import get_generation_queue
-from lib.generation_queue_client import TaskSpec
-from lib.i18n import Translator
-from lib.json_io import domain_error_on_value_error
-from lib.narration_delivery import (
+from lib.generation.generation_queue import get_generation_queue
+from lib.generation.generation_queue_client import TaskSpec
+from lib.generation.video_request_facts import (
+    CONFIGURED_VIDEO_IDENTITY,
+    VideoRequestFacts,
+    VideoRequestFactsError,
+    audio_switch_conflict,
+    evaluate_video_request_facts,
+)
+from lib.infra.api_errors import BadRequestError, ConflictError, NotFoundError
+from lib.infra.json_io import domain_error_on_value_error
+from lib.infra.path_safety import safe_exists, safe_join
+from lib.project.asset_derivatives import DERIVATIVE_TASK_TYPE, DerivativeSheetSource, resolve_derivative_sheet_source
+from lib.project.asset_types import ASSET_SPECS, resolve_asset_key, validate_asset_name
+from lib.project.project_change_hints import build_change_label, emit_project_change_batch, project_change_source
+from lib.project.project_manager import get_project_manager, is_reference_video_project
+from lib.script.script_editor import resolve_items
+from lib.script.script_models import get_generated_assets
+from lib.script.script_skeleton import resolve_script_kind
+from lib.script.storyboard_sequence import (
+    EndFrameImageUnavailable,
+    StoryboardImageUnavailable,
+    find_storyboard_item,
+    get_storyboard_items,
+)
+from lib.speech.narration_delivery import (
     POST_PRODUCTION,
     USE_TTS,
     NarratedVideoDurationPreparation,
@@ -42,35 +60,23 @@ from lib.narration_delivery import (
     video_request_requires_exact_quote,
     video_request_reuses_current_visual,
 )
-from lib.path_safety import safe_exists, safe_join
-from lib.project_change_hints import build_change_label, emit_project_change_batch, project_change_source
-from lib.project_manager import get_project_manager, is_reference_video_project
-from lib.reference_video.request_projection import ProjectionResolutionError
-from lib.script_editor import resolve_items
-from lib.script_models import get_generated_assets
-from lib.script_skeleton import resolve_script_kind
-from lib.speech_composition import SpeechMode, admit_script_unit
-from lib.storyboard_sequence import (
-    EndFrameImageUnavailable,
-    StoryboardImageUnavailable,
-    find_storyboard_item,
-    get_storyboard_items,
-)
+from lib.speech.speech_composition import SpeechMode, admit_script_unit
 from server.auth import CurrentUser
+from server.i18n import Translator
 from server.routers._validators import require_audio_switch_supported, require_video_bucket_capability
-from server.services.cost_estimation import quote_video_request
-from server.services.derivative_sheet_tasks import build_derivative_sheet_instruction
-from server.services.generation_context import AudioLaneRequest, resolve_generation_context
-from server.services.image_edit_tasks import (
+from server.services.admission.cost_estimation import quote_video_request
+from server.services.admission.reference_admission import require_admitted_storyboard_references
+from server.services.tasks.derivative_sheet_tasks import build_derivative_sheet_instruction
+from server.services.tasks.generation_context import AudioLaneRequest, resolve_generation_context
+from server.services.tasks.image_edit_tasks import (
     EDITABLE_RESOURCE_TYPES,
     resolve_usable_image_edit_source,
 )
-from server.services.narration_delivery_tasks import (
+from server.services.tasks.narration_delivery_tasks import (
     active_narrated_video_resource_ids,
     prepare_current_storyboard_narrated_video_duration,
     tts_task_in_progress,
 )
-from server.services.reference_admission import require_admitted_storyboard_references
 
 logger = logging.getLogger(__name__)
 
@@ -157,22 +163,6 @@ async def _localized_narrated_video_payload(
             payload["allowed"] = False
             problems.append(cost_payload)
     return payload
-
-
-class GenerateCharacterRequest(BaseModel):
-    prompt: str
-
-
-class GenerateSceneRequest(BaseModel):
-    prompt: str
-
-
-class GeneratePropRequest(BaseModel):
-    prompt: str
-
-
-class GenerateProductRequest(BaseModel):
-    prompt: str
 
 
 class EditImageRequest(BaseModel):
@@ -289,12 +279,9 @@ async def generate_video(
         if resolved is None:
             raise NotFoundError("segment_not_found", id=segment_id)
         require_admitted_storyboard_references(project, [resolved[0]])
-        script_kind = resolve_script_kind(script)
-        admission = admit_script_unit(script_kind, resolved[0])
-        if admission.allowed and script_kind in {"segments", "shots"}:
-            # narration / ad 的 worker 会把请求 prompt 里的 dialogue 原样下发；准入必须检查
-            # 实际入队的 prompt 与盘上旁白字段，而不能只检查可能已过时的 script prompt。
-            admission = admit_script_unit(script_kind, {**resolved[0], "video_prompt": req.prompt})
+        # worker 执行时按剧本当前的 video_prompt 生成，入队 payload 里的请求 prompt 不参与执行；
+        # 发声准入与下面 use_tts 预检的视觉依据因此都以盘上单元为准。
+        admission = admit_script_unit(resolve_script_kind(script), resolved[0])
         if not admission.allowed:
             raise HTTPException(status_code=409, detail=admission.to_dict())
         # 同分镜图端点：按正式脚本的 video_prompt 判待生成，请求体里的 prompt 不能代替它。
@@ -324,8 +311,24 @@ async def generate_video(
     # 上面的生成模式检查已挡掉参考生视频，此处对能到达的项目恒为 i2v。解析闸预检让能力缺失 /
     # 悬空引用在提交入口即返回修复指引，而非任务面板里的异步失败。
     _video_bucket = video_bucket_for_generation_mode(project.get("generation_mode"))
-    await require_video_bucket_capability(project, _video_bucket)
-    await require_audio_switch_supported(project, _video_bucket)
+    video_request_facts = None
+    if req.narration_delivery == USE_TTS:
+        from lib.db import async_session_factory
+
+        video_request_facts = await evaluate_video_request_facts(
+            project,
+            route="storyboard",
+            generation_type=_video_bucket,
+            identity=CONFIGURED_VIDEO_IDENTITY,
+            resolver=ConfigResolver(async_session_factory),
+        )
+        if isinstance(video_request_facts, VideoRequestFacts) and (
+            conflict := audio_switch_conflict(video_request_facts)
+        ):
+            raise BadRequestError(conflict.code, **conflict.parameters())
+    else:
+        await require_video_bucket_capability(project, _video_bucket)
+        await require_audio_switch_supported(project, _video_bucket)
 
     delivery_projection: NarratedVideoDurationPreparation | None = None
     delivery_payload: dict[str, object] | None = None
@@ -346,7 +349,7 @@ async def generate_video(
                 script=script,
                 script_file=req.script_file,
                 item=item,
-                visual_prompt=req.prompt,
+                visual_prompt=item.get("video_prompt"),
                 seed=req.seed,
                 generation_type=_video_bucket,
                 # use_tts 不把请求中的 duration 持久化进队列；预检必须和 worker 一样基于
@@ -362,8 +365,9 @@ async def generate_video(
                 ),
                 user_id=user.id,
                 queue=queue,
+                video_request_facts=video_request_facts,
             )
-        except ProjectionResolutionError as exc:
+        except VideoRequestFactsError as exc:
             raise BadRequestError(exc.code, **exc.params) from exc
         delivery_payload = await _localized_narrated_video_payload(delivery_projection, _t)
         if not delivery_payload["allowed"]:
@@ -807,11 +811,13 @@ async def _enqueue_asset_generation(
     asset_type: str,
     project_name: str,
     resource_name: str,
-    prompt: str,
     user_id: str,
     _t: Translator,
 ) -> dict:
-    """项目级资产（character / scene / prop / product）资产图生成共用入队逻辑。"""
+    """项目级资产（character / scene / prop / product）资产图生成共用入队逻辑。
+
+    请求体没有 prompt：描述只取项目里存储的条目，执行时按当次的项目状态重读。
+    """
     spec = ASSET_SPECS[asset_type]
     keys = _ASSET_GENERATE_I18N[asset_type]
 
@@ -822,6 +828,10 @@ async def _enqueue_asset_generation(
         resolved = resolve_asset_key(project.get(spec.bucket_key), resource_name)
         if resolved is None:
             raise NotFoundError(keys["not_found"], name=resource_name)
+        entry = project[spec.bucket_key][resolved]
+        description = entry.get("description") if isinstance(entry, dict) else None
+        if not isinstance(description, str) or not description.strip():
+            raise BadRequestError("asset_description_required", name=resolved)
         return resolved
 
     resource_key = await asyncio.to_thread(_sync)
@@ -830,7 +840,6 @@ async def _enqueue_asset_generation(
         task_type=asset_type,
         media_type="image",
         resource_id=resource_key,
-        prompt=prompt,
     )
 
     queue = get_generation_queue()
@@ -856,7 +865,6 @@ async def _enqueue_asset_generation(
 async def generate_character(
     project_name: str,
     char_name: str,
-    req: GenerateCharacterRequest,
     user: CurrentUser,
     _t: Translator,
 ):
@@ -865,7 +873,6 @@ async def generate_character(
         asset_type="character",
         project_name=project_name,
         resource_name=char_name,
-        prompt=req.prompt,
         user_id=user.id,
         _t=_t,
     )
@@ -925,7 +932,6 @@ async def generate_character_derivative(
 async def generate_scene(
     project_name: str,
     scene_name: str,
-    req: GenerateSceneRequest,
     user: CurrentUser,
     _t: Translator,
 ):
@@ -934,7 +940,6 @@ async def generate_scene(
         asset_type="scene",
         project_name=project_name,
         resource_name=scene_name,
-        prompt=req.prompt,
         user_id=user.id,
         _t=_t,
     )
@@ -944,7 +949,6 @@ async def generate_scene(
 async def generate_prop(
     project_name: str,
     prop_name: str,
-    req: GeneratePropRequest,
     user: CurrentUser,
     _t: Translator,
 ):
@@ -953,7 +957,6 @@ async def generate_prop(
         asset_type="prop",
         project_name=project_name,
         resource_name=prop_name,
-        prompt=req.prompt,
         user_id=user.id,
         _t=_t,
     )
@@ -963,7 +966,6 @@ async def generate_prop(
 async def generate_product(
     project_name: str,
     product_name: str,
-    req: GenerateProductRequest,
     user: CurrentUser,
     _t: Translator,
 ):
@@ -972,7 +974,6 @@ async def generate_product(
         asset_type="product",
         project_name=project_name,
         resource_name=product_name,
-        prompt=req.prompt,
         user_id=user.id,
         _t=_t,
     )

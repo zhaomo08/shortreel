@@ -161,6 +161,18 @@ Application services coordinate:
 
 The service layer should depend on stable protocols instead of exposing provider SDK-specific objects to higher layers.
 
+### 6.1 Core Library and Server Boundary {#core-server-boundary}
+
+The backend consists of two packages, the core library `lib/` and the server `server/`. Dependencies may only point from the server to the core library.
+
+- **The core library** holds domain logic and infrastructure: projects and assets, scripts and storyboards, the generation queue, provider calls, billing, database access, and so on. It is unaware that delivery mechanisms such as HTTP, the Agent SDK, or SSE exist.
+- **The server** is the delivery layer (HTTP routes, Agent tools, MCP) plus the use-case orchestration shared by multiple entry points; the latter are the application services (`server/services/`).
+- Ownership is decided by what a module is, not by who uses it: a domain module used only by the server still belongs to the core library, and a pure domain service that does not depend on the server should move into the core library.
+- Routes may call the core library directly; they are not required to go through an application service. An application service is needed only in two cases: the same use case is shared by multiple entry points, or a transaction or compensation must be coordinated across several domain packages.
+- Glue bound to the web framework belongs to the server. For example, the message tables and per-locale rendering live in `lib/i18n/`, while the dependency that resolves the locale from the request's `Accept-Language` header and injects a translator into routes lives in `server/i18n.py`.
+
+This boundary is enforced by dependency checks (import-linter, with contracts in `pyproject.toml`): "the core library does not depend on the server" and "the core library does not depend on the HTTP framework" (fastapi / starlette). Neither contract has exemptions. When the core library needs a server capability, the application assembly point injects it: for example, `server/app.py` passes the generation Worker its task executor and resume executor when constructing it.
+
 ## 7. Provider Abstraction {#provider-abstraction}
 
 ArcReel uses:
@@ -219,7 +231,7 @@ Key capabilities include:
 - persistent state;
 - recovery after interruption;
 - failure records;
-- task cancellation;
+- cancellation of queued tasks;
 - project event notifications and task status refreshes.
 
 ### 8.1 Why Tasks Must Be Persistent {#why-persistent-tasks}
@@ -264,9 +276,27 @@ The application data root is resolved in this order:
 
 1. `ARCREEL_DATA_DIR`
 2. compatibility variable `AI_ANIME_PROJECTS`
-3. default `projects/`
+3. default `<repository root>/projects/`
 
-The default SQLite database also resides in the application data directory.
+Layout of the data root ([ADR 0088](https://github.com/ArcReel/ArcReel/blob/main/docs/adr/0088-data-root-layered-projects-subdirectory.md)):
+
+```text
+<data root>/
+├── projects/<project-name>/   projects and generated assets
+├── global_assets/             global asset library
+├── users/<user_id>/memory/    Agent user memory
+├── arcreel.db                 default SQLite database
+├── logs/                      file logs
+├── vertex_keys/               Vertex credentials
+├── trial_runs/                output of endpoint "Test connection" runs
+└── runtime/                   generation admission locks, migration completion markers, migration error log
+```
+
+- The location of every entry comes only from `DataRootLayout` in `lib/infra/data_root_layout.py`; other code neither builds these paths itself nor derives the data root from a project directory.
+- "What is a project" is answered only by `is_project_dir`: a directory under `projects/` whose name matches the project name rule and that contains `project.json`. No other entry in the data root is a project, so new system directories need no prefix or registration list.
+- Agent read access to the data root is denied by default; only the current project and the current user's memory are allowed.
+- The code directory holds only code and configuration; nothing writes runtime data into it.
+- When upgrading from the old layout, the data root layout migration at startup (`lib/infra/data_root_layout_migration.py`) moves entries into the locations above and then writes a completion marker under `runtime/`.
 
 ## 10. Database {#database}
 
@@ -415,7 +445,7 @@ A complete integration of a new provider usually requires:
 8. integrating with the Settings page;
 9. adding unit and integration tests;
 10. updating provider documentation;
-11. verifying cancellation, timeouts, and retries.
+11. verifying timeouts and retries.
 
 Do not implement only the happy path. Polling, timeouts, failures, and duplicate submissions for video providers are often more complex than request creation.
 
@@ -448,7 +478,8 @@ The following constraints should be maintained over the long term:
 - project files and database state can be backed up together;
 - specific model names do not enter stable domain interfaces;
 - long-text reasoning does not accumulate indefinitely in the main Agent context;
-- deterministic operations use tools instead of natural-language generation whenever possible.
+- deterministic operations use tools instead of natural-language generation whenever possible;
+- the core library does not depend on the server or the web framework (see [6.1](#core-server-boundary)).
 
 ## 19. Related Documentation {#related-docs}
 

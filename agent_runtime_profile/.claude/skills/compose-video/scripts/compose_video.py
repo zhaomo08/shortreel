@@ -41,8 +41,8 @@ PROJECT_ROOT = _find_repo_root(Path(__file__).resolve())
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.project_manager import ProjectManager
-from lib.script_models import get_generated_assets
+from lib.project.project_manager import ProjectManager
+from lib.script.script_models import get_generated_assets
 
 FFMPEG_TOOLS_HINT = "需要 ffmpeg 和 ffprobe 同时可用（在 PATH 中，或位于下列常见安装位之一）"
 
@@ -205,13 +205,13 @@ def run_capture(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 def _require_project_cwd() -> tuple[ProjectManager, str, Path]:
     """cwd 必须含 project.json，否则拒绝执行。
 
-    替代 ProjectManager.from_cwd()：cwd 漂离项目目录时显式报错，
+    cwd 漂离项目目录时显式报错，
     而不是悄悄拼出错误的项目名继续执行。
     """
     cwd = Path.cwd().resolve()
     if not (cwd / "project.json").is_file():
         raise RuntimeError(f"必须在项目目录内运行（当前 cwd={cwd} 不含 project.json）")
-    pm = ProjectManager(str(cwd.parent))
+    pm = ProjectManager.for_project_dir(cwd)
     return pm, cwd.name, cwd
 
 
