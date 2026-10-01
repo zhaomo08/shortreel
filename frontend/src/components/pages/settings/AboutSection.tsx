@@ -8,6 +8,7 @@ import { useOnboardingStore } from "@/stores/onboarding-store";
 import { formatDate } from "@/utils/date-format";
 import { downloadBlob } from "@/utils/download";
 import type { GetSystemVersionResponse } from "@/types";
+import { OfficialServiceCard } from "./OfficialServiceCard";
 
 const ABOUT_DATE_OPTS: Intl.DateTimeFormatOptions = {
   year: "numeric",
@@ -72,12 +73,9 @@ export function AboutSection() {
   }, [t]);
 
   useEffect(() => {
-    // mount 后异步拉取版本，回调内 setData/setLoading（异步 fetch 后回写）
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- mount 后异步拉取版本，回调内回写状态
     void fetchVersion();
-    // 仅 mount 时拉一次；fetchVersion 闭包稳定（仅依赖 t）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchVersion]);
 
   if (loading) {
     return (
@@ -251,6 +249,8 @@ export function AboutSection() {
           {tOnboarding("replay_action")}
         </button>
       </div>
+
+      <OfficialServiceCard />
 
       {/* Diagnostic logs */}
       <div

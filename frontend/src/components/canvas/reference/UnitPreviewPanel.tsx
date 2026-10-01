@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Film, Loader2, Sparkles, RotateCcw, AlertTriangle } from "lucide-react";
 import { API } from "@/api";
+import { usePlaybackStart } from "@/hooks/usePlaybackStart";
 import { useProjectsStore } from "@/stores/projects-store";
 import { VersionTimeMachine } from "@/components/canvas/timeline/VersionTimeMachine";
 import { PresentationPlayer } from "@/components/shared/PresentationPlayer";
@@ -9,6 +10,7 @@ import { UPLOAD_VIDEO_ACCEPT, UploadIconButton } from "@/components/ui/UploadIco
 import { formatCost } from "@/utils/cost-format";
 import { StatusBadge, resolveUnitStatus } from "./unit-status";
 import type { CostBreakdown, ReferenceVideoUnit, UnitStatus } from "@/types";
+import { itemIdWithinEpisode } from "@/utils/episode-display";
 
 export interface UnitPreviewPanelProps {
   unit: ReferenceVideoUnit | null;
@@ -87,6 +89,7 @@ export function UnitPreviewPanel({
   const clip = unit?.generated_assets?.video_clip ?? null;
   // 上传/还原后路径不变，靠 fingerprint cache-bust 让 <video> 重新拉取
   const clipFp = useProjectsStore((s) => (clip ? s.getAssetFingerprint(clip) : null));
+  const playbackStart = usePlaybackStart("reference_videos", unit?.unit_id ?? "");
 
   if (!unit) {
     return (
@@ -167,6 +170,7 @@ export function UnitPreviewPanel({
               projectName={projectName}
               resourceType="reference_videos"
               resourceId={unit.unit_id}
+              {...playbackStart}
             />
             <div
               className="pointer-events-none absolute left-2 top-2 inline-flex items-center gap-1 rounded border border-white/10 bg-black/55 px-2 py-0.5 font-mono text-[10px] text-white/85 backdrop-blur"
@@ -283,7 +287,7 @@ export function UnitPreviewPanel({
         <dl className="grid grid-cols-[auto_1fr] gap-x-3.5 gap-y-1.5 text-[11.5px]">
           <dt className="text-[var(--color-text-4)]">{t("reference_meta_unit")}</dt>
           <dd className="font-mono text-[var(--color-text-2)]" translate="no">
-            {unit.unit_id}
+            {itemIdWithinEpisode(unit.unit_id)}
           </dd>
           <dt className="text-[var(--color-text-4)]">{t("reference_meta_duration")}</dt>
           <dd className="font-mono tabular-nums text-[var(--color-text-2)]">

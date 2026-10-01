@@ -3,7 +3,6 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import ClassVar
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -303,7 +302,7 @@ class TestMediaGenerator:
 
     async def test_comfyui_execution_warnings_reach_the_caller(self, tmp_path):
         """backend 执行期的提示要一路走到任务 result.warnings，日志只有运维看得到。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
         from lib.custom_provider.backends import CustomVideoBackend
         from lib.custom_provider.comfyui.comfyui_backend import ComfyuiVideoBackend
 
@@ -616,7 +615,7 @@ class TestMediaGenerator:
         ref = _solid_png(tmp_path, "ref-checkpoint.png", 16, 16)
 
         class _RetryBackend(_FakeVideoBackend):
-            from lib.backends.video_backend_contract import VideoCapabilities
+            from arcreel_market_core.video_backend_contract import VideoCapabilities
 
             video_capabilities = VideoCapabilities(max_reference_images=9)
 
@@ -658,7 +657,7 @@ class TestMediaGenerator:
         ref = _solid_png(tmp_path, "ref-after-submit.png", 16, 16)
 
         class _Poll413Backend(_FakeVideoBackend):
-            from lib.backends.video_backend_contract import VideoCapabilities
+            from arcreel_market_core.video_backend_contract import VideoCapabilities
 
             video_capabilities = VideoCapabilities(max_reference_images=9)
 
@@ -1002,106 +1001,6 @@ class TestMediaGenerator:
         assert not staged.exists()
 
     @pytest.mark.asyncio
-    async def test_rejected_short_video_does_not_make_legacy_predecessor_reusable(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        from lib.artifacts.version_manager import VersionManager
-        from lib.speech.narration_delivery import (
-            USE_TTS,
-            NarratedVideoDurationBlockedError,
-            NarrationDeliveryPreparation,
-            NarrationTtsStatus,
-        )
-        from server.services.tasks import narration_delivery_tasks
-
-        gen = _build_generator(tmp_path)
-        gen.versions = VersionManager(gen.project_path)
-        output_path = gen._get_output_path("videos", "E1S01")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(b"legacy-video-with-unknown-tier")
-
-        _, version, _, _ = await gen.generate_video_async(
-            prompt="new request",
-            resource_type="videos",
-            resource_id="E1S01",
-            duration_seconds=8,
-        )
-        monkeypatch.setattr(
-            narration_delivery_tasks,
-            "probe_existing_media_duration_seconds",
-            AsyncMock(return_value=4.0),
-        )
-        narration = NarrationDeliveryPreparation(
-            delivery=USE_TTS,
-            unit_id="E1S01",
-            speech_mode=None,
-            tts_status=NarrationTtsStatus.CURRENT,
-            artifact_path="audio/segment_E1S01.wav",
-            basis_digest="basis",
-            actual_duration_seconds=6.2,
-            problems=(),
-        )
-
-        # 重载协程本体照跑，只把它的三个协作者换成替身；在途 TTS 判定仍走真实代码，
-        # 空闲由生成队列的空结果给出。
-        class _IdleQueue:
-            async def get_active_tasks_for_resources(self, **_kwargs) -> list[dict]:
-                return []
-
-        pm = MagicMock()
-        pm.load_project.return_value = {
-            "name": "demo",
-            "episodes": [{"episode": 1, "script_file": "episode_1.json"}],
-        }
-        pm.get_project_path.return_value = gen.project_path
-        pm.load_script.return_value = {
-            "episode": 1,
-            "content_mode": "narration",
-            "segments": [{"segment_id": "E1S01", "narration": "旁白。", "duration_seconds": 8}],
-        }
-        monkeypatch.setattr(narration_delivery_tasks, "get_project_manager", lambda: pm)
-        monkeypatch.setattr(
-            narration_delivery_tasks,
-            "prepare_current_narration_delivery",
-            AsyncMock(return_value=narration),
-        )
-        monkeypatch.setattr(narration_delivery_tasks, "get_generation_queue", _IdleQueue)
-
-        with pytest.raises(NarratedVideoDurationBlockedError):
-            await narration_delivery_tasks.require_generated_video_covers_current_tts(
-                project_name="demo",
-                script_file="episode_1.json",
-                request_duration_seconds=8,
-                output_path=output_path,
-                versions=gen.versions,
-                resource_type="videos",
-                resource_id="E1S01",
-                version=version,
-            )
-
-        assert output_path.read_bytes() == b"legacy-video-with-unknown-tier"
-        item = {
-            "generated_assets": {
-                "status": "completed",
-                "video_clip": "videos/scene_E1S01.mp4",
-            }
-        }
-        assert (
-            await narration_delivery_tasks.reuse_current_video_for_tier(
-                project_path=gen.project_path,
-                versions=gen.versions,
-                item=item,
-                resource_type="videos",
-                resource_id="E1S01",
-                request_duration_seconds=8,
-                minimum_actual_duration_seconds=6.2,
-            )
-            is None
-        )
-
-    @pytest.mark.asyncio
     async def test_generate_video_async_segment_id_by_resource_type(self, tmp_path):
         """视频记账 segment_id 白名单覆盖 storyboards/videos/reference_videos，其余落 None。"""
         gen = _build_generator(tmp_path)
@@ -1211,7 +1110,7 @@ class TestMediaGenerator:
     @pytest.mark.asyncio
     async def test_end_image_rejected_when_backend_lacks_last_frame(self, tmp_path):
         """后端 last_frame=False 时硬失败：不下发供应商调用、不开记账，也不降级为参考图。"""
-        from lib.backends.video_backend_contract import VideoCapabilities, VideoCapabilityError
+        from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoCapabilityError
 
         gen = _build_generator(tmp_path)
         gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(last_frame=False))
@@ -1235,7 +1134,7 @@ class TestMediaGenerator:
     async def test_end_image_forwarded_when_backend_reports_tier_aware_last_frame(self, tmp_path):
         """后端实现 video_capabilities_for_tier 时按实际 service_tier 收窄决定是否转发
         end_image：pro 档放行——无请求上下文的 video_capabilities 恒 False 也不应误判丢帧。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         class _TierAwareVideoBackend(_FakeVideoBackend):
             def __init__(self):
@@ -1264,7 +1163,7 @@ class TestMediaGenerator:
     @pytest.mark.asyncio
     async def test_end_image_rejected_when_tier_aware_backend_reports_std_tier(self, tmp_path):
         """同一后端，std 档时仍按能力收窄硬失败——覆盖 pro/std 两条分支。"""
-        from lib.backends.video_backend_contract import VideoCapabilities, VideoCapabilityError
+        from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoCapabilityError
 
         class _TierAwareVideoBackend(_FakeVideoBackend):
             def __init__(self):
@@ -1298,7 +1197,7 @@ class TestMediaGenerator:
     async def test_empty_string_end_image_normalized_to_no_end_frame(self, tmp_path):
         """遗留/直接调用者以 end_image="" 表示无尾帧：即便后端不支持 last_frame 也应正常放行，
         不误判为携带尾帧而硬失败（与 kling _build_payload 的真值判断兼容语义对齐）。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         gen = _build_generator(tmp_path)
         gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(last_frame=False))
@@ -1528,7 +1427,7 @@ class TestReferenceCompressionSeam:
     async def test_video_frame_not_resized_array_laddered(self, tmp_path):
         gen = _build_generator(tmp_path)
 
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         class _CapturingVideoBackend:
             name = "fake-video"
@@ -1577,7 +1476,7 @@ class TestReferenceCompressionSeam:
         """
         gen = _build_generator(tmp_path)
 
-        from lib.backends.video_backend_contract import ReferenceAudioMode, VideoCapabilities
+        from arcreel_market_core.video_backend_contract import ReferenceAudioMode, VideoCapabilities
 
         class _AudioCapturingVideoBackend:
             name = "fake-video"
@@ -1618,12 +1517,11 @@ class TestReferenceCompressionSeam:
 
     async def test_reference_audio_total_duration_exceeded_raises_before_backend_call(self, tmp_path):
         """caps 声明了总时长上限时，超限须在调 backend.generate（即付费请求）之前被拦截。"""
-        import shutil
-
-        if shutil.which("ffprobe") is None:
-            pytest.skip("ffprobe not available")
-
-        from lib.backends.video_backend_contract import ReferenceAudioMode, VideoCapabilities, VideoCapabilityError
+        from arcreel_market_core.video_backend_contract import (
+            ReferenceAudioMode,
+            VideoCapabilities,
+            VideoCapabilityError,
+        )
         from tests.factories import wav_bytes
 
         gen = _build_generator(tmp_path)
@@ -1668,8 +1566,8 @@ class TestReferenceCompressionSeam:
         assert gen.ledger.outcomes == []
 
     async def test_total_duration_exceeded_check_skipped_when_probe_fails(self, tmp_path, monkeypatch):
-        """caps 声明了总时长上限，但探测失败（ffprobe 不可用等）返回 None 时，按既有降级口径放行而非阻断。"""
-        from lib.backends.video_backend_contract import ReferenceAudioMode, VideoCapabilities
+        """caps 声明了总时长上限，但探测失败（随包 ffmpeg 不可用等）返回 None 时，按既有降级口径放行而非阻断。"""
+        from arcreel_market_core.video_backend_contract import ReferenceAudioMode, VideoCapabilities
 
         gen = _build_generator(tmp_path)
 
@@ -1710,8 +1608,8 @@ class TestReferenceCompressionSeam:
         assert gen.ledger.outcomes, "探测失败时应放行请求，不阻断到 backend"
 
     async def test_total_duration_not_probed_when_backend_declares_no_limit(self, tmp_path, monkeypatch):
-        """未声明总时长约束的后端不该为每个请求多付一轮 ffprobe——探测按能力声明惰性触发。"""
-        from lib.backends.video_backend_contract import ReferenceAudioMode, VideoCapabilities
+        """未声明总时长约束的后端不该为每个请求多付一轮探测子进程——探测按能力声明惰性触发。"""
+        from arcreel_market_core.video_backend_contract import ReferenceAudioMode, VideoCapabilities
 
         gen = _build_generator(tmp_path)
 
@@ -1755,7 +1653,7 @@ class TestReferenceCompressionSeam:
 
     async def test_prompt_over_limit_raises_before_backend_call(self, tmp_path):
         """超长 prompt 在调 backend.generate（即付费请求）之前被拦截，不留记账行。"""
-        from lib.backends.video_backend_contract import VideoCapabilities, VideoCapabilityError
+        from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoCapabilityError
 
         gen = _build_generator(tmp_path)
 
@@ -1783,7 +1681,7 @@ class TestReferenceCompressionSeam:
 
     async def test_prompt_gating_applies_without_optional_paths(self, tmp_path):
         """prompt 长度对每个请求都适用：纯文生/首帧路径（无尾帧、参考图、参考音频）同样查能力。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         gen = _build_generator(tmp_path)
 
@@ -1813,7 +1711,7 @@ class TestFirstFrameRatioAdaptiveOnly:
     """
 
     async def test_first_frame_task_forced_to_adaptive(self, tmp_path):
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         gen = _build_generator(tmp_path)
         backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(first_frame_ratio_adaptive_only=True))
@@ -1833,7 +1731,7 @@ class TestFirstFrameRatioAdaptiveOnly:
 
     async def test_no_first_frame_task_keeps_user_ratio(self, tmp_path):
         """未带首帧（纯文生 / 仅参考图）不受该约束影响，原样透传用户比例。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         gen = _build_generator(tmp_path)
         backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(first_frame_ratio_adaptive_only=True))
@@ -1868,7 +1766,7 @@ class TestFirstFrameRatioAdaptiveOnly:
 
     async def test_ledger_records_user_intent_not_adaptive_override(self, tmp_path):
         """记账沿用用户原始比例意图，与下发给 backend 的实际值分离。"""
-        from lib.backends.video_backend_contract import VideoCapabilities
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
 
         gen = _build_generator(tmp_path)
         backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(first_frame_ratio_adaptive_only=True))

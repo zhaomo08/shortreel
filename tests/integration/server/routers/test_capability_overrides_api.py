@@ -671,7 +671,7 @@ class TestResolverReturnsEffectiveCapabilities:
         from lib.config.resolver import ConfigResolver
         from lib.config.service import ConfigService
 
-        factory = async_sessionmaker(bind=db_session.get_bind(), class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
+        factory = async_sessionmaker(bind=db_session.bind, class_=AsyncSession, expire_on_commit=False)
         resolver = ConfigResolver(factory, _bound_session=db_session)
         return await resolver._resolve_video_caps_for_model(
             ConfigService(db_session), db_session, provider_id, model_id, None
@@ -810,7 +810,7 @@ class TestResolverReturnsEffectiveCapabilities:
         from lib.config.resolver import ConfigResolver
         from lib.config.service import ConfigService
 
-        factory = async_sessionmaker(bind=db_session.get_bind(), class_=AsyncSession, expire_on_commit=False)  # type: ignore[call-overload]
+        factory = async_sessionmaker(bind=db_session.bind, class_=AsyncSession, expire_on_commit=False)
         resolver = ConfigResolver(factory, _bound_session=db_session)
         caps = await resolver._resolve_video_caps_for_model(
             ConfigService(db_session), db_session, "openai", "sora-2", None
@@ -826,8 +826,8 @@ class TestBuiltinBackendsDeclareCapabilityFunction:
     """每个能承载视频模型的内置 provider 都要能被纯函数问出布尔能力位。"""
 
     def test_every_builtin_video_provider_resolvable(self):
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
         from lib.backends.backend_assembly.specs import builtin_video_capabilities_for_model
-        from lib.backends.video_backend_contract import VideoCapabilities
         from lib.config.registry import PROVIDER_REGISTRY
 
         for provider_id, meta in PROVIDER_REGISTRY.items():

@@ -166,6 +166,7 @@ def test_batch_admission_problem_codes_are_translated():
         GenerationProblemCode.TASK_CANCELLED,
         GenerationProblemCode.TASK_INTERRUPTED,
         GenerationProblemCode.POST_PROCESSING_FAILED,
+        GenerationProblemCode.DEPENDENCY_FAILED,
     }
     codes = (
         set(_PROBLEM_PRESENTATION)
@@ -175,6 +176,20 @@ def test_batch_admission_problem_codes_are_translated():
     for code in sorted(codes):
         for locale in SUPPORTED_LOCALES:
             assert code in MESSAGES[locale], f"problem code '{code}' has no {locale} message"
+
+
+def test_market_core_message_keys_are_translated():
+    """Every message key arcreel-market-core can emit must read as prose.
+
+    The subpackage ships no translation catalog: its diagnostics carry only a key
+    and params, and the application renders them. A key missing here reaches the
+    user as a bare identifier.
+    """
+    from arcreel_market_core.message_keys import MESSAGE_KEYS
+
+    for key in sorted(MESSAGE_KEYS):
+        for locale in SUPPORTED_LOCALES:
+            assert key in MESSAGES[locale], f"market core message key '{key}' has no {locale} message"
 
 
 def _event_label_keys(messages: dict[str, str]) -> set[str]:
@@ -212,6 +227,8 @@ def test_every_event_label_key_is_translated():
         "episode",
         "draft_normalized_script",
         "draft_segment_splitting",
+        "draft_script_plan",
+        "draft_prompt_authoring",
     }
     assert _event_label_keys(zh_events.MESSAGES) == emitted
 

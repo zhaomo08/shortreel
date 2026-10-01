@@ -22,8 +22,8 @@ export default {
   'workbench_lorebook_body': 'Nhân vật, bối cảnh và đạo cụ được quản lý thống nhất ở cột trái, mỗi tài sản đều có thể tạo ảnh tài sản. Ảnh tài sản dùng làm ảnh tham chiếu cho việc tạo ảnh phân cảnh và tạo video từ tham chiếu, giúp giữ hình ảnh nhất quán.',
   'workbench_timeline_title': 'Bảng phân cảnh',
   'workbench_timeline_body': 'Các cảnh quay của mỗi tập xếp theo dòng thời gian, gồm prompt hình ảnh, ảnh phân cảnh và video. Có thể tạo ảnh phân cảnh trước để chốt bố cục rồi mới tạo video; từng cảnh quay đều có thể tạo lại bất cứ lúc nào.',
-  'workbench_export_title': 'Xuất',
-  'workbench_export_body': 'Sản xuất xong, xuất bản nháp Jianying từ thanh trên cùng để tiếp tục dựng, hoặc tải cả dự án về. Dự án minh hoạ chưa có thành phẩm nên nút xuất không khả dụng.',
+  'workbench_export_title': 'Xuất dự án',
+  'workbench_export_body': 'Khi cần sao lưu hoặc chuyển dự án, dùng Xuất dự án trên thanh trên cùng để tải cả dự án về. Video thành phẩm và bản nháp Jianying được xuất trong chế độ dựng của từng tập. Dự án minh hoạ không xuất được nên nút này không khả dụng.',
   'finish_title': 'Bắt đầu dự án đầu tiên của bạn',
   'finish_body': 'Tạo dự án và nhập tiểu thuyết hoặc kịch bản là có thể bắt đầu sản xuất. Có thể xem lại phần hướng dẫn này bất cứ lúc nào trong Cài đặt → Giới thiệu.',
 
@@ -45,7 +45,7 @@ export default {
   'demo_banner_title': 'Dự án minh hoạ · Chỉ đọc',
   'demo_banner_body': 'Bạn đang xem một dự án mẫu. Chỉnh sửa, tạo, tải lên và xuất không khả dụng trong bản minh hoạ.',
   'demo_action_unavailable': 'Không khả dụng trong bản minh hoạ',
-  'demo_episode_placeholder': 'Bản minh hoạ chỉ đến tập {{episode}}: tập này chỉ có tiêu đề, chưa có kịch bản và phân cảnh.',
+  'demo_episode_placeholder': 'Bản minh hoạ chỉ đến tập {{position}}: tập này chỉ có tiêu đề, chưa có kịch bản và phân cảnh.',
 
   // Hội thoại tĩnh trong bảng Agent của bàn làm việc minh hoạ (do người dùng mở lời)
   'demo_chat_agent_analyzed': 'Đã phân tích xong tiểu thuyết — các tập, nhân vật và bối cảnh đều đã được tách ra. Bạn có thể bắt đầu sản xuất bất cứ lúc nào.',

@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from arcreel_market_core.video_backend_contract import VideoCapabilityError
 from lib.backends.http_status_errors import ArtifactDownloadError, ProviderRejectedError
 from lib.backends.image_backends.base import ImageCapabilityError
-from lib.backends.video_backend_contract import VideoCapabilityError
 from lib.config.resolver import ImageBucketCapabilityError, VideoBucketCapabilityError
 from lib.custom_provider.comfyui.failures import ComfyuiError
 from lib.custom_provider.declarative_backend import DeclarativeRuntimeError
@@ -23,7 +23,6 @@ from lib.references.reference_compression import ReferencePayloadFloorError
 from lib.script.reference_video.execution_checkpoint import ReferenceExecutionIdentityError
 from lib.script.reference_video.request_projection import ReferenceProjectionBlockedError
 from lib.script.script_editor import ScriptEditError
-from lib.speech.narration_delivery import NarratedVideoDurationBlockedError
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,6 @@ def encode_task_failure_message(exc: Exception) -> str:
         | ImageBucketCapabilityError
         | VideoBucketCapabilityError
         | ReferenceProjectionBlockedError
-        | NarratedVideoDurationBlockedError
         | VideoRequestFactsError
         | ReferenceExecutionIdentityError
         | DeclarativeRuntimeError

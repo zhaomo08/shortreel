@@ -1,6 +1,7 @@
 import { Sparkles, ImageIcon, Film } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { API } from "@/api";
+import { usePlaybackStart } from "@/hooks/usePlaybackStart";
 import { useProjectsStore } from "@/stores/projects-store";
 import { AspectFrame } from "@/components/ui/AspectFrame";
 import { ImageFlipReveal } from "@/components/ui/ImageFlipReveal";
@@ -14,6 +15,7 @@ import {
 import { useDemoWorkbench } from "@/onboarding/use-demo-workbench";
 import { formatCost } from "@/utils/cost-format";
 import type { CostBreakdown } from "@/types";
+import { itemIdWithinEpisode } from "@/utils/episode-display";
 import { ImageEditButton } from "./ImageEditButton";
 import { VersionTimeMachine } from "./VersionTimeMachine";
 
@@ -29,8 +31,6 @@ interface MediaCardProps {
   posterPath?: string | null;
   /** 渲染比例 */
   aspectRatio: "9:16" | "16:9";
-  /** 是否因启用宫格装配而隐藏单独生成按钮 */
-  hideGenerateButton?: boolean;
   /** 生成按钮是否禁用（视频生成需要先有分镜图） */
   generateDisabled?: boolean;
   /** 自定义禁用 tooltip，未提供时使用默认（"分镜图未生成"）的视频禁用提示 */
@@ -65,7 +65,6 @@ export function MediaCard({
   assetPath,
   posterPath,
   aspectRatio,
-  hideGenerateButton,
   generateDisabled,
   generateDisabledHint,
   generating,
@@ -85,6 +84,7 @@ export function MediaCard({
   const assetFp = useProjectsStore((s) =>
     assetPath ? s.getAssetFingerprint(assetPath) : null,
   );
+  const playbackStart = usePlaybackStart("videos", segmentId);
   const assetUrl = assetPath ? API.getFileUrl(projectName, assetPath, assetFp) : null;
 
   const Icon = kind === "storyboard" ? ImageIcon : Film;
@@ -153,11 +153,11 @@ export function MediaCard({
       {/* Media */}
       {assetUrl ? (
         kind === "storyboard" ? (
-          <PreviewableImageFrame src={assetUrl} alt={`${segmentId} ${title}`}>
+          <PreviewableImageFrame src={assetUrl} alt={`${itemIdWithinEpisode(segmentId)} ${title}`}>
             <AspectFrame ratio={aspectRatio}>
               <ImageFlipReveal
                 src={assetUrl}
-                alt={`${segmentId} ${title}`}
+                alt={`${itemIdWithinEpisode(segmentId)} ${title}`}
                 loading="lazy"
                 className="h-full w-full object-cover"
                 fallback={null}
@@ -179,6 +179,7 @@ export function MediaCard({
                 resourceType="videos"
                 resourceId={segmentId}
                 posterPath={posterPath}
+                {...playbackStart}
               />
             </AspectFrame>
           </div>
@@ -200,7 +201,7 @@ export function MediaCard({
       )}
 
       {/* Generate CTA */}
-      {!hideGenerateButton && onGenerate && !demoReadOnly && (
+      {onGenerate && !demoReadOnly && (
         <button
           type="button"
           onClick={onGenerate}

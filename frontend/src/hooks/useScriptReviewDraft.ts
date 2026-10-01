@@ -68,6 +68,8 @@ interface ScriptReviewDraftHandle<TDraft extends ScriptReviewContent> {
   /** 保存 / 确认请求在途：调用方据此锁住编辑控件，避免回显覆盖请求发出后的新编辑。 */
   busy: boolean;
   retry: () => void;
+  /** 静默重新拉取服务端审核态（草稿被采用或丢弃后，正式内容与草稿信息都已变化）。 */
+  refresh: () => void;
   save: () => Promise<void>;
   /**
    * 确认并整份转为正式脚本。该集已有正式脚本时须传认可覆盖的 `overwriteRevision`；缺失或已过期而被
@@ -144,6 +146,10 @@ export function useScriptReviewDraft<TDraft extends ScriptReviewContent>({
     setReloadNonce((n) => n + 1);
   }, []);
 
+  const refresh = useCallback(() => {
+    setReloadNonce((n) => n + 1);
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     const { signal } = controller;
@@ -153,7 +159,7 @@ export function useScriptReviewDraft<TDraft extends ScriptReviewContent>({
     const hadResponse = state != null;
     // 屏上有真实内容可保留时，刷新失败静默保留、不破坏用户视图；无内容（首屏，或空态）时失败才进错误态。
     const hasContent = draft != null;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 首屏拉取前须同步点亮加载态，已有响应时静默刷新
     if (!hadResponse) setLoading(true);
     API.getScriptReview(projectName, episode, { signal })
       .then((next) => {
@@ -234,6 +240,7 @@ export function useScriptReviewDraft<TDraft extends ScriptReviewContent>({
     confirming,
     busy,
     retry,
+    refresh,
     save,
     confirm,
   };

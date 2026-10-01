@@ -16,8 +16,12 @@ import { errMsg } from "@/utils/async";
 import { rejectIfAssetBusy } from "./assetBusyGuard";
 import { CharacterDerivativesButton } from "./CharacterDerivativesButton";
 import { EditableAssetName } from "./EditableAssetName";
+import { MergeAssetMenu } from "./MergeAssetMenu";
+import { AssetAliasesField } from "./AssetAliasesField";
+import { AssetSheetStaleBadge, MissingDescriptionChip, hasUsableDescription, sheetIsPending } from "./AssetSheetStatusBadge";
+import { useStaleRegenerateConfirm } from "./useStaleRegenerateConfirm";
 import { VoiceSampleButton } from "./VoiceSampleButton";
-import type { Character, CharacterVoiceBinding } from "@/types";
+import type { AssetSheetStatusRow, Character, CharacterVoiceBinding } from "@/types";
 import { DEFAULT_CHARACTER_VOICE_BINDING } from "@/types";
 
 interface CharacterSavePayload {
@@ -45,6 +49,8 @@ interface CharacterCardProps {
   onRestoreVersion?: () => Promise<void> | void;
   onReload?: () => Promise<unknown> | void;
   generating?: boolean;
+  /** 产物清单对这张资产图的判定；未取到时按项目数据展示。 */
+  sheetStatus?: AssetSheetStatusRow;
   /** 项目的角色声音绑定方式；prompt（默认）下参考音频不生效，折叠为可选项。 */
   voiceBinding?: CharacterVoiceBinding;
   /** 只读展示（引导演示项目）：所有改写入口不渲染，文本字段不可编辑。 */
@@ -92,6 +98,7 @@ export function CharacterCard({
   onRestoreVersion,
   onReload,
   generating = false,
+  sheetStatus,
   voiceBinding = DEFAULT_CHARACTER_VOICE_BINDING,
   readOnly = false,
 }: CharacterCardProps) {
@@ -145,21 +152,18 @@ export function CharacterCard({
   };
 
   useEffect(() => {
-    // 上游角色变化时同步本地草稿字段
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 上游角色变化时同步本地草稿字段
     setDescription(character.description);
     setVoiceStyle(character.voice_style ?? "");
   }, [character.description, character.voice_style]);
 
   useEffect(() => {
-    // 角色立绘变化时重置图片加载错误标记
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 角色立绘变化时重置图片加载错误标记
     setImgError(false);
   }, [character.character_sheet, sheetFp]);
 
   useEffect(() => {
-    // 上游参考图变化时清空本地未提交的上传文件 + 释放 blob URL
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 上游参考图变化时清空本地未提交的上传文件并释放 blob URL
     setReferenceFile(null);
     setReferencePreview((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -176,9 +180,8 @@ export function CharacterCard({
   }, [referencePreview]);
 
   useEffect(() => {
-    // 上游参考音频变化时清空本地未提交的上传文件 + 释放 blob URL；
     // 同扩展名替换（如 wav 换 wav）路径字符串不变，靠 audioFp 才能感知内容已更新
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 上游参考音频变化时清空本地未提交的上传文件并释放 blob URL
     setAudioFile(null);
     setAudioPreview((prev) => {
       if (prev) URL.revokeObjectURL(prev);
@@ -300,9 +303,18 @@ export function CharacterCard({
     }
   };
 
-  const sheetUrl = character.character_sheet
+  const sheetUrl = character.character_sheet && !sheetIsPending(sheetStatus)
     ? API.getFileUrl(projectName, character.character_sheet, sheetFp)
     : null;
+  const descriptionMissing = !hasUsableDescription(character.description);
+  const staleConfirm = useStaleRegenerateConfirm({
+    projectName,
+    assetType: "character",
+    name,
+    status: sheetStatus,
+    hasSheet: Boolean(character.character_sheet),
+    onGenerate: () => onGenerate(name),
+  });
 
   const savedReferenceUrl = character.reference_image
     ? API.getFileUrl(projectName, character.reference_image, referenceFp)
@@ -318,8 +330,7 @@ export function CharacterCard({
   const displayedAudioUrl = audioPreview ?? savedAudioUrl;
 
   useEffect(() => {
-    // 音源切换（更换/删除/上游变化）时复位播放状态，避免残留上一段的播放进度
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 音源切换时复位播放状态，避免残留上一段的播放进度
     setIsAudioPlaying(false);
     setAudioProgress(0);
     setAudioDuration(null);
@@ -432,6 +443,13 @@ export function CharacterCard({
             iconOnly
             busy={generating || uploadingSheet}
           />
+          <MergeAssetMenu
+            projectName={projectName}
+            assetType="character"
+            name={name}
+            description={character.description}
+            busy={generating || uploadingSheet || saving || deletingAudio}
+          />
         </div>
         )}
       </div>
@@ -441,7 +459,7 @@ export function CharacterCard({
         <div>
           <CapsLabel>{t("character_design")}</CapsLabel>
           <div
-            className="mt-1.5 overflow-hidden rounded-lg"
+            className="relative mt-1.5 overflow-hidden rounded-lg"
             style={{ border: "1px solid var(--color-hairline-soft)" }}
           >
             <PreviewableImageFrame
@@ -466,6 +484,7 @@ export function CharacterCard({
                 />
               </AspectFrame>
             </PreviewableImageFrame>
+            {sheetUrl && !imgError && <AssetSheetStaleBadge status={sheetStatus} />}
           </div>
         </div>
 
@@ -559,7 +578,10 @@ export function CharacterCard({
       </div>
 
       <div className="flex items-center justify-between gap-2">
-        <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
+        <span className="flex items-center gap-1.5">
+          <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
+          {descriptionMissing && <MissingDescriptionChip />}
+        </span>
         {readOnly ? null : (
           <PromptPreviewButton
             title={t("assets:prompt_preview_title", { name })}
@@ -580,6 +602,16 @@ export function CharacterCard({
         style={FIELD_STYLE}
         placeholder={t("character_desc_placeholder")}
       />
+
+      <div className="mt-3">
+        <AssetAliasesField
+          projectName={projectName}
+          name={name}
+          assetType="character"
+          aliases={character.aliases ?? []}
+          readOnly={readOnly}
+        />
+      </div>
 
       <div className="mt-3">
         {/* 「声音」是描述输入 + 音频样本共用的分组标题，不单独绑定输入框；
@@ -755,15 +787,17 @@ export function CharacterCard({
       )}
 
       {readOnly ? null : (
-      <div className="mt-4">
+      <div className="mt-4" title={descriptionMissing ? t("assets:sheet_description_required") : undefined}>
         <GenerateButton
-          onClick={() => onGenerate(name)}
+          onClick={staleConfirm.request}
           loading={generating}
+          disabled={descriptionMissing}
           label={character.character_sheet ? t("regenerate_design") : t("generate_design")}
           className="w-full justify-center"
         />
       </div>
       )}
+      {staleConfirm.dialog}
     </div>
   );
 }

@@ -269,7 +269,7 @@ async def test_reference_split_planning_borrows_planning_tiers_for_endpoint_fixe
 async def test_split_reference_video_units_dry_run(fake_ctx: ToolHarness, video_request_facts) -> None:
     rv_source(fake_ctx)
 
-    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode": 1, "dry_run": True})
+    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1, "dry_run": True})
     assert out.problem is None, out
     prompt_text = said(out)
     assert "DRY RUN" in prompt_text
@@ -293,7 +293,7 @@ async def test_split_reference_video_units_happy_derives_structure(
     units = [rv_unit(text)]
     monkeypatch.setattr(mod.TextGenerator, "create", rv_generator_returning(units, captured))
 
-    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode": 1})
+    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1})
     assert out.problem is None, out
 
     saved = json.loads(rv_script_plan_path(fake_ctx).read_text(encoding="utf-8"))
@@ -505,7 +505,7 @@ async def test_split_reference_video_units_rejects_braces_in_description(
 
 
 async def test_split_reference_video_units_no_source(fake_ctx: ToolHarness) -> None:
-    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode": 1})
+    out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1})
     assert out.problem is not None
 
 
@@ -515,7 +515,7 @@ async def test_split_reference_video_units_injects_instructions(fake_ctx: ToolHa
     out = await run_declared_tool(
         "generate_script_plan",
         fake_ctx,
-        {"episode": 1, "dry_run": True, "instructions": "单 unit 出场人物尽量不超过两人"},
+        {"episode_id": 1, "dry_run": True, "instructions": "单 unit 出场人物尽量不超过两人"},
     )
     assert out.problem is None, out
     prompt_text = said(out)
@@ -557,6 +557,28 @@ async def test_split_reference_video_units_names_units_without_scene_reference(
     assert "unit E1U02：" in text
     assert "unit E1U01：" not in text
     assert "未引用场景" in text
+
+
+async def test_split_reference_video_units_counts_this_episodes_new_scenes_as_scene_references(
+    fake_ctx: ToolHarness, monkeypatch, video_request_facts
+) -> None:
+    """只引用本集新增场景的 unit 不算未引用场景：与内容确认页把新增项叠加在资产表上的结论一致。"""
+    rv_source(fake_ctx)
+    fake_ctx.pm.project_payload["scenes"] = {"酒馆": {"description": "木质吧台"}}
+    new_assets = [
+        {"type": "scene", "name": "码头", "decision": "register", "reason": "原文第一次出现", "description": "夜雾"}
+    ]
+    out = await run_rv_split(
+        fake_ctx,
+        monkeypatch,
+        [rv_unit("@[码头] 夜雾，@[张三] 上岸。"), rv_unit("@[张三] 起身。")],
+        new_assets=new_assets,
+    )
+
+    assert out.problem is None, out
+    text = said(out)
+    assert "unit E1U02：" in text
+    assert "unit E1U01：" not in text
 
 
 async def test_split_reference_video_units_reports_soft_violations_alongside_the_violation_report(

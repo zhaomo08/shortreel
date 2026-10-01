@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, get_args
@@ -343,7 +342,7 @@ def video_capability_satisfied(
     解析闸（``_ensure_video_bucket_capability``）与桶候选下拉（``lib.backends.generation_type_buckets``）共用本
     函数，不各写一份布尔式：下拉挡掉的组合解析层必然也挡，反之亦然。``has_image`` 区分
     i2v 桶内的纯文生与带首帧请求。取标量参数而非
-    ``VideoCapabilities``，一是不在 lib.config 层导入 lib.backends.video_backend_contract（分层契约），二是让
+    ``VideoCapabilities``，一是不在 lib.config 层导入 arcreel_market_core.video_backend_contract（分层契约），二是让
     内置（backend 声明）与自定义供应商（endpoint ⊕ 模型级覆盖的合成）两条来源都能直接喂进来。
     """
     if generation_type == "i2v":
@@ -359,7 +358,7 @@ def builtin_video_audio_track(provider_id: str, model_id: str, *, generation_typ
     （可灵 v3-omni 走多图主体子路径时请求体不含 ``sound``，成片必然无声）。展示层、入队预检与
     声音一致性派生共读本函数，不各自解读一份声明。
 
-    返回值是 ``lib.backends.video_backend_contract.VideoAudioMode`` 的字面量。此处不导入该枚举：分层契约以
+    返回值是 ``arcreel_market_core.video_backend_contract.VideoAudioMode`` 的字面量。此处不导入该枚举：分层契约以
     lib.config 为最底层，与 ``derive_voice_consistency`` 按字面量比较 ``ReferenceAudioMode`` 同一
     做法（``StrEnum`` 与字面量可直接 ``==``）。
 
@@ -825,6 +824,19 @@ class ConfigResolver:
         async with self._open_session() as (session, svc):
             return await self._resolve_default_audio_backend(svc, session)
 
+    async def default_narration_tts(self) -> tuple[ProviderModel, str, float | None]:
+        """新建 TTS 项目的预填值：全局默认音频 (provider, model)、旁白音色与配音语速。
+
+        未配置任何音频供应商时抛 ValueError。项目创建后不再读取这些全局值（docs/adr/0089）。
+        """
+        async with self._open_session() as (session, svc):
+            provider_id, model_id = await self._resolve_default_audio_backend(svc, session)
+            return (
+                ProviderModel(provider_id, model_id),
+                await svc.get_narration_voice(),
+                await svc.get_narration_speed(),
+            )
+
     async def resolve_audio_backend(
         self,
         project: dict | None,
@@ -837,38 +849,6 @@ class ConfigResolver:
         """
         async with self._open_session() as (session, svc):
             return await self._resolve_audio_provider_model(svc, session, project, payload)
-
-    async def resolve_narration_voice(self, project: dict | None) -> str:
-        """解析旁白音色：project.json 顶层 ``narration_voice`` > 全局 setting > 服务默认。"""
-        async with self._open_session() as (_session, svc):
-            if project is not None:
-                override = project.get("narration_voice")
-                if isinstance(override, str) and override.strip():
-                    return override.strip()
-            return await svc.get_narration_voice()
-
-    async def resolve_narration_speed(self, project: dict | None) -> float | None:
-        """解析旁白语速：project.json 顶层 ``narration_speed`` > 全局 setting > None（不传给 backend）。
-
-        覆盖值宽容解析：数字与数字字符串均接受（口径与 ``default_duration`` 一致）；
-        损坏的覆盖值（非数值/非正/非有限）按未设置处理，回退下一级。
-        """
-        async with self._open_session() as (_session, svc):
-            if project is not None:
-                override = project.get("narration_speed")
-                if isinstance(override, (int, float)) and not isinstance(override, bool):
-                    try:
-                        speed = float(override)
-                    except OverflowError:
-                        # 超出 float 范围的巨大整数等同非有限值，按未设置回退下一级
-                        speed = None
-                    if speed is not None and math.isfinite(speed) and speed > 0:
-                        return speed
-                elif isinstance(override, str):
-                    speed_from_str = ConfigService.parse_narration_speed(override)
-                    if speed_from_str is not None:
-                        return speed_from_str
-            return await svc.get_narration_speed()
 
     async def video_capabilities_for_project(
         self,

@@ -5,6 +5,7 @@
 
 import type {
   EpisodeScript,
+  NarrationDelivery,
   ProjectChangeBatchPayload,
   ProjectDeletedPayload,
   ProjectEventSnapshotPayload,
@@ -15,6 +16,9 @@ import type { SseStreamError } from "@/utils/sse-stream";
 /** 项目内四类资产（与后端 ASSET_SPECS 的 asset_type 对齐）。 */
 export type ProjectAssetType = "character" | "scene" | "prop" | "product";
 
+/** 可以合并的资产类型：带别名的类型，商品不开放（与后端 MERGEABLE_ASSET_TYPES 对齐）。 */
+export type MergeableAssetType = Exclude<ProjectAssetType, "product">;
+
 /** 资产级联重命名的影响报告（dry_run 预览与执行同一结构）。 */
 export interface AssetRenameResult {
   success: boolean;
@@ -24,6 +28,33 @@ export interface AssetRenameResult {
   episodes: number;
   references: number;
   files: number;
+}
+
+/** 资产合并对一集的影响：各处改写的引用数，以及将过期的分镜图与视频数。 */
+export interface AssetMergeEpisodeImpact {
+  episode: number;
+  script_plan: number;
+  script: number;
+  draft: number;
+  prompt_text: number;
+  speaker: number;
+  storyboards: number;
+  videos: number;
+}
+
+/** 资产合并的影响报告（dry_run 预览与执行同一结构）。 */
+export interface AssetMergeResult {
+  success: boolean;
+  dry_run: boolean;
+  source: string;
+  target: string;
+  as_derivative: boolean;
+  aliases_added: string[];
+  derivative_created: string | null;
+  derivatives_moved: string[];
+  derivatives_folded: string[];
+  references: number;
+  episodes: AssetMergeEpisodeImpact[];
 }
 
 /** Login response from POST /auth/token (mirrors backend TokenResponse). */
@@ -152,8 +183,6 @@ export interface CreateProjectPayload {
   title: string;
   name?: string;
   content_mode?: "narration" | "drama" | "ad";
-  /** 源文件性质：novel（默认）/ screenplay。仅 drama 暴露，创建即定、不可变。 */
-  source_kind?: "novel" | "screenplay";
   aspect_ratio?: "9:16" | "16:9";
   /** 成片语言：auto 跟随源文；三个语言码锁定，用于中文梗概做英文片这类跨语言场景。 */
   source_language?: "auto" | "zh" | "en" | "vi";
@@ -179,6 +208,12 @@ export interface CreateProjectPayload {
   text_backend_complex?: string | null;
   default_text_backend?: string | null;
   model_settings?: Record<string, { resolution?: string | null }>;
+  /** 旁白交付方式；服务端缺省后期配音。 */
+  narration_delivery?: NarrationDelivery;
+  /** TTS 快照（仅 use_tts）：省略的字段由服务端以全局默认预填。 */
+  audio_backend?: string;
+  narration_voice?: string;
+  narration_speed?: number | null;
 }
 
 export interface VideoCapabilitiesQuery {

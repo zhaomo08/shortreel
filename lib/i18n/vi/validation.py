@@ -22,7 +22,6 @@ MESSAGES = {
     "val_ledger_source_file_escapes": "source_file không được là đường dẫn tuyệt đối hoặc chứa ..",
     "val_ledger_start_after_end": "start không được lớn hơn end",
     "val_field_bad_timestamp": "{field} không phải dấu thời gian ISO8601 hợp lệ: {value}",
-    "val_array_empty": "Mảng {field} rỗng",
     "val_item_must_be_object": "{prefix}: phải là đối tượng",
     "val_item_format_object": "{prefix}: dữ liệu sai định dạng, phải là đối tượng",
     # ---- tham chiếu đường dẫn ----
@@ -33,7 +32,7 @@ MESSAGES = {
     "val_path_must_be_relative": "{field} phải là đường dẫn tương đối trong dự án: {path}",
     # ---- trường cấp dự án ----
     "val_content_mode_invalid": "content_mode không hợp lệ: '{value}', phải thuộc {allowed}",
-    "val_source_kind_invalid": "source_kind không hợp lệ: '{value}', phải thuộc {allowed}",
+    "val_source_kind_invalid": "{prefix}: source_kind không hợp lệ: '{value}', phải thuộc {allowed}",
     "val_generation_mode_invalid": "generation_mode không hợp lệ: '{value}', phải thuộc {allowed}",
     "val_deprecated_clues": (
         "project.json chứa trường clues đã ngừng dùng; hãy chờ di trú tự động hoặc khởi động lại dịch vụ"
@@ -45,6 +44,9 @@ MESSAGES = {
     "val_novel_must_be_object": "Trường novel phải là đối tượng",
     # ---- mục tập phim và sổ cái ----
     "val_ledger_status_type": "{prefix}: ledger_status phải là chuỗi, giá trị hiện tại: {value}",
+    "val_source_origin_invalid": "{prefix}: source_origin không hợp lệ: '{value}', phải thuộc {allowed}",
+    "val_source_range_requires_whole_source": "{prefix}: chỉ tập được cắt từ toàn bộ văn bản nguồn (source_origin là whole_source) mới được có source_range",
+    "val_whole_source_file_invalid": "whole_source_files[{index}] phải là đối tượng có source_file trỏ tới tệp .txt hoặc .md nằm trực tiếp trong source/",
     "val_episode_missing_num_at": "{prefix}: thiếu trường bắt buộc episode (số nguyên)",
     "val_episode_missing_title_at": "{prefix}: thiếu trường bắt buộc title (chuỗi, có thể rỗng)",
     "val_episode_missing_num": "Thiếu trường bắt buộc: episode (số nguyên)",
@@ -64,7 +66,7 @@ MESSAGES = {
     ),
     "val_ad_no_grid_storyboard": "Dự án quảng cáo/phim ngắn không hỗ trợ phân cảnh đa lưới (grid_storyboard)",
     "val_ad_episodes_single": "Dự án quảng cáo/phim ngắn phải luôn có đúng một mục tập (tập 1)",
-    "val_ad_shots_missing": "Kịch bản ad thiếu mảng shots hoặc mảng rỗng",
+    "val_ad_shots_missing": "Kịch bản ad thiếu mảng shots",
     "val_ad_duration_drift": (
         "Tổng thời lượng kịch bản {total} giây lệch {delta:.0%} so với target_duration {target} giây, "
         "vượt ngưỡng quan sát {threshold:.0%} (chỉ là thông báo, không chặn lưu)"
@@ -112,7 +114,7 @@ MESSAGES = {
     "val_unit_id_missing": "{prefix}: thiếu unit_id",
     "val_unit_id_missing_required": "{prefix}: thiếu trường bắt buộc unit_id",
     "val_unit_id_duplicate": "{prefix}: unit_id trùng lặp '{value}'",
-    "val_video_units_missing": "Kịch bản reference_video thiếu mảng video_units hoặc mảng rỗng",
+    "val_video_units_missing": "Kịch bản reference_video thiếu mảng video_units",
     "val_unit_duration_range": "{prefix}: duration_seconds phải là số nguyên trong khoảng {low}-{high}",
     # ---- khung xương và chế độ tạo video ----
     "val_skeleton_noun_segments": "phân cảnh",
@@ -237,7 +239,6 @@ MESSAGES = {
     "val_ce_removed_reason_mime_types": (
         "định dạng tư liệu không có danh sách cho phép; nhà cung cấp sẽ từ chối định dạng không nhận"
     ),
-    "val_ce_removed_reason_media_type": "điểm cuối khai báo luôn là video nên không thể khai báo loại phương tiện",
     "val_ce_removed_reason_comfyui_capabilities": (
         "điểm cuối ComfyUI suy ra năng lực từ các liên kết node nên định nghĩa không lưu khai báo năng lực"
     ),
@@ -305,6 +306,9 @@ MESSAGES = {
         "tư liệu vẫn được gửi đi trong khi giao diện không mở năng lực đó"
     ),
     "val_ce_capability_incoherent": "Năng lực {capability} mâu thuẫn với nhóm khai báo; yêu cầu: {requirement}",
+    "val_ce_capability_not_declared": "Phải khai báo ít nhất một năng lực là true trong capabilities: {allowed}",
+    "val_ce_media_type_field_not_allowed": "{name} không dùng được cho định nghĩa có loại phương tiện {media_type}",
+    "val_ce_artifact_extract_missing": "Thiếu đường dẫn trích xuất sản phẩm; cần viết ít nhất một trong: {keys}",
     "val_ce_jsonpath_not_a_string": "Đường dẫn trích xuất phải là chuỗi: {path_expression}",
     "val_ce_jsonpath_surrounding_whitespace": (
         "Đường dẫn trích xuất không được có khoảng trắng ở hai đầu: {path_expression}"

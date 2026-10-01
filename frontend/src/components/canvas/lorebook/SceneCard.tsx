@@ -14,7 +14,11 @@ import { useProjectsStore } from "@/stores/projects-store";
 import { errMsg } from "@/utils/async";
 import { rejectIfAssetBusy } from "./assetBusyGuard";
 import { EditableAssetName } from "./EditableAssetName";
-import type { Scene } from "@/types";
+import { MergeAssetMenu } from "./MergeAssetMenu";
+import { AssetAliasesField } from "./AssetAliasesField";
+import { AssetSheetStaleBadge, MissingDescriptionChip, hasUsableDescription, sheetIsPending } from "./AssetSheetStatusBadge";
+import { useStaleRegenerateConfirm } from "./useStaleRegenerateConfirm";
+import type { AssetSheetStatusRow, Scene } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -29,6 +33,8 @@ interface SceneCardProps {
   onRestoreVersion?: () => void | Promise<void>;
   onReload?: () => void | Promise<unknown>;
   generating?: boolean;
+  /** 产物清单对这张资产图的判定；未取到时按项目数据展示。 */
+  sheetStatus?: AssetSheetStatusRow;
   /** 只读展示（引导演示项目）：不渲染上传 / 编辑 / 入库 / 版本 / 生成入口，文本字段只读。 */
   readOnly?: boolean;
 }
@@ -54,6 +60,7 @@ export function SceneCard({
   onRestoreVersion,
   onReload,
   generating = false,
+  sheetStatus,
   readOnly = false,
 }: SceneCardProps) {
   const { t } = useTranslation(["dashboard", "assets"]);
@@ -86,14 +93,12 @@ export function SceneCard({
   const isDirty = description !== scene.description;
 
   useEffect(() => {
-    // 上游场景描述变化时同步本地草稿
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 上游场景描述变化时同步本地草稿
     setDescription(scene.description);
   }, [scene.description]);
 
   useEffect(() => {
-    // 场景立绘变化时重置图片加载错误标记
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 场景立绘变化时重置图片加载错误标记
     setImgError(false);
   }, [scene.scene_sheet, sheetFp]);
 
@@ -116,9 +121,18 @@ export function SceneCard({
     onUpdate(name, { description });
   };
 
-  const sheetUrl = scene.scene_sheet
+  const sheetUrl = scene.scene_sheet && !sheetIsPending(sheetStatus)
     ? API.getFileUrl(projectName, scene.scene_sheet, sheetFp)
     : null;
+  const descriptionMissing = !hasUsableDescription(scene.description);
+  const staleConfirm = useStaleRegenerateConfirm({
+    projectName,
+    assetType: "scene",
+    name,
+    status: sheetStatus,
+    hasSheet: Boolean(scene.scene_sheet),
+    onGenerate: () => onGenerate(name),
+  });
 
   return (
     <div
@@ -215,6 +229,13 @@ export function SceneCard({
             iconOnly
             busy={generating || uploadingSheet}
           />
+          <MergeAssetMenu
+            projectName={projectName}
+            assetType="scene"
+            name={name}
+            description={scene.description}
+            busy={generating || uploadingSheet}
+          />
         </div>
         )}
       </div>
@@ -223,7 +244,7 @@ export function SceneCard({
       <div className="mb-4">
         <CapsLabel>{t("scene_design")}</CapsLabel>
         <div
-          className="mt-1.5 overflow-hidden rounded-lg"
+          className="relative mt-1.5 overflow-hidden rounded-lg"
           style={{ border: "1px solid var(--color-hairline-soft)" }}
         >
           <PreviewableImageFrame
@@ -249,12 +270,16 @@ export function SceneCard({
               )}
             </AspectFrame>
           </PreviewableImageFrame>
+          {sheetUrl && !imgError && <AssetSheetStaleBadge status={sheetStatus} />}
         </div>
       </div>
 
       {/* ---- Description ---- */}
       <div className="flex items-center justify-between gap-2">
-        <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
+        <span className="flex items-center gap-1.5">
+          <CapsLabel htmlFor={descId}>{t("description")}</CapsLabel>
+          {descriptionMissing && <MissingDescriptionChip />}
+        </span>
         {readOnly ? null : (
           <PromptPreviewButton
             title={t("assets:prompt_preview_title", { name })}
@@ -276,6 +301,14 @@ export function SceneCard({
         placeholder={t("scene_desc_placeholder")}
       />
 
+      <AssetAliasesField
+        projectName={projectName}
+        name={name}
+        assetType="scene"
+        aliases={scene.aliases ?? []}
+        readOnly={readOnly}
+      />
+
       {isDirty && !readOnly && (
         <button
           type="button"
@@ -294,13 +327,17 @@ export function SceneCard({
       )}
 
       {readOnly ? null : (
-        <GenerateButton
-          onClick={() => onGenerate(name)}
-          loading={generating}
-          label={scene.scene_sheet ? t("regenerate_design") : t("generate_design")}
-          className="w-full justify-center"
-        />
+        <span className="block" title={descriptionMissing ? t("assets:sheet_description_required") : undefined}>
+          <GenerateButton
+            onClick={staleConfirm.request}
+            loading={generating}
+            disabled={descriptionMissing}
+            label={scene.scene_sheet ? t("regenerate_design") : t("generate_design")}
+            className="w-full justify-center"
+          />
+        </span>
       )}
+      {staleConfirm.dialog}
     </div>
   );
 }

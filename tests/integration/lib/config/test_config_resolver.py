@@ -655,7 +655,7 @@ class TestVideoCapabilities:
 
 class TestVoiceConsistency:
     """voice_consistency 三维派生（模型能力 × generation_mode × 角色声音绑定方式）。全员经
-    `db_factory` 落真实 in-memory DB，按 CONTRIBUTING.md 的 pytest markers 纪律归 integration。"""
+    `db_factory` 落真实 in-memory DB，按 docs/standards/testing.md 的分档规则归 integration。"""
 
     async def test_seedance_2_reference_video_is_native(self, db_factory):
         """reference_audio_mode=direct、generation_mode=reference_video 且项目选了参考音频绑定 → native。"""
@@ -1540,10 +1540,20 @@ class TestStyleAnalysisVisionGuard:
         from lib.backends.text_backends.base import TextTaskType
 
         resolver = ConfigResolver.__new__(ConfigResolver)
-        # gemini-3.1-flash-lite-preview 在 registry 中未声明 vision
-        fake_svc = _FakeConfigService(settings={"text_backend_simple": "gemini-aistudio/gemini-3.1-flash-lite-preview"})
+        # qwen3-max 在 registry 中未声明 vision
+        fake_svc = _FakeConfigService(settings={"text_backend_simple": "dashscope/qwen3-max"})
         with pytest.raises(ValueError, match="vision"):
             await resolver._resolve_text_backend(fake_svc, MagicMock(), TextTaskType.STYLE_ANALYSIS, None)
+
+    async def test_accepts_multimodal_lite_model(self):
+        from unittest.mock import MagicMock
+
+        from lib.backends.text_backends.base import TextTaskType
+
+        resolver = ConfigResolver.__new__(ConfigResolver)
+        fake_svc = _FakeConfigService(settings={"text_backend_simple": "gemini-aistudio/gemini-3.1-flash-lite-preview"})
+        result = await resolver._resolve_text_backend(fake_svc, MagicMock(), TextTaskType.STYLE_ANALYSIS, None)
+        assert result == ("gemini-aistudio", "gemini-3.1-flash-lite-preview")
 
     async def test_accepts_registry_model_with_vision(self):
         from unittest.mock import MagicMock

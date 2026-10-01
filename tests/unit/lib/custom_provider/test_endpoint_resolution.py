@@ -9,13 +9,12 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from arcreel_market_core.video_backend_contract import ReferenceAudioMode, VideoAudioMode
 from lib.backends.image_backends.base import ImageCapability
-from lib.backends.video_backend_contract import ReferenceAudioMode, VideoAudioMode
 from lib.custom_provider import is_custom_endpoint, make_endpoint_key
 from lib.custom_provider.backends import CustomVideoBackend
 from lib.custom_provider.comfyui.failures import ComfyuiError
 from lib.custom_provider.endpoint_resolution import (
-    definition_media_type,
     derive_mirror_columns,
     endpoint_spec_from_row,
     resolve_endpoint_spec,
@@ -23,7 +22,7 @@ from lib.custom_provider.endpoint_resolution import (
 from lib.custom_provider.endpoints import ENDPOINT_REGISTRY, get_endpoint_spec
 from lib.db.repositories.custom_endpoint_repo import CustomEndpointRepository
 from lib.generation.task_failure import FAILURE_CODE_KEYS
-from tests.factories import comfyui_endpoint_definition, custom_endpoint_definition
+from tests.factories import comfyui_endpoint_definition, custom_endpoint_definition, image_endpoint_definition
 
 if TYPE_CHECKING:
     from lib.db.models.custom_endpoint import CustomEndpoint
@@ -91,11 +90,48 @@ class TestSpecFromRow:
         assert spec.video_caps_for_model("m").reference_audio_mode is ReferenceAudioMode.DIRECT
 
 
+class TestDeclarativeImageProjection:
+    """图片定义投影成图片端点：媒体类型与能力都读定义的显式声明，装出图片通道。"""
+
+    def test_mirror_columns_carry_the_declared_image_media_type(self):
+        assert derive_mirror_columns(image_endpoint_definition()).media_type == "image"
+
+    def test_declared_text_to_image_becomes_the_endpoint_image_capability(self):
+        row = SimpleNamespace(id=7, definition=image_endpoint_definition())
+
+        spec = endpoint_spec_from_row(cast("CustomEndpoint", row))
+
+        assert spec.media_type == "image"
+        assert spec.image_capabilities == frozenset({ImageCapability.TEXT_TO_IMAGE})
+        assert spec.video_caps_for_model is None
+
+    def test_declared_image_to_image_joins_text_to_image_in_the_endpoint_capabilities(self):
+        definition = image_endpoint_definition(
+            capabilities={"text_to_image": True, "image_to_image": True, "max_reference_images": 4}
+        )
+        row = SimpleNamespace(id=7, definition=definition)
+
+        spec = endpoint_spec_from_row(cast("CustomEndpoint", row))
+
+        assert spec.image_capabilities == frozenset({ImageCapability.TEXT_TO_IMAGE, ImageCapability.IMAGE_TO_IMAGE})
+
+    def test_an_image_spec_builds_the_image_channel(self):
+        from lib.custom_provider.backends import CustomImageBackend
+
+        row = SimpleNamespace(id=7, definition=image_endpoint_definition())
+        provider = SimpleNamespace(provider_id="custom-1", base_url="https://relay.test", api_key="sk")
+
+        backend = endpoint_spec_from_row(cast("CustomEndpoint", row)).build_backend(
+            cast("Any", provider), "gpt-image-2"
+        )
+
+        assert isinstance(backend, CustomImageBackend)
+        assert (backend.name, backend.model) == ("custom-1", "gpt-image-2")
+        assert backend.capabilities == {ImageCapability.TEXT_TO_IMAGE}
+
+
 class TestKindDispatch:
     """定义的 ``kind`` 决定投影走谁；名录外的 kind 在投影层就拒，不靠某一种 kind 的规则兜底。"""
-
-    def test_media_type_comes_from_the_definition_kind(self):
-        assert definition_media_type(custom_endpoint_definition()) == "video"
 
     def test_mirror_columns_take_kind_and_media_type_from_the_definition(self):
         mirror = derive_mirror_columns(custom_endpoint_definition())
@@ -367,12 +403,6 @@ class TestKindDispatch:
         assert caught.value.code == "provider_unsupported_media"
         assert caught.value.params == {"provider_id": "custom-1", "media_type": "audio"}
         assert caught.value.code in FAILURE_CODE_KEYS
-
-    def test_media_type_of_an_unsupported_kind_is_refused(self):
-        definition = custom_endpoint_definition(kind="unregistered")
-
-        with pytest.raises(ValueError, match="unsupported endpoint definition kind"):
-            definition_media_type(definition)
 
     def test_spec_from_a_row_of_an_unsupported_kind_is_refused(self):
         """库里的 kind 是本层没有投影实现的那种：抛 ValueError，与「端点不存在」同一出口。"""

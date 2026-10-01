@@ -17,10 +17,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import AfterValidator, BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from arcreel_market_core.endpoint_definition import COMFYUI_KIND
+from arcreel_market_core.video_backend_contract import ReferenceAudioMode, audio_capability_pair_is_coherent
 from lib.backends.artifact_download_guard import artifact_http_client
 from lib.backends.http_status_errors import raise_for_status_redacted
 from lib.backends.image_backends.base import ImageCapability
-from lib.backends.video_backend_contract import ReferenceAudioMode, audio_capability_pair_is_coherent
 from lib.config.repository import mask_secret
 from lib.custom_provider import is_custom_endpoint, make_provider_id
 from lib.custom_provider.capabilities import (
@@ -34,7 +35,6 @@ from lib.custom_provider.capabilities import (
     system_video_capabilities,
 )
 from lib.custom_provider.discovery_formats import endpoint_attachment_holds, is_comfyui_protocol
-from lib.custom_provider.endpoint_definition import COMFYUI_KIND
 from lib.custom_provider.endpoint_resolution import endpoint_spec_from_row, resolve_endpoint_spec
 from lib.custom_provider.endpoints import (
     ENDPOINT_REGISTRY,
@@ -161,6 +161,8 @@ class ModelInput(BaseModel):
     # 稀疏覆盖字典，键名对齐 VideoCapabilities 字段名；None 或键缺席 = 跟随系统判定。
     # 保存模型列表是整体替换语义，本字段必须随列表回传，否则存量覆盖被清空。
     capability_overrides: dict[str, object] | None = None
+    # 最大输出长度（单位 token），只对文本模型保存；None = 未登记，文本请求按 64000 封顶。
+    max_output_tokens: int | None = Field(default=None, gt=0)
 
     @field_validator("capability_overrides")
     @classmethod
@@ -212,6 +214,8 @@ class ModelInput(BaseModel):
                 # endpoint 经 EndpointType 校验，值必在 ENDPOINT_REGISTRY 内，无需 ValueError 兜底
                 durations = infer_supported_durations(self.model_id)
         d["supported_durations"] = json.dumps(durations) if durations is not None else None
+        if endpoint_spec.media_type != "text":
+            d["max_output_tokens"] = None
         return d
 
 
@@ -269,6 +273,8 @@ class ModelResponse(BaseModel):
     system_capabilities: dict[str, object] | None = None
     # 用户覆盖（稀疏字典），与 system_capabilities 平凡合并即为生效值。
     capability_overrides: dict[str, object] | None = None
+    # 最大输出长度（单位 token）；未登记为 None。
+    max_output_tokens: int | None = None
     # 正在引用该模型的全局 system_settings 键名（如 default_video_backend_i2v）；未被引用为
     # None。只查 DB 全局配置，不扫描项目文件（`docs/adr/0054`）；前端据此渲染非阻塞提示。
     global_bucket_refs: list[str] | None = None
@@ -477,6 +483,7 @@ def _model_to_response(
         currency=m.currency,
         supported_durations=durations,
         resolution=m.resolution,
+        max_output_tokens=m.max_output_tokens,
         global_bucket_refs=global_bucket_refs or None,
     )
 
@@ -1215,8 +1222,8 @@ def _check_google(
     from lib.config.url_utils import ensure_google_base_url
 
     effective_url = ensure_google_base_url(base_url)
-    http_options = {"base_url": effective_url} if effective_url else None
-    client = (client_factory or genai.Client)(api_key=api_key, http_options=http_options)  # type: ignore[arg-type]
+    http_options: genai.types.HttpOptionsDict | None = {"base_url": effective_url} if effective_url else None
+    client = (client_factory or genai.Client)(api_key=api_key, http_options=http_options)
     pager = client.models.list()
     count = sum(1 for _ in pager)
     return ConnectivityCheckResponse(

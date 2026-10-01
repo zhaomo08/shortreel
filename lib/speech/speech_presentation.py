@@ -24,15 +24,12 @@ from lib.speech.speech_artifact_provenance import (
     project_subtitle_utterances,
 )
 from lib.speech.speech_composition import SpeechMode, SpeechOwner, SpeechPreparation
+from lib.speech.subtitle_sentences import subtitle_reading_units
 
 MICROSECONDS_PER_SECOND = 1_000_000
 MediaSelection = Literal["current", "history"]
 MediaCurrency = Literal["current", "stale"]
 PresentationProvenance = Literal["verified", "unavailable"]
-
-
-class PresentationBoundaryError(ValueError):
-    """A requested narration track cannot fit inside its video unit."""
 
 
 def presentation_artifact_paths(episode: int, resource_id: str, variant: RenditionVariant) -> tuple[str, str]:
@@ -114,9 +111,9 @@ class SubtitleTimingPolicy(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class MechanicalSubtitleTiming:
-    """Allocate a real media boundary by normalized Unicode text length."""
+    """Allocate a real media boundary across sentences by reading-unit proportion."""
 
-    policy_version: int = 1
+    policy_version: int = 2
 
     def __post_init__(self) -> None:
         if type(self.policy_version) is not int or self.policy_version <= 0:
@@ -125,7 +122,7 @@ class MechanicalSubtitleTiming:
     @property
     def basis_identity(self) -> dict[str, object]:
         return {
-            "kind": "mechanical-text-length",
+            "kind": "mechanical-sentence-reading-units",
             "version": self.policy_version,
         }
 
@@ -139,10 +136,8 @@ class MechanicalSubtitleTiming:
             raise ValueError("boundary_microseconds must be a positive integer")
         if not utterances:
             return ()
-        weights = tuple(len(utterance.text) for utterance in utterances)
+        weights = tuple(subtitle_reading_units(utterance.text) for utterance in utterances)
         total_weight = sum(weights)
-        if total_weight <= 0:  # pragma: no cover - SubtitleUtteranceEvidence invariant
-            raise ValueError("subtitle utterances must contain visible text")
 
         cues: list[SubtitleCue] = []
         cumulative = 0
@@ -380,8 +375,8 @@ def materialize_speech_presentation(
     video: PresentationMedia,
     provider_audio_enabled: bool,
     narration_audio: PresentationMedia | None = None,
-    transition_to_next: str = "cut",
     timing: SubtitleTimingPolicy | None = None,
+    subtitle_sentences_prepared: bool = False,
 ) -> SpeechPresentation:
     """Materialize one validated presentation from selected real media."""
 
@@ -397,16 +392,14 @@ def materialize_speech_presentation(
         raise ValueError("post_production presentation cannot include narration audio")
 
     video_duration = _duration_microseconds(video.evidence.actual_duration_seconds)
+    # Narration may outlast its video: on an edit timeline it extends onto the following clips,
+    # and subtitles that follow narration span the whole narration.
     narration_duration: int | None = None
     if narration_audio is not None:
         narration_duration = _duration_microseconds(narration_audio.evidence.actual_duration_seconds)
-        if narration_duration > video_duration:
-            raise PresentationBoundaryError(
-                f"narration audio exceeds video boundary: {narration_duration} > {video_duration} microseconds"
-            )
 
     timing_adapter = timing or MechanicalSubtitleTiming()
-    utterances = project_subtitle_utterances(preparation)
+    utterances = project_subtitle_utterances(preparation, subtitle_sentences_prepared=subtitle_sentences_prepared)
     subtitle_boundary = narration_duration if narration_duration is not None else video_duration
     assert subtitle_boundary is not None
     subtitles = timing_adapter.distribute(utterances, boundary_microseconds=subtitle_boundary)
@@ -416,6 +409,7 @@ def materialize_speech_presentation(
         video=video.evidence,
         narration_audio=narration_audio.evidence if narration_audio is not None else None,
         timing_policy=timing_adapter.basis_identity,
+        subtitle_sentences_prepared=subtitle_sentences_prepared,
     )
     presentation_basis = build_presentation_basis(
         variant=variant,
@@ -423,7 +417,6 @@ def materialize_speech_presentation(
         subtitle=subtitle_basis,
         narration_audio=narration_audio.evidence if narration_audio is not None else None,
         provider_audio_enabled=provider_audio_enabled,
-        transition_to_next=transition_to_next,
     )
     sources = (video,) if narration_audio is None else (video, narration_audio)
     selection: MediaSelection = "history" if any(source.selection == "history" for source in sources) else "current"
@@ -509,7 +502,6 @@ __all__ = [
     "MediaCurrency",
     "MediaSelection",
     "NarrationPresentationTrack",
-    "PresentationBoundaryError",
     "PresentationMedia",
     "PresentationProvenance",
     "PresentationValue",

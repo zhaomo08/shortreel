@@ -22,8 +22,8 @@ export default {
   'workbench_lorebook_body': '角色、场景和道具在左侧统一管理，每项资产都可以生成资产图。资产图会作为分镜图生成和参考生视频的参考图，用于保持画面一致。',
   'workbench_timeline_title': '分镜画布',
   'workbench_timeline_body': '每一集的分镜按时间线排列，包含画面提示词、分镜图和视频。可以先生成分镜图确认构图，再生成视频，单个分镜支持随时重新生成。',
-  'workbench_export_title': '导出',
-  'workbench_export_body': '制作完成后，从顶栏导出剪映草稿继续剪辑，或打包下载整个项目。演示项目没有成片，导出按钮不可用。',
+  'workbench_export_title': '导出项目',
+  'workbench_export_body': '需要备份或迁移时，从顶栏「导出项目」打包下载整个项目。成片与剪映草稿在各集的剪辑视图中导出。演示项目不能导出，导出按钮不可用。',
   'finish_title': '开始你的第一个项目',
   'finish_body': '新建项目并导入小说或剧本，即可开始制作。本引导可随时在「设置 → 关于」中重新查看。',
 
@@ -45,7 +45,7 @@ export default {
   'demo_banner_title': '演示项目 · 只读',
   'demo_banner_body': '你正在查看一个示例项目。编辑、生成、上传和导出功能在演示中不可用。',
   'demo_action_unavailable': '演示中不可用',
-  'demo_episode_placeholder': '演示内容只到第 {{episode}} 集：这一集只有标题，没有脚本和分镜。',
+  'demo_episode_placeholder': '演示内容只到第 {{position}} 集：这一集只有标题，没有脚本和分镜。',
 
   // 演示工作台 Agent 面板的静态对话：Agent 汇报分析结果 → 用户发起制作 → Agent 汇报推进，
   // 演的是首次制作的完整时序（Agent 的每条消息都是对上一步动作的回应，不主动发起对话）

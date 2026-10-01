@@ -27,9 +27,9 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 from PIL import Image
 
 if TYPE_CHECKING:
+    from arcreel_market_core.video_backend_contract import VideoGenerationResult
     from lib.backends.audio_backends.base import AudioBackend
     from lib.backends.image_backends.base import ImageBackend
-    from lib.backends.video_backend_contract import VideoGenerationResult
     from lib.config.resolver import ConfigResolver
     from lib.references.reference_compression import CompressedRef, PayloadLimits, ReferenceSpec
 
@@ -886,9 +886,9 @@ class MediaGenerator:
             resolution=resolution,
         )
         # 总时长校验需要读音频元数据，只能在这层（拿得到文件路径）探测好再传给纯函数的
-        # gate_video_request；探测失败（ffprobe 不可用等）按 None 传入，由其按既有降级口径跳过
+        # gate_video_request；探测失败（随包 ffmpeg 不可用等）按 None 传入，由其按既有降级口径跳过
         # 该项校验，不阻断请求。仅当 caps 声明了总时长约束才探测——未声明该约束的后端
-        # （如 wan2.7）不必为每个请求多付一轮 ffprobe 子进程开销。
+        # （如 wan2.7）不必为每个请求多付一轮探测子进程开销。
         reference_audio_total_seconds = (
             await probe_reference_audio_total_seconds(reference_audio_files)
             if reference_audio_files and video_caps.max_reference_audio_total_seconds is not None
@@ -974,7 +974,7 @@ class MediaGenerator:
                 ),
             ) as call,
         ):
-            from lib.backends.video_backend_contract import VideoGenerationRequest
+            from arcreel_market_core.video_backend_contract import VideoGenerationRequest
 
             video_backend = self._video_backend
             # FRAME（start/end 帧，永不缩尺寸）+ ARRAY（参考数组，完整梯子）按已知序位组织成
@@ -1142,7 +1142,7 @@ class MediaGenerator:
         if before_formal_commit is not None and staged_output_path is None:
             raise ValueError("before_formal_commit requires formal video output")
 
-        from lib.backends.video_backend_contract import ResumeExpiredError, VideoGenerationRequest
+        from arcreel_market_core.video_backend_contract import ResumeExpiredError, VideoGenerationRequest
 
         request = VideoGenerationRequest(
             prompt=prompt,

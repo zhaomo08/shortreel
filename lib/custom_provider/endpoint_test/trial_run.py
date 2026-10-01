@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from arcreel_market_core.endpoint_definition import definition_media_type
+from arcreel_market_core.video_backend_contract import (
+    ProviderResponseStage,
+    VideoCapabilityError,
+    VideoGenerationRequest,
+)
 from lib.backends.container_sniff import CONTAINER_HEAD_BYTES, sniff_container
 from lib.backends.image_backends.base import (
     ImageCapability,
@@ -39,12 +45,12 @@ from lib.backends.image_backends.base import (
     ReferenceImage,
 )
 from lib.backends.providers import CALL_TYPE_IMAGE, CALL_TYPE_VIDEO, CallPurpose
-from lib.backends.video_backend_contract import ProviderResponseStage, VideoCapabilityError, VideoGenerationRequest
 from lib.backends.video_frame_slots import resolve_first_frame_aspect_ratio
 from lib.billing.ledger import Ledger
 from lib.config.resolver import ConfigResolver
 from lib.custom_provider.comfyui.failures import ComfyuiError
 from lib.custom_provider.declarative_backend import DeclarativeRuntimeError, DeclarativeVideoBackend
+from lib.custom_provider.declarative_image_backend import DeclarativeImageBackend
 from lib.db.base import DEFAULT_USER_ID
 from lib.db.repositories.usage_repo import bound_provider_response
 from lib.generation.task_failure import encode_failure
@@ -101,7 +107,7 @@ class TrialRunTarget:
     build_backend: Callable[[], Awaitable[Any]]
     definition: Mapping[str, Any] | None = None
     #: 这个端点产的是视频还是图像：决定构造哪种生成请求、记哪种 call_type、产物落成哪个文件名。
-    #: 声明式端点恒为视频（协议本身就是视频的），ComfyUI 端点由定义自己声明。
+    #: 声明式与 ComfyUI 端点都由定义自己声明，经 ``definition_media_type`` 读取。
     media_type: str = "video"
     #: 提交前跑不跑生产那道能力闸。付费通道一律跑（声明的违约在付费前拒绝）；ComfyUI 端点费用
     #: 固定 0，且能力由节点绑定推导而内联定义这条入口拿不到推导结果，跑闸只会把「绑定漏了首帧」
@@ -642,7 +648,7 @@ async def _gate_trial_request(
     reference_images = assets.get("reference_images")
     reference_audio = assets.get("reference_audio_files")
     audio_files = list(reference_audio) if isinstance(reference_audio, list) else None
-    # 与生产路径同一探测：总时长探不出（ffprobe 不可用）传 None，闸按未知跳过该项而非拒绝。
+    # 与生产路径同一探测：总时长探不出（随包 ffmpeg 不可用）传 None，闸按未知跳过该项而非拒绝。
     total_seconds = await probe_reference_audio_total_seconds(audio_files) if audio_files else None
     images = list(reference_images) if isinstance(reference_images, list) else None
     end_image = _single(assets.get("end_image"))
@@ -696,16 +702,18 @@ def declarative_target(
     *,
     provider: str | None = None,
 ) -> TrialRunTarget:
-    """内联定义的目标：直接构造声明式 backend。
+    """内联定义的目标：按定义声明的媒体类型直接构造声明式视频或图片 backend。
 
     ``provider`` 缺省取 ``base_url`` 的 host——内联凭证没有供应商身份，而账本必须落一个能让用户
     日后认出这笔钱花在哪里的值。三节 URL 都写死绝对地址的定义没有 base_url 可取，退而取提交
     地址的 host：那正是这笔钱实际打给谁。
     """
     label = provider or provider_from_base_url(credentials.base_url) or _definition_host(definition)
+    media_type = definition_media_type(definition)
+    backend_class = DeclarativeImageBackend if media_type == "image" else DeclarativeVideoBackend
 
-    async def build() -> DeclarativeVideoBackend:
-        return DeclarativeVideoBackend(
+    async def build() -> DeclarativeVideoBackend | DeclarativeImageBackend:
+        return backend_class(
             api_key=credentials.api_key,
             base_url=credentials.base_url,
             model=parameters.model,
@@ -718,6 +726,7 @@ def declarative_target(
         model=parameters.model,
         build_backend=build,
         definition=definition,
+        media_type=media_type,
     )
 
 

@@ -38,7 +38,7 @@ const projectData = {
 
 // 回显 key 与参数，便于断言文案选择逻辑。
 const t = ((key: string, params?: Record<string, unknown>) =>
-  `${key}|${params?.id ?? params?.unitId ?? ""}|${params?.reason ?? ""}`) as unknown as TFunction;
+  key === "common:episode_unlisted_name" ? "未命名集" : `${key}|${params?.id ?? params?.unitId ?? params?.episode ?? ""}|${params?.reason ?? ""}`) as unknown as TFunction;
 
 describe("buildTaskFailureTarget", () => {
   it("maps character/scene/prop to asset routes", () => {
@@ -154,7 +154,7 @@ describe("buildTaskFailureTarget", () => {
 describe("describeTaskFailure", () => {
   it("selects per-type keys for media/asset tasks", () => {
     expect(describeTaskFailure(t, makeTask({ task_type: "storyboard", resource_id: "E1S01" }))).toBe(
-      "storyboard_task_failed|E1S01|boom",
+      "storyboard_task_failed|未命名集 · S01|boom",
     );
     expect(describeTaskFailure(t, makeTask({ task_type: "grid", resource_id: "g1" }))).toBe("grid_task_failed|g1|boom");
     expect(describeTaskFailure(t, makeTask({ task_type: "product", resource_id: "Bag" }))).toBe(
@@ -164,8 +164,16 @@ describe("describeTaskFailure", () => {
 
   it("uses the reference key with unitId for reference_video", () => {
     expect(describeTaskFailure(t, makeTask({ task_type: "reference_video", resource_id: "E1U1" }))).toBe(
-      "reference_generation_task_failed|E1U1|boom",
+      "reference_generation_task_failed|未命名集 · U1|boom",
     );
+  });
+
+  it("names the episode for script plan failures", () => {
+    for (const taskType of ["text_drama_script_plan", "text_narration_script_plan", "text_reference_script_plan"]) {
+      expect(
+        describeTaskFailure(t, makeTask({ task_type: taskType, resource_id: "episode-2" }), projectData),
+      ).toBe("script_plan_task_failed|E2|boom");
+    }
   });
 
   it("falls back to a generic reason when error_message is null", () => {
@@ -193,12 +201,12 @@ describe("describeTaskFailure", () => {
         task_type: "storyboard",
         resource_id: "E1S01",
         error_code: "provider_rejected",
-        error_params: { provider_reason: "InvalidParameter: prompt violates the content policy" },
+        error_params: { provider_reason: "InvalidParameter: E1S01 prompt violates the content policy" },
       }),
     );
     expect(text).toBe(
-      "storyboard_task_failed|E1S01|boomtask_failed_provider_reason_suffix||"
-        + "InvalidParameter: prompt violates the content policy",
+      "storyboard_task_failed|未命名集 · S01|boomtask_failed_provider_reason_suffix||"
+        + "InvalidParameter: S01 prompt violates the content policy",
     );
   });
 
@@ -217,7 +225,7 @@ describe("describeTaskFailure", () => {
         error_params: { provider_reason: "InvalidParameter" },
       }),
     );
-    expect(text).toBe('分镜 "E1S01" 生成失败：上游返回 {{reason}}（供应商拒因：InvalidParameter）');
+    expect(text).toBe('分镜 "未命名集 · S01" 生成失败：上游返回 {{reason}}（供应商拒因：InvalidParameter）');
   });
 
   it("keeps the plain text when there is no provider reason", () => {
@@ -227,7 +235,7 @@ describe("describeTaskFailure", () => {
         t,
         makeTask({ task_type: "storyboard", resource_id: "E1S01", error_code: "cascade_blocked_dependency" }),
       ),
-    ).toBe("storyboard_task_failed|E1S01|boom");
+    ).toBe("storyboard_task_failed|未命名集 · S01|boom");
     expect(
       describeTaskFailure(
         t,
@@ -238,7 +246,7 @@ describe("describeTaskFailure", () => {
           error_params: {},
         }),
       ),
-    ).toBe("storyboard_task_failed|E1S01|boom");
+    ).toBe("storyboard_task_failed|未命名集 · S01|boom");
   });
 
   it("ignores a blank or non-string provider reason", () => {
@@ -253,7 +261,7 @@ describe("describeTaskFailure", () => {
             error_params: { provider_reason },
           }),
         ),
-      ).toBe("storyboard_task_failed|E1S01|boom");
+      ).toBe("storyboard_task_failed|未命名集 · S01|boom");
     }
   });
 
@@ -268,7 +276,7 @@ describe("describeTaskFailure", () => {
       }),
     );
     expect(text).toBe(
-      `storyboard_task_failed|E1S01|boomtask_failed_provider_reason_suffix||${"x".repeat(120)}\u2026`,
+      `storyboard_task_failed|未命名集 · S01|boomtask_failed_provider_reason_suffix||${"x".repeat(120)}\u2026`,
     );
   });
 
@@ -283,7 +291,7 @@ describe("describeTaskFailure", () => {
       }),
     );
     expect(text).toBe(
-      `storyboard_task_failed|E1S01|boomtask_failed_provider_reason_suffix||${"\ud83d\ude80".repeat(120)}\u2026`,
+      `storyboard_task_failed|未命名集 · S01|boomtask_failed_provider_reason_suffix||${"\ud83d\ude80".repeat(120)}\u2026`,
     );
   });
 });

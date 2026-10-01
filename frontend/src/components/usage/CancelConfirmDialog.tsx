@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import { voidPromise } from "@/utils/async";
+import { episodeItemRefLabel } from "@/utils/episode-display";
 import type { CancelRequest } from "./use-task-cancellation";
 
 interface CancelConfirmDialogProps {
@@ -47,7 +48,7 @@ export function CancelConfirmDialog({
           {cascaded.map((task) => (
             <li key={task.task_id}>
               {t(`task_type_${task.task_type}`, { defaultValue: task.task_type })} /{" "}
-              {task.resource_id}
+              {episodeItemRefLabel(task.resource_id, task.resource_ref, t)}
             </li>
           ))}
         </ul>
@@ -66,10 +67,10 @@ export function CancelConfirmDialog({
           // 危险按钮的红底与白字四套主题共用：红是「不可逆」的固定语义，
           // 底色深到白字在浅色主题下也够对比，故不走 --color-danger。
           style={{
-            color: "oklch(0.98 0 0)",
+            color: "color-mix(in oklab, var(--raise) 100%, transparent)",
             background: "linear-gradient(135deg, oklch(0.55 0.20 25), oklch(0.45 0.18 25))",
             boxShadow:
-              "inset 0 1px 0 oklch(1 0 0 / 0.18), 0 4px 14px -4px oklch(0.40 0.18 25 / 0.5)",
+              "inset 0 1px 0 color-mix(in oklab, var(--raise) 18%, transparent), 0 4px 14px -4px oklch(0.40 0.18 25 / 0.5)",
           }}
         >
           {cancelling ? t("cancelling") : t("confirm_cancel")}

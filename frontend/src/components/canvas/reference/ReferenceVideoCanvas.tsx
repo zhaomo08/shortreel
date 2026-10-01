@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Clock,
   Loader2,
+  Plus,
   Save,
   Scissors,
   Sparkles,
@@ -22,11 +25,13 @@ import { EpisodeHeader } from "./EpisodeHeader";
 import { ReferenceDurationConfirmDialog } from "./ReferenceDurationConfirmDialog";
 import { ReferenceBatchAdmissionDialog } from "./ReferenceBatchAdmissionDialog";
 import { referenceBatchOutcome } from "./batch-outcome";
-import { NarrationDeliveryChoice } from "@/components/shared/NarrationDeliveryChoice";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { AdScriptButton, AdScriptProgress } from "@/components/canvas/shared/AdScriptDialog";
+import { NoScriptBlankState } from "@/components/canvas/shared/StartBlankScriptButton";
 import { computeVoiceLegacyNotice, VoiceLegacyBanner } from "./VoiceLegacyBanner";
 import { useReferenceDurationGate } from "@/hooks/useReferenceDurationGate";
 import { ReferenceScriptPlanPreviewPanel } from "@/components/canvas/reference/ReferenceScriptPlanPreviewPanel";
+import { PromptAuthoringDraftPanel, usePromptAuthoringDraft } from "./PromptAuthoringDraftPanel";
 import { API } from "@/api";
 import {
   enqueueNarration,
@@ -45,7 +50,9 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useCostStore } from "@/stores/cost-store";
+import { useEpisodeSurfaceRequest } from "@/stores/episode-surface-store";
 import { errMsg } from "@/utils/async";
+import { PromptAuthoringButton } from "@/components/canvas/shared/PromptAuthoringButton";
 import {
   buildMentionLookup,
   lineSpeechMarks,
@@ -53,11 +60,12 @@ import {
 } from "@/utils/reference-mentions";
 import type {
   ReferenceBatchAdmission,
-  ReferenceRequestOptions,
   ReferenceUnitCapabilityMap,
   ReferenceVideoUnit,
   UnitStatus,
 } from "@/types";
+import { itemIdWithinEpisode } from "@/utils/episode-display";
+import { stepAnchor } from "@/utils/move-anchor";
 
 export interface ReferenceVideoCanvasProps {
   projectName: string;
@@ -76,8 +84,8 @@ export interface ReferenceVideoCanvasProps {
    * 标志不从这里来：它们随单元列表由服务端按可用参考图逐单元给出（`unitCapabilitiesByEpisode`）。
    */
   videoModelUnresolved?: boolean;
-  /** 上游旁白工作流给出的请求事实；不在画布内探测或推断 TTS 状态。 */
-  requestOptions?: ReferenceRequestOptions;
+  /** 剧本规划档位（能力端点的 `duration_constraints.planning`）：内容确认页上端点固定的单元按它选时长、判越档。 */
+  planDurationOptions?: number[];
 }
 
 const EMPTY_UNITS: readonly ReferenceVideoUnit[] = Object.freeze([]);
@@ -164,24 +172,15 @@ export function ReferenceVideoCanvas({
   showPreprocess = true,
   freeDuration = false,
   videoModelUnresolved,
-  requestOptions,
+  planDurationOptions,
 }: ReferenceVideoCanvasProps) {
   const { t } = useTranslation("dashboard");
-  const [narrationDelivery, setNarrationDelivery] = useState<"post_production" | "use_tts">(
-    requestOptions?.narration_delivery ?? "post_production",
-  );
-  const effectiveRequestOptions = useMemo<ReferenceRequestOptions>(
-    () =>
-      requestOptions || narrationDelivery !== "post_production"
-        ? { ...requestOptions, narration_delivery: narrationDelivery }
-        : {},
-    [narrationDelivery, requestOptions],
-  );
 
   const loadUnits = useReferenceVideoStore((s) => s.loadUnits);
   const addUnit = useReferenceVideoStore((s) => s.addUnit);
   const patchUnit = useReferenceVideoStore((s) => s.patchUnit);
   const deleteUnit = useReferenceVideoStore((s) => s.deleteUnit);
+  const moveUnit = useReferenceVideoStore((s) => s.moveUnit);
   const select = useReferenceVideoStore((s) => s.select);
 
   const units =
@@ -197,6 +196,8 @@ export function ReferenceVideoCanvas({
   const project = useProjectsStore((s) => s.currentProjectData);
   // schema v6 起各 bucket 共用名称空间，每个名字只会声明一次。
   const mentionLookup = useMemo(() => buildMentionLookup(project), [project]);
+  // 提示词编写草稿：待修复草稿在视频单元页取代工作台呈现，Agent 的可编辑草稿只在工作台上方提示。
+  const { view: promptDraft, refresh: refreshPromptDraft } = usePromptAuthoringDraft(projectName, episode);
 
   const voiceLegacyNotice = useMemo(
     () => computeVoiceLegacyNotice(units, project?.characters ?? {}, project?.character_voice_binding),
@@ -340,13 +341,35 @@ export function ReferenceVideoCanvas({
     return map;
   }, [units, drafts, projectName, episode]);
 
-  const handleAdd = useCallback(async () => {
+  // afterUnitId 缺省时追加到末尾；新单元不继承同号旧单元的产物与版本历史。
+  const handleAdd = useCallback(async (afterUnitId?: string) => {
     try {
-      await addUnit(projectName, episode, { prompt: "" });
+      await addUnit(projectName, episode, {
+        prompt: "",
+        ...(afterUnitId !== undefined ? { after_unit_id: afterUnitId } : {}),
+      });
     } catch (e) {
       toastError(e);
     }
   }, [addUnit, projectName, episode]);
+
+  // 改序不弹确认；请求在途时丢弃后续操作，避免基于过期顺序计算锚点。
+  const [movingUnit, setMovingUnit] = useState(false);
+  const handleMove = useCallback(async (unitId: string, afterUnitId: string | null) => {
+    if (movingUnit) return;
+    setMovingUnit(true);
+    try {
+      await moveUnit(projectName, episode, unitId, afterUnitId);
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setMovingUnit(false);
+    }
+  }, [moveUnit, projectName, episode, movingUnit]);
+  const onMove = useCallback(
+    (unitId: string, afterUnitId: string | null) => void handleMove(unitId, afterUnitId),
+    [handleMove],
+  );
 
   // 移除比其他写入多挡一类占用：在跑的配音任务同样指向该单元（与时间线分镜的移除守卫一致）。
   const isUnitRemovalBlocked = useCallback(
@@ -420,20 +443,12 @@ export function ReferenceVideoCanvas({
     [projectName, episode, uploading.ref, restoring.ref, durationSaving.ref],
   );
 
-  const durationGate = useReferenceDurationGate({
-    projectName,
-    episode,
-    requestOptions: effectiveRequestOptions,
-  });
+  const durationGate = useReferenceDurationGate({ projectName, episode });
   /** 整批准入判定的未决结论（需确认 / 受阻）；admitted 由 toast 反馈，不进这里。 */
   const [batchAdmission, setBatchAdmission] = useState<ReferenceBatchAdmission | null>(null);
 
   const enqueue = useCallback(
-    async (
-      unitId: string,
-      confirmedRequestDuration: number | undefined,
-      options: ReferenceRequestOptions,
-    ) => {
+    async (unitId: string, confirmedRequestDuration: number | undefined) => {
       // 提交前用 getState() 新鲜读复核：按钮渲染期捕获的占用态未必是最新的
       // （批量循环、Agent 入队、SSE 落库都可能在渲染之后、点击之前占用同一 unit）；
       // 时长确认弹窗打开期间同样会经过这段窗口，故复核落在入队这一刻。
@@ -447,12 +462,12 @@ export function ReferenceVideoCanvas({
       }
       try {
         // 乐观打标（请求发出前）、失败回滚与 queued/deduped 提示都在动作层内完成
-        await enqueueReferenceVideoUnit(projectName, episode, unitId, {
-          ...options,
-          ...(confirmedRequestDuration == null
-            ? {}
-            : { confirmed_request_duration_seconds: confirmedRequestDuration }),
-        });
+        await enqueueReferenceVideoUnit(
+          projectName,
+          episode,
+          unitId,
+          confirmedRequestDuration == null ? {} : { confirmed_request_duration_seconds: confirmedRequestDuration },
+        );
       } catch (e) {
         toastError(e, (msg) => t("reference_generate_request_failed", { error: msg }));
       }
@@ -469,11 +484,11 @@ export function ReferenceVideoCanvas({
    * 单元入口专用：批量入口走服务端的全有或全无准入，一次请求评估全部目标。
    */
   const makeEnqueueSerially = useCallback(
-    (canEnqueue: (unitId: string) => boolean, options: ReferenceRequestOptions) =>
+    (canEnqueue: (unitId: string) => boolean) =>
       async (unitIds: string[], confirmedDurations: ReadonlyMap<string, number>) => {
       for (const id of unitIds) {
         if (!canEnqueue(id)) continue;
-        await enqueue(id, confirmedDurations.get(id), options);
+        await enqueue(id, confirmedDurations.get(id));
       }
     },
     [enqueue],
@@ -492,7 +507,7 @@ export function ReferenceVideoCanvas({
       }
       await durationGate.run(
         [unitId],
-        makeEnqueueSerially(canEnqueueUnit, effectiveRequestOptions),
+        makeEnqueueSerially(canEnqueueUnit),
         canEnqueueUnit,
       );
     },
@@ -502,7 +517,6 @@ export function ReferenceVideoCanvas({
       isUnitLocked,
       isUnitGenerationBlocked,
       canEnqueueUnit,
-      effectiveRequestOptions,
       t,
     ],
   );
@@ -566,6 +580,8 @@ export function ReferenceVideoCanvas({
     },
     [handleGenerateNarration],
   );
+  // 后期配音项目不生成旁白配音：收起生成入口，已有配音照常试听。
+  const onGenerateNarration = project?.narration_delivery === "use_tts" ? onGenerateNarrationVoid : undefined;
 
   // 批量生成的作用对象：全部尚无成片的 unit（含 needs_replan、在途、失败重试）。按钮禁用须与
   // 它同一口径——只看当前选中 unit 是否在跑、与作用对象无关的判定会脱节：选中项空闲时按钮会在
@@ -573,9 +589,6 @@ export function ReferenceVideoCanvas({
   const batchTargets = useMemo(
     () => units.filter((u) => statusMap[u.unit_id] !== "ready"),
     [units, statusMap],
-  );
-  const batchDurationEndpointFixed = batchTargets.some(
-    (unit) => unitCapabilities[unit.unit_id]?.duration_endpoint_fixed ?? false,
   );
 
   /**
@@ -588,9 +601,6 @@ export function ReferenceVideoCanvas({
       try {
         const admission = await enqueueReferenceVideoBatch(projectName, episode, {
           unit_ids: unitIds,
-          // 旁白交付方式随请求走，与单元入口同一个选择：不带上它，整批会按服务端
-          // 默认的「后期配音」准入，用户在画布上选的「使用当前 TTS」被静默丢弃。
-          narration_delivery: narrationDelivery,
           ...(confirmedDurations ? { confirmed_request_durations: confirmedDurations } : {}),
         });
         setBatchAdmission(referenceBatchOutcome(admission) === "queued" ? null : admission);
@@ -599,7 +609,7 @@ export function ReferenceVideoCanvas({
         toastError(e, (msg) => t("reference_batch_request_failed", { error: msg }));
       }
     },
-    [projectName, episode, narrationDelivery, t],
+    [projectName, episode, t],
   );
 
   const handleBatchGenerate = useCallback(async () => {
@@ -818,6 +828,11 @@ export function ReferenceVideoCanvas({
     if (hasScript || !showPreprocess) setTab("units");
   }, [hasScript, showPreprocess]);
 
+  useEpisodeSurfaceRequest(projectName, episode, "script_plan", () => {
+    if (showPreprocess) setTab("preproc");
+  });
+  useEpisodeSurfaceRequest(projectName, episode, "prompt_authoring_draft", () => setTab("units"));
+
   // 通知回跳：收到 reference_unit scroll target 时切到 units tab 并选中对应 unit
   // （镜像 ShotSplitView 的选择式回跳）。units 异步加载，靠依赖变化重试到命中或过期。
   const scrollTarget = useAppStore((s) => s.scrollTarget);
@@ -829,6 +844,11 @@ export function ReferenceVideoCanvas({
       // eslint-disable-next-line react-hooks/set-state-in-effect -- 订阅通知 store，触发后切 tab + 选中
       setTab("units");
       select(scrollTarget.id);
+      // 应用内链接要求打开该单元的预览时，窄屏下把预览子页签切到前台。
+      const start = useAppStore.getState().playbackStart;
+      if (start?.resource_type === "reference_videos" && start.resource_id === scrollTarget.id) {
+        setStackTab("preview");
+      }
       clearScrollTarget(requestId);
       return;
     }
@@ -901,7 +921,6 @@ export function ReferenceVideoCanvas({
     selected ? s._segmentIndex.get(selected.unit_id) : undefined,
   );
   const estimatedCost = segCost?.estimate.video;
-  const displayedEstimatedCost = narrationDelivery === "use_tts" ? undefined : estimatedCost;
   const actualCost = segCost?.actual.video;
   const narrationEstimatedCost = segCost?.estimate.audio;
   const selectedNarrationText = unitNarrationText(selected);
@@ -915,12 +934,19 @@ export function ReferenceVideoCanvas({
     if (selectedIndex < 0 || selectedIndex >= units.length - 1) return;
     select(units[selectedIndex + 1].unit_id);
   }, [select, units, selectedIndex]);
+  const moveStep = useCallback(
+    (direction: "earlier" | "later") => {
+      const afterId = stepAnchor(units.map((u) => u.unit_id), selectedIndex, direction);
+      if (afterId !== undefined) void handleMove(units[selectedIndex].unit_id, afterId);
+    },
+    [handleMove, units, selectedIndex],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <EpisodeHeader
         episode={episode}
-        title={episodeTitle ?? `E${episode}`}
+        title={episodeTitle ?? ""}
         units={units}
         onSaveTitle={onSaveTitle}
         canEditTitle={canEditTitle}
@@ -975,17 +1001,28 @@ export function ReferenceVideoCanvas({
         <span className="flex-1" />
         {tab === "units" && (
           <>
-            <NarrationDeliveryChoice
-              value={narrationDelivery}
-              onChange={setNarrationDelivery}
-              ttsDurationEndpointFixed={selectedDurationEndpointFixed}
-              compact
-            />
+            {/* 没有预处理的参考画布只用于广告/短片：有正式脚本时可整份重新生成。 */}
+            {hasScript && !showPreprocess && (
+              <AdScriptButton
+                projectName={projectName}
+                episode={episode}
+                regenerate
+                className="focus-ring rounded-md border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] hover:text-[var(--color-text)]"
+              />
+            )}
+            {hasScript && (
+              <PromptAuthoringButton
+                projectName={projectName}
+                episode={episode}
+                scope={selectedUnitId ? "current" : "pending"}
+                currentEntryId={selectedUnitId}
+                className="focus-ring rounded-md border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] hover:text-[var(--color-text)]"
+              />
+            )}
             <button
               type="button"
               onClick={() => void handleBatchGenerate()}
-              disabled={batchTargets.length === 0 || (batchDurationEndpointFixed && narrationDelivery === "use_tts")}
-              title={batchDurationEndpointFixed && narrationDelivery === "use_tts" ? t("narration_delivery_tts_duration_endpoint_fixed") : undefined}
+              disabled={batchTargets.length === 0}
               className="focus-ring inline-flex items-center gap-1.5 rounded-md border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] px-2.5 py-1 text-[11.5px] text-[var(--color-text-2)] transition-colors hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1001,6 +1038,22 @@ export function ReferenceVideoCanvas({
           dismissLabel={t("voice_legacy_banner_dismiss")}
           onDismiss={() => void handleDismissVoiceLegacyNotice()}
         />
+      )}
+
+      {tab === "units" && promptDraft?.editable_by === "agent" && (
+        <div className="border-b border-[var(--color-hairline-soft)] px-5 py-2">
+          <PromptAuthoringDraftPanel
+            key={`${projectName}:${episode}`}
+            projectName={projectName}
+            episode={episode}
+            view={promptDraft}
+            onSettled={refreshPromptDraft}
+          />
+        </div>
+      )}
+
+      {tab === "units" && hasScript && !showPreprocess && (
+        <AdScriptProgress projectName={projectName} episode={episode} noScript={false} className="mx-5 my-2" />
       )}
 
       {error && tab === "units" && (
@@ -1021,7 +1074,20 @@ export function ReferenceVideoCanvas({
               episode={episode}
               lookup={mentionLookup}
               videoModelUnresolved={videoModelUnresolved}
+              planningDurations={planDurationOptions}
               onOpenTimeline={() => setTab("units")}
+            />
+          </div>
+        </div>
+      ) : promptDraft?.editable_by === "user" ? (
+        <div className="min-h-0 flex-1 overflow-auto bg-[color-mix(in_oklab,var(--color-bg-grad-b)_25%,transparent)]">
+          <div className="mx-auto w-full max-w-3xl px-6 py-5">
+            <PromptAuthoringDraftPanel
+              key={`${projectName}:${episode}`}
+              projectName={projectName}
+              episode={episode}
+              view={promptDraft}
+              onSettled={refreshPromptDraft}
             />
           </div>
         </div>
@@ -1038,6 +1104,7 @@ export function ReferenceVideoCanvas({
                 selectedId={selectedUnitId}
                 onSelect={select}
                 onAdd={onAdd}
+                onMove={movingUnit ? undefined : onMove}
                 dirtyMap={dirtyMap}
                 statusMap={statusMap}
               />
@@ -1061,7 +1128,7 @@ export function ReferenceVideoCanvas({
                       translate="no"
                       className="rounded px-2.5 py-1 font-mono text-xs font-bold tracking-wider text-[color-mix(in_oklab,var(--sink)_100%,transparent)] [background:linear-gradient(180deg,var(--color-accent-2),var(--color-accent))] shadow-[inset_0_1px_0_color-mix(in_oklab,var(--raise)_30%,transparent),0_2px_6px_-2px_var(--color-accent-glow)]"
                     >
-                      {selected.unit_id}
+                      {itemIdWithinEpisode(selected.unit_id)}
                     </span>
                     <span className="inline-flex items-center gap-1 rounded border border-[var(--color-hairline-soft)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_60%,transparent)] px-2 py-0.5 text-[11.5px] text-[var(--color-text-2)]">
                       <Clock className="h-3 w-3" aria-hidden="true" />
@@ -1136,6 +1203,26 @@ export function ReferenceVideoCanvas({
                     )}
                     <button
                       type="button"
+                      onClick={() => moveStep("earlier")}
+                      disabled={movingUnit || selectedIndex <= 0}
+                      aria-label={t("reference_unit_move_earlier")}
+                      title={movingUnit ? t("shot_move_pending") : t("reference_unit_move_earlier")}
+                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] text-[var(--color-text-2)] hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => moveStep("later")}
+                      disabled={movingUnit || selectedIndex < 0 || selectedIndex >= units.length - 1}
+                      aria-label={t("reference_unit_move_later")}
+                      title={movingUnit ? t("shot_move_pending") : t("reference_unit_move_later")}
+                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] text-[var(--color-text-2)] hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={goPrev}
                       disabled={selectedIndex <= 0}
                       aria-label={t("reference_unit_prev")}
@@ -1154,11 +1241,20 @@ export function ReferenceVideoCanvas({
                     </button>
                     <button
                       type="button"
+                      onClick={() => void handleAdd(selected.unit_id)}
+                      aria-label={t("reference_unit_insert_after")}
+                      title={t("reference_unit_insert_after")}
+                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] text-[var(--color-text-2)] hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setRemoveUnitId(selected.unit_id)}
                       disabled={isUnitRemovalBlocked(selected.unit_id)}
                       aria-label={t("reference_unit_remove")}
                       title={t("reference_unit_remove")}
-                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[oklch(0.22_0.011_265_/_0.5)] text-[var(--color-text-2)] hover:bg-[oklch(0.26_0.013_265_/_0.7)] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="focus-ring inline-grid h-6 w-6 place-items-center rounded border border-[var(--color-hairline)] bg-[color-mix(in_oklab,var(--color-bg-grad-a)_50%,transparent)] text-[var(--color-text-2)] hover:bg-[color-mix(in_oklab,var(--color-surface-2)_70%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                     </button>
@@ -1369,12 +1465,12 @@ export function ReferenceVideoCanvas({
                           status={statusMap[selected.unit_id]}
                           errorMessage={failureMessage}
                           busy={selectedBusy}
-                          estimatedCost={displayedEstimatedCost}
+                          estimatedCost={estimatedCost}
                           actualCost={actualCost}
                           narrationText={selectedNarrationText}
                           narrationGenerating={ttsBusyUnitIds.has(selected.unit_id)}
                           narrationEstimatedCost={narrationEstimatedCost}
-                          onGenerateNarration={onGenerateNarrationVoid}
+                          onGenerateNarration={onGenerateNarration}
                           onGenerate={onGenerateVoid}
                           generationBlocked={Boolean(selected.needs_replan)}
                           onUploadVideo={handleUploadVideo}
@@ -1388,6 +1484,21 @@ export function ReferenceVideoCanvas({
                     )}
                   </div>
                 </>
+              ) : !hasScript && !showPreprocess ? (
+                // 广告/短片没有脚本规划：没有正式脚本时直接从空白开始。
+                <NoScriptBlankState projectName={projectName} episode={episode} className="flex-1 text-xs" />
+              ) : hasScript && units.length === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 text-xs text-[var(--color-text-4)]">
+                  <p className="m-0">{t("reference_canvas_empty")}</p>
+                  <button
+                    type="button"
+                    onClick={onAdd}
+                    className="arc-btn-primary focus-ring inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-[12.5px] font-semibold"
+                  >
+                    <Plus className="h-3 w-3" aria-hidden="true" />
+                    {t("reference_unit_add_first")}
+                  </button>
+                </div>
               ) : (
                 <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-text-4)]">
                   {t("reference_canvas_empty")}
@@ -1404,12 +1515,12 @@ export function ReferenceVideoCanvas({
                   status={selected ? statusMap[selected.unit_id] : undefined}
                   errorMessage={failureMessage}
                   busy={selectedBusy}
-                  estimatedCost={displayedEstimatedCost}
+                  estimatedCost={estimatedCost}
                   actualCost={actualCost}
                   narrationText={selectedNarrationText}
                   narrationGenerating={selected ? ttsBusyUnitIds.has(selected.unit_id) : false}
                   narrationEstimatedCost={narrationEstimatedCost}
-                  onGenerateNarration={onGenerateNarrationVoid}
+                  onGenerateNarration={onGenerateNarration}
                   onGenerate={onGenerateVoid}
                   generationBlocked={Boolean(selected?.needs_replan)}
                   onUploadVideo={handleUploadVideo}
@@ -1443,6 +1554,7 @@ export function ReferenceVideoCanvas({
                     setListFlyoutOpen(false);
                   }}
                   onAdd={onAdd}
+                  onMove={movingUnit ? undefined : onMove}
                   dirtyMap={dirtyMap}
                   statusMap={statusMap}
                 />
@@ -1454,7 +1566,7 @@ export function ReferenceVideoCanvas({
 
       <ConfirmDialog
         open={removeUnitId !== null}
-        title={t("reference_unit_remove_title", { id: removeUnitId ?? "" })}
+        title={t("reference_unit_remove_title", { id: itemIdWithinEpisode(removeUnitId ?? "") })}
         description={t("reference_unit_remove_desc")}
         confirmLabel={t("reference_unit_remove_confirm")}
         tone="danger"

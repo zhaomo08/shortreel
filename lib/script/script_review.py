@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from arcreel_market_core.validation_messages import ValidationMessage
 from lib.artifacts.formal_write import formal_write_transaction, project_metadata_lock
 from lib.episode.episode_paths import (
     REFERENCE_VIDEO_SCRIPT_PLAN_FILENAME,
@@ -40,15 +41,18 @@ from lib.episode.episode_paths import (
 from lib.infra.content_digest import canonical_json_digest
 from lib.infra.json_io import atomic_write_json, load_json_or_none
 from lib.infra.path_safety import try_safe_join
-from lib.infra.validation_messages import ValidationMessage
+from lib.infra.validation_messages import default_translate
 from lib.project.project_manager import ProjectManager, find_episode, is_reference_video_project
 from lib.script.draft_quarantine import (
+    DRAFT_OWNER_AGENT,
     QUARANTINE_KIND_DRAMA_SCRIPT_PLAN,
     QUARANTINE_KIND_NARRATION_SCRIPT_PLAN,
     QUARANTINE_KIND_PROMPT_AUTHORING,
     QUARANTINE_KIND_SCRIPT_PLAN,
     clear_quarantine,
+    draft_owner,
     quarantine_path,
+    read_quarantine,
 )
 from lib.script.reference_video.duration_migration import migrate_unit_durations
 from lib.script.script_editor import ScriptEditError, resolve_items
@@ -68,6 +72,7 @@ ReviewStatus = Literal["not_applicable", "no_script_plan", "pending_review", "co
 
 #: 确认记录在 episode 条目上的字段名：``{"fingerprint": str, "confirmed_at": ISO8601}``。
 REVIEW_FIELD = "script_plan_review"
+
 
 #: stale 账本条目记录重规划提交时旧 script_plan 的内容指纹；live 指纹变化即证明 script_plan 已按新账本重建。
 STALE_SCRIPT_PLAN_REVISION_FIELD = "stale_script_plan_revision"
@@ -202,6 +207,17 @@ class ScriptPlanWriteConflict(Exception):
         self.expected = expected
         self.actual = actual
         self.current_content = current_content
+
+
+def mark_ledger_stale(project_path: Path, project: dict[str, Any], entry: dict[str, Any], episode: int) -> None:
+    """把一集的集规划状态标为 stale，以当前 script_plan 的内容指纹为重建基线。
+
+    已是 stale 的集再次被改动时重设基线，并清掉上一轮的重建完成记录。
+    """
+    entry["ledger_status"] = "stale"
+    path = script_plan_path(project_path, project, episode)
+    entry[STALE_SCRIPT_PLAN_REVISION_FIELD] = content_fingerprint(path) if path is not None else None
+    entry.pop(STALE_SCRIPT_PLAN_REBUILT_REVISION_FIELD, None)
 
 
 class ScriptPlanRebuildCompletionError(ValueError):
@@ -452,11 +468,24 @@ def stored_review(project: dict[str, Any], episode: int) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class OverwrittenScriptEntry:
-    """覆盖式确认将移除的一条正式脚本条目，及其名下已生成的产物。"""
+    """覆盖式确认将移除的一条正式脚本条目，及其名下无法在项目内恢复的产物与归属。"""
 
     entry_id: str
     has_storyboard: bool
     has_video: bool
+    has_narration_audio: bool
+    has_end_frame: bool
+    grid_id: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.entry_id,
+            "has_storyboard": self.has_storyboard,
+            "has_video": self.has_video,
+            "has_narration_audio": self.has_narration_audio,
+            "has_end_frame": self.has_end_frame,
+            "grid_id": self.grid_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,13 +503,70 @@ class FormalScriptOverwrite:
     def to_dict(self) -> dict[str, Any]:
         return {
             "revision": self.fingerprint,
-            "entries": [
-                {"id": entry.entry_id, "has_storyboard": entry.has_storyboard, "has_video": entry.has_video}
-                for entry in self.entries
-            ],
+            "entries": [entry.to_dict() for entry in self.entries],
             "storyboard_count": sum(entry.has_storyboard for entry in self.entries),
             "video_count": sum(entry.has_video for entry in self.entries),
+            "narration_audio_count": sum(entry.has_narration_audio for entry in self.entries),
+            "end_frame_count": sum(entry.has_end_frame for entry in self.entries),
+            "grid_member_count": sum(entry.grid_id is not None for entry in self.entries),
+            "grid_count": len({entry.grid_id for entry in self.entries if entry.grid_id is not None}),
         }
+
+
+#: 覆盖清单里逐条目列出的产物种类：``to_dict`` 的条目键 → 文案 key。顺序即行文顺序。
+_OVERWRITE_ENTRY_KINDS: tuple[tuple[str, str], ...] = (
+    ("has_storyboard", "script_overwrite_kind_storyboard"),
+    ("has_video", "script_overwrite_kind_video"),
+    ("has_narration_audio", "script_overwrite_kind_narration_audio"),
+    ("has_end_frame", "script_overwrite_kind_end_frame"),
+    ("grid_id", "script_overwrite_kind_grid"),
+)
+
+#: 覆盖清单的汇总项：（计数键，文案 key）。计数为 0 的项不出现。
+_OVERWRITE_LOSS_TOTALS: tuple[tuple[str, str], ...] = (
+    ("storyboard_count", "script_overwrite_loss_storyboard"),
+    ("video_count", "script_overwrite_loss_video"),
+    ("narration_audio_count", "script_overwrite_loss_narration_audio"),
+    ("end_frame_count", "script_overwrite_loss_end_frame"),
+    ("grid_member_count", "script_overwrite_loss_grid"),
+)
+
+
+def render_overwrite_loss_text(overwrite: Mapping[str, Any], translate: Callable[..., str]) -> str:
+    """把 ``FormalScriptOverwrite.to_dict()`` 渲染成丢失清单文本。
+
+    Web 确认框与 Agent 的 ``script_overwrite_required`` 回执都取这一份文本，文案只登记在 i18n key 表里；
+    调用方不再各自拼装清单。
+    """
+    entries: list[Mapping[str, Any]] = list(overwrite.get("entries") or ())
+    separator = translate("script_overwrite_separator")
+    lines = [translate("script_overwrite_summary", count=len(entries))]
+    totals = [
+        translate(key, count=count, grids=overwrite.get("grid_count", 0))
+        for count_key, key in _OVERWRITE_LOSS_TOTALS
+        if (count := int(overwrite.get(count_key) or 0)) > 0
+    ]
+    if totals:
+        lines.append(translate("script_overwrite_loss", items=separator.join(totals)))
+    if entries:
+        lines.append(translate("script_overwrite_history"))
+        rendered: list[str] = []
+        for entry in entries:
+            kinds = [translate(key) for field, key in _OVERWRITE_ENTRY_KINDS if entry.get(field)]
+            rendered.append(
+                translate("script_overwrite_entry", id=entry.get("id", ""), kinds=separator.join(kinds))
+                if kinds
+                else str(entry.get("id", ""))
+            )
+        lines.append(translate("script_overwrite_entries", entries=separator.join(rendered)))
+    return "\n".join(lines)
+
+
+def overwrite_with_text(overwrite: Mapping[str, Any] | None, translate: Callable[..., str]) -> dict[str, Any] | None:
+    """覆盖清单附上渲染好的丢失清单文本（``text``）；无覆盖时 None。"""
+    if overwrite is None:
+        return None
+    return {**overwrite, "text": render_overwrite_loss_text(overwrite, translate)}
 
 
 def _bound_script_filename(project: Mapping[str, Any], episode: int) -> str | None:
@@ -496,12 +582,14 @@ def _bound_script_filename(project: Mapping[str, Any], episode: int) -> str | No
 class ForeignFormalScriptError(ValueError):
     """该集没有可读写的正式脚本位置：绑定不在盘上，而规范路径上那份文件不是本集剧本。
 
-    携带集号与占位的文件名，供调用方给出可定位的提示。继承 ``ValueError`` 让尚未单独处置这一形态
+    携带集 ID 与占位的文件名，供调用方给出可定位的提示。继承 ``ValueError`` 让尚未单独处置这一形态
     的调用点也按「拒绝」而不是按「成功」收场。
     """
 
     def __init__(self, episode: int, filename: str) -> None:
-        super().__init__(f"第 {episode} 集的规范剧本路径 scripts/{filename} 上是另一集的剧本，不能当作本集正式脚本读写")
+        super().__init__(
+            f"集（id={episode}）的规范剧本路径 scripts/{filename} 上是另一集的剧本，不能当作本集正式脚本读写"
+        )
         self.episode = episode
         self.filename = filename
 
@@ -570,22 +658,26 @@ def formal_script_overwrite(
         if not isinstance(item, dict) or not isinstance(item.get(id_field), str) or not item[id_field]:
             continue
         assets = get_generated_assets(item)
+        grid_id = assets.get("grid_id")
         entries.append(
             OverwrittenScriptEntry(
                 entry_id=item[id_field],
                 has_storyboard=bool(assets.get("storyboard_image")),
                 has_video=bool(assets.get("video_clip")),
+                has_narration_audio=bool(assets.get("narration_audio")),
+                has_end_frame=bool(item.get("end_frame_image")),
+                grid_id=grid_id if isinstance(grid_id, str) and grid_id else None,
             )
         )
     return FormalScriptOverwrite(fingerprint=fingerprint, entries=tuple(entries))
 
 
 def prompt_authoring_generated(project_path: Path, project: dict[str, Any], episode: int) -> bool:
-    """该集 prompt_authoring 产物（生成的剧本 JSON）是否已存在——存量 grandfather 判据。
+    """该集 prompt_authoring 产物（生成的剧本 JSON）是否已存在。
 
     绑定在场时只认绑定的那份文件，不走 ``formal_script_filename`` 的规范路径回落：绑定文件缺席而
-    规范路径上是别集文件，正是迁移记进报告的跳过形态，据那份别集文件判成「已有产出」会把这一集
-    grandfather 成 confirmed——脚本规划随即转只读、确认动作被锁。未绑定时按规范路径判。
+    规范路径上是别集文件，正是迁移记进报告的跳过形态，不能据那份别集文件判成「已有产出」。未绑定时
+    按规范路径判。
     """
     filename = _bound_script_filename(project, episode) or episode_script_filename(episode)
     path = try_safe_join(project_path / "scripts", filename)
@@ -595,11 +687,9 @@ def prompt_authoring_generated(project_path: Path, project: dict[str, Any], epis
 def review_status(project_path: Path, project: dict[str, Any], episode: int) -> ReviewStatus:
     """派生该集内容确认状态。
 
-    穷举 {script_plan 有无 × prompt_authoring 有无 × script_plan_review 有无}：
     - 无 script_plan（或 gate 不适用）：not_applicable / no_script_plan；
     - 有确认指纹：与 live script_plan 内容指纹一致 → confirmed，不一致（script_plan 改过）→ pending_review；
-    - 无确认指纹（存量 / 首次）：已产 prompt_authoring（存量项目升级前已通过该集）→ grandfather 放行 confirmed，
-      避免新 gate 无谓阻塞存量 prompt_authoring 重跑；未产 prompt_authoring（feature 后首次产 script_plan）→ pending_review 待确认。
+    - 无确认指纹：pending_review。正式脚本在场也一样——没有指纹就无从判断它出自眼前这份规划。
     """
     path = script_plan_path(project_path, project, episode)
     if path is None:
@@ -619,11 +709,9 @@ def _formal_script_plan_confirmed(project_path: Path, project: dict[str, Any], e
     stored_fingerprint = stored_review(project, episode).get("fingerprint")
     if stored_fingerprint is not None:
         return stored_fingerprint == live
-    # 无确认指纹（存量 / 首次）：用 prompt_authoring 产物是否已存在做 grandfather 判据。
-    # 过渡态局限：存量集没有指纹基线，无法区分「script_plan 未动」与「script_plan 已重拆但未确认」——
-    # 只要旧 prompt_authoring 文件仍在，重拆后的 script_plan 也会被放行、不重新阻塞。这是「不无谓阻塞存量重跑」的
-    # 取舍代价，且自愈：用户或 Agent 首次确认后即写入指纹，此后走上面的指纹分支、gate 全程生效。
-    return prompt_authoring_generated(project_path, project, episode)
+    # 没有确认指纹：不知道正式脚本出自哪一份规划，眼前这份就没有被确认过。存量集的确认基线由
+    # v14→v15 迁移补记；从空白开始时确认记录被删去，同样落在这里。
+    return False
 
 
 def formal_script_plan_confirmed(project_path: Path, project: dict[str, Any], episode: int) -> bool:
@@ -637,6 +725,13 @@ def formal_script_plan_confirmed(project_path: Path, project: dict[str, Any], ep
         return False
     live = content_fingerprint(path)
     return live is not None and _formal_script_plan_confirmed(project_path, project, episode, live)
+
+
+def formal_script_plan_agent_owned(project_path: Path, project: dict[str, Any], episode: int) -> bool:
+    """Agent 取回的可编辑草稿在场时，正式脚本规划只读；调用方在正式规划锁内判断。"""
+    kind = script_plan_quarantine_kind(project)
+    draft = read_quarantine(project_path, episode, kind) if kind is not None else None
+    return draft is not None and draft_owner(draft) == DRAFT_OWNER_AGENT
 
 
 def apply_confirmation(project: dict[str, Any], episode: int, fingerprint: str, confirmed_at: str) -> bool:
@@ -692,14 +787,13 @@ def migrate_script_plan_draft_in_place(
     迁移多数情况下是机械格式收编，回写会让内容指纹漂移：经 ``update_project`` 在锁内把该集
     确认指纹平移到迁移后的值（``carry_confirmation_through_migration``），避免已确认分集仅因
     被加载就重新等待确认。``warnings`` 非空说明迁移按档位 / 结构区间 clamp 改写了实际时长取值——
-    那是内容变更，不平移确认，已确认分集经指纹比对照常重新等待确认；从未存过指纹、靠 grandfather
-    判据（prompt_authoring 产物已存在）放行的存量集则显式记下迁移前内容的指纹，使其同样失配、等待确认。
+    那是内容变更，不平移确认，已确认分集经指纹比对照常重新等待确认；从未存过指纹的集则显式记下
+    迁移前内容的指纹，使其同样失配、等待确认。
     该标记的持久化不区分 dry-run 与真实生成：迁移幂等落盘后重试不再产生 warnings，只有落盘
     的标记能保证后续生成仍被内容确认阻塞。
 
     project 侧的确认标记先落盘、草稿后落盘：两次写之间中断时草稿仍是迁移前内容，下次加载
-    重跑迁移即自愈。反序则草稿已丢失旧字段、重跑判 ``changed=False``，标记永久缺失——靠
-    grandfather 判据放行的存量集会带着被 clamp 的时长停在 confirmed，绕过内容确认。
+    重跑迁移即自愈。反序则草稿已丢失旧字段、重跑判 ``changed=False``，标记永久缺失。
 
     ``supported_durations`` 给定时（prompt_authoring 加载侧持有模型档位）收编结果直接取档；缺省
     （web gate 侧，能力解析是 async + DB、同步拿不到档位）只做结构区间 clamp。
@@ -712,20 +806,24 @@ def migrate_script_plan_draft_in_place(
     before = content_fingerprint_of_data(content)
     changed, warnings = migrate_unit_durations(content.get("units"), supported_durations=supported_durations)
     for message in warnings:
-        logger.warning("script_plan 草稿 %s 时长收编迁移: %s", REFERENCE_VIDEO_SCRIPT_PLAN_FILENAME, message.render())
+        logger.warning(
+            "script_plan 草稿 %s 时长收编迁移: %s",
+            REFERENCE_VIDEO_SCRIPT_PLAN_FILENAME,
+            message.render(default_translate),
+        )
     if not changed:
         return None, []
 
     if warnings:
 
-        def _invalidate_grandfathered(p: dict[str, Any]) -> None:
+        def _invalidate_unconfirmed(p: dict[str, Any]) -> None:
             # 已存过指纹的分集不插手：确认的是迁移前内容时指纹已自然失配，确认的是别的
             # 内容时 review_status 本就判 pending_review。
             stored = stored_review(p, episode)
             if not stored.get("fingerprint"):
                 apply_confirmation(p, episode, before, str(stored.get("confirmed_at") or ""))
 
-        updated = update_project(_invalidate_grandfathered)
+        updated = update_project(_invalidate_unconfirmed)
     else:
         after = content_fingerprint_of_data(content)
 

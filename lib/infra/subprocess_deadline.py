@@ -1,4 +1,4 @@
-"""带 deadline 运行外部子进程（ffmpeg / ffprobe 等）。
+"""带 deadline 运行外部子进程（ffmpeg 等）。
 
 超时或所在任务被取消时：``terminate()`` → 宽限期内等待退出 → 仍未退出则 ``kill()``
 → ``wait()`` 收尸，并删除调用方声明的输出文件，避免残留进程与半成品产物。
@@ -44,6 +44,7 @@ Spawner = Callable[..., Awaitable[_Process]]
 class SubprocessResult:
     returncode: int
     stdout: bytes
+    stderr: bytes = b""
 
 
 async def _reap(proc: _Process, grace: float, cleanup: list[Path]) -> None:
@@ -95,12 +96,14 @@ async def run_with_deadline(
     deadline_seconds: float,
     grace: float = DEFAULT_TERMINATE_GRACE_SECONDS,
     capture_stdout: bool = False,
+    capture_stderr: bool = False,
     cleanup_paths: Iterable[Path] = (),
     spawn: Spawner | None = None,
+    cwd: Path | None = None,
 ) -> SubprocessResult:
     """运行子进程直至退出或到达 ``deadline_seconds`` 秒。
 
-    ``spawn`` 缺省时于调用时取 ``asyncio.create_subprocess_exec``。
+    ``spawn`` 缺省时于调用时取 ``asyncio.create_subprocess_exec``；``cwd`` 是子进程的工作目录，缺省时继承当前进程。
 
     Raises:
         SubprocessDeadlineExceeded: 到达 deadline；子进程已终止并收尸，``cleanup_paths`` 已删除。
@@ -111,14 +114,15 @@ async def run_with_deadline(
         *args,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE if capture_stdout else asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL,
+        cwd=cwd,
     )
     try:
-        if capture_stdout:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=deadline_seconds)
+        if capture_stdout or capture_stderr:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=deadline_seconds)
         else:
             await asyncio.wait_for(proc.wait(), timeout=deadline_seconds)
-            stdout = b""
+            stdout = stderr = b""
     except TimeoutError:
         await _reap_to_completion(proc, grace, cleanup)
         raise SubprocessDeadlineExceeded(f"{args[0]} 未在 {deadline_seconds}s 内退出") from None
@@ -127,4 +131,4 @@ async def run_with_deadline(
         raise
 
     assert proc.returncode is not None
-    return SubprocessResult(returncode=proc.returncode, stdout=stdout or b"")
+    return SubprocessResult(returncode=proc.returncode, stdout=stdout or b"", stderr=stderr or b"")

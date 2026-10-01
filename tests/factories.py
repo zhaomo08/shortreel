@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import struct
 import subprocess
 import wave
 from collections.abc import Callable
@@ -10,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from lib.infra.ffmpeg import ffmpeg_executable
 from server.agent_runtime.models import SessionMeta
 
 
@@ -23,36 +26,120 @@ def make_translator(locale: str = "zh") -> Callable[..., str]:
     return translate
 
 
-def wav_bytes(duration_seconds: float, sample_rate: int = 8000) -> bytes:
-    """纯 stdlib 生成 wav 字节（不依赖 ffmpeg），供不要求真实音频编解码的用例使用。"""
+def wav_bytes(duration_seconds: float, sample_rate: int = 8000, *, tone_hz: float | None = None) -> bytes:
+    """纯 stdlib 生成 wav 字节（不依赖 ffmpeg）：默认静音；给出 ``tone_hz`` 时是该频率的正弦音，供需要听得见的用例使用。"""
+    frames = int(duration_seconds * sample_rate)
+    if tone_hz is None:
+        samples = b"\x00\x00" * frames
+    else:
+        samples = b"".join(
+            struct.pack("<h", round(12000 * math.sin(2 * math.pi * tone_hz * index / sample_rate)))
+            for index in range(frames)
+        )
     buf = BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(sample_rate)
-        wf.writeframes(b"\x00\x00" * int(duration_seconds * sample_rate))
+        wf.writeframes(samples)
     return buf.getvalue()
 
 
-def make_test_video(path: Path, *, duration_sec: float = 1.0, fps: int = 30) -> None:
-    """使用 ffmpeg 生成极短测试视频（64x64 像素）"""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def run_bundled_ffmpeg(*args: str) -> None:
+    """用随包 ffmpeg 现场合成测试素材；失败即抛 CalledProcessError。"""
     subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=black:size=64x64:duration={duration_sec}:rate={fps}",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            str(path),
-        ],
+        [ffmpeg_executable(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y", *args],
         capture_output=True,
         check=True,
+    )
+
+
+def make_test_video(path: Path, *, duration_sec: float = 1.0, fps: int = 30) -> None:
+    """使用随包 ffmpeg 生成极短测试视频（64x64 像素）"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run_bundled_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=black:size=64x64:duration={duration_sec}:rate={fps}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(path),
+    )
+
+
+def make_test_clip(path: Path, *, size: str, fps: int, seconds: float, tone: bool) -> None:
+    """用随包 ffmpeg 现场合成一段低分辨率测试画面（``testsrc``），``tone`` 时带一条等长正弦音轨。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    audio = ("-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}", "-c:a", "aac") if tone else ()
+    run_bundled_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc=size={size}:rate={fps}:duration={seconds}",
+        *audio,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-shortest",
+        str(path),
+    )
+
+
+def make_signal_clip(path: Path) -> None:
+    """用随包 ffmpeg 合成 25 fps、320x180、共 5 秒的带信号素材。
+
+    0–1 s 运动画面，1–2 s 纯黑，2–3 s 另一段运动画面，3–5 s 定格；镜头切换点在 1、2、3 s。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    run_bundled_ffmpeg(
+        "-filter_complex",
+        "testsrc=size=320x180:rate=25:duration=1[moving];"
+        "color=black:size=320x180:rate=25:duration=1[black];"
+        "testsrc2=size=320x180:rate=25:duration=1[other];"
+        "testsrc=size=320x180:rate=25:duration=0.04,loop=loop=49:size=1,setpts=N/25/TB[still];"
+        "[moving][black][other][still]concat=n=4:v=1:a=0[v]",
+        "-map",
+        "[v]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(path),
+    )
+
+
+def install_current_video(project_path: Path, resource_type: str, unit_id: str, source: Path) -> int:
+    """把 ``source`` 登记为视频单元的新 current 版本并放到正式路径上；返回版本号。"""
+    import shutil
+
+    from lib.artifacts.version_manager import VersionManager
+    from lib.project.resource_paths import resource_relative_path
+
+    version = VersionManager(project_path).add_version(resource_type, unit_id, "prompt", source_file=source)
+    target = project_path / resource_relative_path(resource_type, unit_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return version
+
+
+def install_uploaded_video(project_path: Path, resource_type: str, unit_id: str, *, seconds: float) -> None:
+    """把一段现场合成的测试画面（带音轨）作为视频单元的手动上传版本，放到正式路径上。"""
+    from lib.artifacts.version_manager import MANUAL_UPLOAD_VERSION_SOURCE, VersionManager
+    from lib.project.resource_paths import resource_relative_path
+
+    staged = project_path / f".{unit_id}.upload.mp4"
+    make_test_clip(staged, size="160x90", fps=30, seconds=seconds, tone=True)
+    VersionManager(project_path).commit_staged_version(
+        resource_type,
+        unit_id,
+        "",
+        staged_file=staged,
+        current_file=project_path / resource_relative_path(resource_type, unit_id),
+        source=MANUAL_UPLOAD_VERSION_SOURCE,
     )
 
 
@@ -65,28 +152,22 @@ def make_test_video_with_audio_tail(
 ) -> None:
     """生成音轨/容器尾部比视频轨更长的极短 MP4。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=black:size=64x64:duration={video_duration_sec}:rate={fps}",
-            "-f",
-            "lavfi",
-            "-i",
-            f"sine=frequency=440:duration={audio_duration_sec}",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            str(path),
-        ],
-        capture_output=True,
-        check=True,
+    run_bundled_ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=black:size=64x64:duration={video_duration_sec}:rate={fps}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"sine=frequency=440:duration={audio_duration_sec}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        str(path),
     )
 
 
@@ -107,24 +188,6 @@ def make_session_meta(**overrides) -> SessionMeta:
     return SessionMeta(**defaults)
 
 
-def make_task_params(**overrides) -> dict:
-    """Build a dict of parameters suitable for ``GenerationQueue.enqueue_task()``.
-
-    Any keyword argument overrides the corresponding default.
-    """
-    defaults = {
-        "project_name": "demo",
-        "task_type": "storyboard",
-        "media_type": "image",
-        "resource_id": "E1S01",
-        "payload": {"prompt": "test"},
-        "script_file": "episode_01.json",
-        "source": "webui",
-    }
-    defaults.update(overrides)
-    return defaults
-
-
 def make_sdk_transcript_entry(
     uuid: str, parent: str | None, entry_type: str, session_id: str, text: str
 ) -> dict[str, Any]:
@@ -139,41 +202,6 @@ def make_sdk_transcript_entry(
     }
 
 
-def make_transcript_entry(
-    msg_type: str = "assistant",
-    text: str = "hello",
-    *,
-    uuid: str = "msg-1",
-    tool_use_id: str | None = None,
-    tool_name: str | None = None,
-    **extra,
-) -> dict:
-    """Build a single transcript JSONL entry dict.
-
-    ``msg_type`` is one of ``"user"``, ``"assistant"``, ``"result"``.
-    """
-    if msg_type == "user":
-        content = text
-    elif msg_type == "result":
-        entry: dict = {
-            "type": "result",
-            "subtype": extra.get("subtype", "success"),
-            "is_error": extra.get("is_error", False),
-            "uuid": uuid,
-        }
-        entry.update(extra)
-        return entry
-    else:
-        if tool_use_id:
-            content = [{"type": "tool_use", "id": tool_use_id, "name": tool_name or "Tool", "input": {}}]
-        else:
-            content = [{"type": "text", "text": text}]
-
-    entry = {"type": msg_type, "message": {"content": content}, "uuid": uuid}
-    entry.update(extra)
-    return entry
-
-
 def custom_endpoint_definition(**overrides: Any) -> dict[str, Any]:
     """最小可用的声明式调用端点定义：单张首帧、提交 + 轮询、扁平取值，校验零错误零警告。
 
@@ -181,7 +209,7 @@ def custom_endpoint_definition(**overrides: Any) -> dict[str, Any]:
     """
     definition: dict[str, Any] = {
         "kind": "declarative",
-        "schema_version": "1.1.0",
+        "schema_version": "1.2.0",
         "meta": {"name": "示例端点", "author": "ArcReel", "version": "0.1.0"},
         "auth": {"headers": {"Authorization": "Bearer {{ api_key }}"}},
         "inputs": {"first_frame": {"source": "start_image", "encoding": "data_uri"}},
@@ -204,6 +232,51 @@ def custom_endpoint_definition(**overrides: Any) -> dict[str, Any]:
         },
         "status_map": {"pending": "queued", "processing": "running", "completed": "succeeded", "failed": "failed"},
         "capabilities": {"first_frame": True},
+    }
+    definition.update(overrides)
+    return definition
+
+
+def image_endpoint_definition(**overrides: Any) -> dict[str, Any]:
+    """最小可用的声明式图片定义：文生图、提交 + 轮询、取图片 URL，校验零错误零警告。
+
+    协议形状取「OpenAI 风格路径 + 异步任务」一类供应商：提交返回 ``data[0].task_id``，轮询读
+    ``data.status``，取图 ``data.result.images[0].url[0]``。用例就地改出反例。
+    """
+    definition: dict[str, Any] = {
+        "kind": "declarative",
+        "schema_version": "1.2.0",
+        "media_type": "image",
+        "meta": {"name": "示例图片端点", "author": "ArcReel", "version": "0.1.0"},
+        "auth": {"headers": {"Authorization": "Bearer {{ api_key }}"}},
+        "submit": {
+            "method": "POST",
+            "url": "{{ base_url }}/v1/images/generations",
+            "body": {
+                "model": "{{ model }}",
+                "prompt": "{{ prompt }}",
+                "size": "{{ width }}x{{ height }}",
+                "seed": "{{ seed }}",
+            },
+            "extract": {"task_id": ["$.data[0].task_id"], "error": ["$.error.message"]},
+        },
+        "poll": {
+            "method": "GET",
+            "url": "{{ base_url }}/v1/tasks/{{ task_id }}",
+            "extract": {
+                "status": ["$.data.status"],
+                "image_url": ["$.data.result.images[0].url[0]"],
+                "error": ["$.data.error.message"],
+            },
+        },
+        "status_map": {
+            "pending": "queued",
+            "processing": "running",
+            "completed": "succeeded",
+            "failed": "failed",
+            "cancelled": "failed",
+        },
+        "capabilities": {"text_to_image": True},
     }
     definition.update(overrides)
     return definition
@@ -369,3 +442,91 @@ def activate_reference_project(project_dir: Path, project: dict[str, Any]) -> di
     migrate_v7_to_v8(project_dir)
     migrate_project_dir(project_dir)
     return json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
+
+
+def add_typed_video_version(
+    project_path: Path,
+    resource_type: str,
+    resource_id: str,
+    *,
+    content: bytes = b"typed-video",
+) -> int:
+    """给一个视频单元追加一个带完整取证描述的版本（可还原），当前文件内容即 ``content``；返回版本号。"""
+    from lib.artifacts.artifact_manifest import ArtifactBasis, compose_video_artifact_basis
+    from lib.artifacts.version_manager import VersionManager
+    from lib.artifacts.video_artifact_facts import VideoArtifactCurrencyFacts
+    from lib.project.resource_paths import resource_relative_path
+    from lib.speech.speech_artifact_provenance import build_video_duration_basis
+
+    reference = resource_type == "reference_videos"
+    current_file = project_path / resource_relative_path(resource_type, resource_id)
+    current_file.parent.mkdir(parents=True, exist_ok=True)
+    current_file.write_bytes(content)
+    visual = ArtifactBasis.build(
+        "artifact-visual/video-reference" if reference else "artifact-visual/video-storyboard",
+        kind_version=1,
+        inputs=(
+            {
+                "unit_id": resource_id,
+                "visual_lines": ["Run."],
+                "style": "cinematic",
+                "canvas": {"aspect_ratio": "9:16"},
+                "request_references": [],
+            }
+            if reference
+            else {
+                "resource_id": resource_id,
+                "visual_prompt": {"action": "Run.", "camera_motion": "Static"},
+                "canvas": {"aspect_ratio": "9:16"},
+                "frames": [{"role": "storyboard", "sha256": "a" * 64}],
+            }
+        ),
+    )
+    speech = ArtifactBasis.build("artifact-speech/video", kind_version=1, inputs={"mode": "narrator_voiceover"})
+    duration = build_video_duration_basis(4)
+    currency = VideoArtifactCurrencyFacts(
+        episode=1,
+        request_duration_seconds=4,
+        visual_basis=visual,
+        speech_basis=speech,
+        duration_basis=duration,
+        video_basis=compose_video_artifact_basis(visual=visual, speech=speech, duration=duration),
+        voice_style_speakers=(),
+        duration_tiers=(4,),
+        reference_image_limit=1 if reference else None,
+        parent_version=0,
+    )
+    return VersionManager(project_path).add_version(
+        resource_type,
+        resource_id,
+        "typed video",
+        source_file=current_file,
+        execution_checkpoint_schema_version=3,
+        execution_duration_seconds=4,
+        execution_request_digest="d" * 64,
+        artifact_video_currency=currency.to_dict(),
+        execution_script_file="episode_1.json",
+    )
+
+
+def register_project_sources(
+    projects: Any,
+    project_name: str,
+    *,
+    whole_source: dict[str, str] | None = None,
+    own_episodes: tuple[str, ...] = (),
+) -> list[int]:
+    """经登记命令放入源文：``whole_source`` 是文件名到全文的整本源文，``own_episodes`` 逐集登记为自带原文的集。
+
+    返回自带原文的集分配到的集 ID。
+    """
+    from lib.episode.episode_source_commands import add_own_source_episode, register_whole_source_file
+
+    project_dir = projects.get_project_path(project_name)
+    episode_ids: list[int] = []
+    with projects.locked_source_registration(project_name) as (source_dir, project, undo):
+        for filename, text in (whole_source or {}).items():
+            (source_dir / filename).write_text(text, encoding="utf-8")
+            register_whole_source_file(project, f"source/{filename}")
+        episode_ids.extend(add_own_source_episode(project_dir, project, text, undo=undo) for text in own_episodes)
+    return episode_ids

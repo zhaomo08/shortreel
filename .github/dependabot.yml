@@ -72,6 +72,7 @@ updates:
           - "Pillow"
           - "numpy"
           - "pyjianyingdraft"
+          - "imageio-ffmpeg"
         update-types:
           - "minor"
           - "patch"
@@ -110,6 +111,7 @@ updates:
           - "python-docx"
           - "import-linter"
           - "respx"
+          - "mutmut"
         update-types:
           - "minor"
           - "patch"
@@ -202,6 +204,7 @@ updates:
           - "wouter"
           - "zustand"
           - "@headlessui/react"
+          - "eventsource-parser"
         update-types:
           - "minor"
           - "patch"

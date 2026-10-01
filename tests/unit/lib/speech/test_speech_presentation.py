@@ -6,7 +6,7 @@ import pytest
 
 from lib.artifacts.artifact_manifest import ArtifactBasis, ArtifactBasisDescriptor
 from lib.speech.narration_delivery import POST_PRODUCTION, USE_TTS
-from lib.speech.speech_artifact_provenance import SelectedMediaEvidence
+from lib.speech.speech_artifact_provenance import SelectedMediaEvidence, build_mechanical_subtitle_basis
 from lib.speech.speech_composition import (
     SpeechFieldLocation,
     SpeechMode,
@@ -16,7 +16,6 @@ from lib.speech.speech_composition import (
 )
 from lib.speech.speech_presentation import (
     MechanicalSubtitleTiming,
-    PresentationBoundaryError,
     PresentationMedia,
     materialize_speech_presentation,
 )
@@ -97,6 +96,75 @@ def test_character_post_uses_actual_video_boundary_and_unity_provider_audio() ->
     assert presentation.subtitles_adjustable is True
 
 
+def test_narration_is_cut_at_sentence_ends_and_timed_by_reading_units_across_the_boundary() -> None:
+    presentation = materialize_speech_presentation(
+        _speech(SpeechMode.NARRATOR_VOICEOVER, (None, "甲。乙乙乙！丙丙？")),
+        variant=POST_PRODUCTION,
+        video=_media("versions/videos/E1U01_v1.mp4", kind="v", duration=6.0),
+        provider_audio_enabled=True,
+    )
+
+    # 甲。 = 2 units, 乙乙乙！ = 4, 丙丙？ = 3 (CJK punctuation counts as a unit).
+    assert [(cue.text, cue.duration_microseconds) for cue in presentation.subtitles] == [
+        ("甲。", 1_333_333),
+        ("乙乙乙！", 2_666_667),
+        ("丙丙？", 2_000_000),
+    ]
+    assert presentation.subtitles[0].start_microseconds == 0
+    assert presentation.subtitles[-1].end_microseconds == 6_000_000
+    assert all(cue.owner is SpeechOwner.NARRATOR for cue in presentation.subtitles)
+
+
+def test_english_subtitles_weigh_words_and_several_utterances_share_one_boundary() -> None:
+    presentation = materialize_speech_presentation(
+        _speech(
+            SpeechMode.CHARACTER_SPEECH,
+            ("Ali", "Go now. Quickly please!"),
+            ("Ali", "Okay"),
+        ),
+        variant=POST_PRODUCTION,
+        video=_media("versions/videos/E1U01_v1.mp4", kind="v", duration=8.0),
+        provider_audio_enabled=True,
+    )
+
+    assert [(cue.text, cue.duration_microseconds) for cue in presentation.subtitles] == [
+        ("Go now.", 3_200_000),
+        ("Quickly please!", 3_200_000),
+        ("Okay", 1_600_000),
+    ]
+    assert sum(cue.duration_microseconds for cue in presentation.subtitles) == 8_000_000
+
+
+@pytest.mark.parametrize("text", ["甲。乙乙乙！", "中文。Hello. Bye", "中文。Hello. Bye…"])
+def test_split_subtitle_artifact_is_replayable_from_its_own_cues(text: str) -> None:
+    preparation = _speech(SpeechMode.NARRATOR_VOICEOVER, (None, text))
+    video = _media("versions/videos/E1U01_v1.mp4", kind="v", duration=6.0)
+    original = materialize_speech_presentation(
+        preparation, variant=POST_PRODUCTION, video=video, provider_audio_enabled=True
+    )
+    replayed = materialize_speech_presentation(
+        _speech(SpeechMode.NARRATOR_VOICEOVER, *((None, cue.text) for cue in original.subtitles)),
+        variant=POST_PRODUCTION,
+        video=video,
+        provider_audio_enabled=True,
+        subtitle_sentences_prepared=True,
+    )
+
+    assert replayed.subtitle_artifact_dict() == original.subtitle_artifact_dict()
+
+
+def test_default_timing_identity_matches_the_basis_default() -> None:
+    preparation = _speech(SpeechMode.NARRATOR_VOICEOVER, (None, "旁白"))
+    video = _media("versions/videos/E1U01_v1.mp4", kind="v", duration=8.0)
+    presentation = materialize_speech_presentation(
+        preparation, variant=POST_PRODUCTION, video=video, provider_audio_enabled=True
+    )
+
+    assert presentation.subtitle_basis == build_mechanical_subtitle_basis(
+        preparation, variant=POST_PRODUCTION, video=video.evidence
+    )
+
+
 def test_explicit_provider_audio_off_preserves_file_but_disables_its_presentation_track() -> None:
     video = _media("versions/videos/E1U01_v1.mp4", kind="v", duration=4.0)
     presentation = materialize_speech_presentation(
@@ -166,7 +234,7 @@ def test_webvtt_projection_collapses_blank_paragraphs_without_changing_canonical
     assert presentation.subtitles_webvtt() == ("WEBVTT\n\n1\n00:00:00.000 --> 00:00:05.000\n第一段\n第二段\n")
 
 
-def test_use_tts_rejects_non_narrator_and_audio_longer_than_video_without_clipping() -> None:
+def test_use_tts_rejects_non_narrator() -> None:
     video = _media("versions/videos/E1U01_v1.mp4", kind="v", duration=5.0)
     audio = _media("versions/audio/E1U01_v1.wav", kind="a", duration=5.1)
 
@@ -178,14 +246,21 @@ def test_use_tts_rejects_non_narrator_and_audio_longer_than_video_without_clippi
             narration_audio=audio,
             provider_audio_enabled=True,
         )
-    with pytest.raises(PresentationBoundaryError, match="exceeds video boundary"):
-        materialize_speech_presentation(
-            _speech(SpeechMode.NARRATOR_VOICEOVER, (None, "旁白")),
-            variant=USE_TTS,
-            video=video,
-            narration_audio=audio,
-            provider_audio_enabled=True,
-        )
+
+
+def test_narration_longer_than_video_keeps_its_full_length_and_subtitles_follow_it() -> None:
+    presentation = materialize_speech_presentation(
+        _speech(SpeechMode.NARRATOR_VOICEOVER, (None, "旁白")),
+        variant=USE_TTS,
+        video=_media("versions/videos/E1U01_v1.mp4", kind="v", duration=5.0),
+        narration_audio=_media("versions/audio/E1U01_v1.wav", kind="a", duration=7.5),
+        provider_audio_enabled=True,
+    )
+
+    assert presentation.video.duration_microseconds == 5_000_000
+    assert presentation.narration_audio is not None
+    assert presentation.narration_audio.duration_microseconds == 7_500_000
+    assert [(cue.start_microseconds, cue.end_microseconds) for cue in presentation.subtitles] == [(0, 7_500_000)]
 
 
 def test_source_selection_and_currency_are_aggregated_without_hiding_history() -> None:
@@ -223,7 +298,7 @@ def test_timing_policy_identity_changes_only_derived_bases() -> None:
         variant=POST_PRODUCTION,
         video=video,
         provider_audio_enabled=True,
-        timing=MechanicalSubtitleTiming(policy_version=2),
+        timing=MechanicalSubtitleTiming(policy_version=3),
     )
 
     assert changed.video.media.evidence == baseline.video.media.evidence

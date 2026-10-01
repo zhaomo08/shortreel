@@ -1,5 +1,5 @@
 import { startTransition, useState, useEffect, useRef } from "react";
-import { errMsg, voidPromise } from "@/utils/async";
+import { errMsg } from "@/utils/async";
 import { useLocation } from "wouter";
 import { ChevronLeft, Settings, Bell, Download, Loader2, Package } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -12,24 +12,17 @@ import { useUsageHeaderStore } from "@/stores/usage-header-store";
 import { UsageHeaderEntry } from "@/components/usage/UsageHeaderEntry";
 import { WorkspaceNotificationsDrawer } from "./WorkspaceNotificationsDrawer";
 import { ExportScopeDialog } from "./ExportScopeDialog";
+import { episodeDisplayName } from "@/utils/episode-display";
 import { ProjectMenu } from "./ProjectMenu";
-import { PhaseStepper } from "./PhaseStepper";
+import { ProjectStatusBar } from "./ProjectStatusBar";
 
 import { API } from "@/api";
 import { ArchiveDiagnosticsDialog } from "@/components/shared/ArchiveDiagnosticsDialog";
 import { rememberAssetLibraryReturnTo } from "@/components/pages/AssetLibraryPage";
 import { ONBOARDING_ANCHORS } from "@/onboarding/anchors";
+import { ROUTE_APP_PROJECTS, episodeEditViewPath } from "@/app-routes";
 import type { ExportDiagnostics, WorkspaceNotification } from "@/types";
-
-/** 通过隐藏 <a> 触发浏览器下载，避免 window.open 产生空白标签页 */
-function triggerBrowserDownload(url: string) {
-  const a = document.createElement("a");
-  a.href = url;
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
+import { triggerBrowserDownload } from "@/utils/download";
 
 interface GlobalHeaderProps {
   onNavigateBack?: () => void;
@@ -38,18 +31,17 @@ interface GlobalHeaderProps {
 /**
  * 工作台顶栏（48px，玻璃面板）。三段式 grid：
  * - 左：返回按钮 + ProjectMenu（项目切换菜单）
- * - 中：PhaseStepper（5 阶段胶囊）
+ * - 中：ProjectStatusBar（集进度与项目层的下一步；数据升级失败时是迁移重试）
  * - 右：通知 / 使用记录 / 导出 / 资产库 / 设置
  */
 export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
   const { t } = useTranslation();
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
   const { currentProjectData, currentProjectName } = useProjectsStore();
   const { setUsagePanelOpen, triggerScrollTo, markWorkspaceNotificationRead } = useAppStore();
   const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false);
   const [exportingProject, setExportingProject] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [jianyingExporting, setJianyingExporting] = useState(false);
   const [exportDiagnostics, setExportDiagnostics] = useState<ExportDiagnostics | null>(null);
   const notificationAnchorRef = useRef<HTMLDivElement>(null);
   const exportAnchorRef = useRef<HTMLDivElement>(null);
@@ -57,8 +49,17 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
   const fetchConfigStatus = useConfigStatusStore((s) => s.fetch);
   const workspaceNotifications = useAppStore((s) => s.workspaceNotifications);
 
-  const currentPhase = currentProjectData?.status?.phase;
+  // 「导出项目」提示里的剪辑视图链接：在集页时指向当前集，否则指向播出顺序上的第一集；文案用集名。
+  const routeEpisode = /\/episodes\/(\d+)/.exec(location)?.[1];
+  const projectEpisodes = currentProjectData?.episodes ?? [];
+  const editViewEpisodeId = routeEpisode !== undefined ? Number(routeEpisode) : projectEpisodes[0]?.episode;
+  const editViewEpisode =
+    editViewEpisodeId !== undefined && projectEpisodes.some((ep) => ep.episode === editViewEpisodeId)
+      ? { episode: editViewEpisodeId, name: episodeDisplayName(projectEpisodes, editViewEpisodeId, t) }
+      : null;
   const unreadNotificationCount = workspaceNotifications.filter((item) => !item.read).length;
+  // 数据升级失败时中段是唯一的重试入口，窄屏也要显示。
+  const needsRepair = currentProjectData?.status?.needs_repair === true;
 
   // 演示项目在后端没有用量记录，入口整个不渲染。demoMode 在演示→真实切换时先于 store
   // 变为 false，currentProjectName 单独判一次兜住这一帧仍读到旧演示项目名的窗口。
@@ -102,40 +103,6 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
       highlight_style: target.highlight_style ?? "flash",
       expires_at: Date.now() + 3000,
     });
-  };
-
-  const handleJianyingExport = async (
-    episode: number,
-    draftPath: string,
-    jianyingVersion: string,
-    narrationDelivery: "post_production" | "use_tts",
-  ) => {
-    if (!currentProjectName || jianyingExporting) return;
-
-    setJianyingExporting(true);
-    try {
-      const { download_token } = await API.requestExportToken(currentProjectName, "current");
-      const url = API.getJianyingDraftDownloadUrl(
-        currentProjectName,
-        episode,
-        draftPath,
-        download_token,
-        jianyingVersion,
-        narrationDelivery,
-      );
-      triggerBrowserDownload(url);
-      setExportDialogOpen(false);
-      useAppStore.getState().pushToast(t("dashboard:jianying_export_started"), "success");
-    } catch (err) {
-      useAppStore
-        .getState()
-        .pushNotification(
-          t("dashboard:jianying_export_failed", { message: errMsg(err) }),
-          "error",
-        );
-    } finally {
-      setJianyingExporting(false);
-    }
   };
 
   const handleExportProject = async (scope: "current" | "full") => {
@@ -209,9 +176,9 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
           <ProjectMenu />
         </div>
 
-        {/* ---- Center: phase stepper ---- */}
-        <div className="hidden justify-self-center md:flex">
-          <PhaseStepper currentPhase={currentPhase} />
+        {/* ---- Center: project status bar ---- */}
+        <div className={`${needsRepair ? "flex" : "hidden md:flex"} justify-self-center`}>
+          {currentProjectName ? <ProjectStatusBar key={currentProjectName} projectName={currentProjectName} /> : null}
         </div>
 
         {/* ---- Right: actions ---- */}
@@ -269,7 +236,7 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
             style={{ background: "var(--color-hairline)" }}
           />
 
-          {/* Export — accent CTA */}
+          {/* Export project archive */}
           <div
             className="relative"
             ref={exportAnchorRef}
@@ -279,13 +246,19 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
               type="button"
               onClick={() => setExportDialogOpen(!exportDialogOpen)}
               disabled={!currentProjectName || exportingProject || demoMode}
-              className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors focus-ring disabled:cursor-not-allowed disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors focus-ring disabled:cursor-not-allowed disabled:opacity-50"
               style={{
-                background:
-                  "linear-gradient(180deg, oklch(0.82 0.09 208), oklch(0.72 0.09 208))",
-                color: "color-mix(in oklab, var(--sink) 100%, transparent)",
-                boxShadow:
-                  "inset 0 1px 0 color-mix(in oklab, var(--raise) 30%, transparent), 0 0 0 1px oklch(0.55 0.10 208 / 0.4), 0 4px 14px -6px var(--color-accent-glow)",
+                color: exportDialogOpen ? "var(--color-text)" : "var(--color-text-3)",
+                background: exportDialogOpen ? "color-mix(in oklab, var(--color-surface-2) 60%, transparent)" : "transparent",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "color-mix(in oklab, var(--color-surface-2) 60%, transparent)";
+                e.currentTarget.style.color = "var(--color-text)";
+              }}
+              onMouseLeave={(e) => {
+                if (exportDialogOpen) return;
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "var(--color-text-3)";
               }}
               title={
                 demoMode
@@ -306,13 +279,16 @@ export function GlobalHeader({ onNavigateBack }: GlobalHeaderProps) {
             <ExportScopeDialog
               open={exportDialogOpen}
               onClose={() => setExportDialogOpen(false)}
-              onSelect={(scope) => {
-                if (scope !== "jianying-draft") void handleExportProject(scope);
-              }}
+              onSelect={(scope) => void handleExportProject(scope)}
               anchorRef={exportAnchorRef}
-              episodes={currentProjectData?.episodes ?? []}
-              onJianyingExport={voidPromise(handleJianyingExport)}
-              jianyingExporting={jianyingExporting}
+              editViewEpisode={editViewEpisode}
+              onOpenEditView={(episode) => {
+                setExportDialogOpen(false);
+                if (!currentProjectName) return;
+                setLocation(
+                  `~${ROUTE_APP_PROJECTS}/${encodeURIComponent(currentProjectName)}${episodeEditViewPath(episode)}`,
+                );
+              }}
             />
           </div>
 

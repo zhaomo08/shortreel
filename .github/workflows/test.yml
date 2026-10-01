@@ -49,6 +49,7 @@ jobs:
     # pyflakes，能检查 run: 脚本）；zizmor 用默认 persona，medium 及以上阻断，--offline
     # 使判定不受环境里是否存在 GitHub token 影响，与 pre-commit 本地一致。
     # 两个工具版本须与 .pre-commit-config.yaml 中对应 hook 的版本同步升级。
+    # zizmor 只审 GitHub 实际执行的输入；.agents/skills/ 下 vendored skill 自带的上游 CI 不在本仓库运行。
     needs: changes
     if: needs.changes.outputs.workflow == 'true'
     runs-on: ubuntu-latest
@@ -61,12 +62,12 @@ jobs:
       - name: Workflow syntax & shell check (actionlint)
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
       - name: Workflow security audit (zizmor)
-        run: uvx zizmor@1.29.0 --offline --min-severity medium .
+        run: uvx zizmor@1.29.0 --offline --min-severity medium .github .pre-commit-config.yaml
 
   backend-static:
     needs: changes
@@ -78,7 +79,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -109,8 +110,37 @@ jobs:
       - name: Dependency hygiene (deptry)
         run: uv run deptry lib server alembic scripts tests
 
+      - name: Dependency hygiene (deptry, arcreel-market-core)
+        working-directory: packages/arcreel-market-core
+        run: uv run deptry src tests
+
       - name: Agent Runtime Profile integrity
         run: uv run python scripts/lint_agent_runtime_profile.py
+
+  conventions:
+    # 仓库约定闸门：scripts/audit_conventions.py --check（规范索引与 CodeRabbit 映射、
+    # Dependabot 分组、工具版本同步、豁免注释的行内理由）。涉及的文件横跨各域，其中
+    # docs/standards/ 等不属于任何域，所以不按域裁剪。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Repository conventions (audit_conventions --check)
+        run: uv run python scripts/audit_conventions.py --check
 
   test-lint:
     # 测试卫生闸门：scripts/audit_tests.py --check（零第三方依赖，纯 stdlib ast）。
@@ -146,12 +176,15 @@ jobs:
             path: tests/unit
           - suite: integration
             path: tests/integration
+          # workspace 子包的测试目录自带 pytest 配置，与应用测试分开收集
+          - suite: market-core
+            path: packages/arcreel-market-core/tests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -161,7 +194,7 @@ jobs:
 
       - name: Install system dependencies
         if: matrix.suite == 'integration'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg mediainfo bubblewrap socat
+        run: sudo apt-get update && sudo apt-get install -y mediainfo bubblewrap socat
 
       - name: Install dependencies
         run: uv sync
@@ -173,12 +206,12 @@ jobs:
         # 留在同一 worker。
         run: >-
           uv run python -m pytest ${{ matrix.path }} -n 4 --dist loadfile
-          --cov=lib --cov=server --cov-report=term-missing
+          --cov=lib --cov=server --cov=arcreel_market_core --cov-report=term-missing
           --cov-report=xml:coverage-${{ matrix.suite }}.xml
 
       - name: Upload backend coverage
         # unit/integration 使用同一 flag；Codecov 按 commit 合并，无需本地聚合作业。
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage-${{ matrix.suite }}.xml
@@ -215,7 +248,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -244,7 +277,7 @@ jobs:
             --cov=lib --cov=server --cov-report=xml:coverage-pg.xml
 
       - name: Upload PG coverage
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage-pg.xml
@@ -316,7 +349,7 @@ jobs:
         run: pnpm test:coverage
 
       - name: Upload frontend coverage
-        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: frontend/coverage/lcov.info
@@ -351,8 +384,8 @@ jobs:
           cache: "pnpm"
           cache-dependency-path: website/pnpm-lock.yaml
 
-      - name: Translation lock unit tests
-        run: node --test .claude/skills/translate-docs/scripts/translation-lock.test.mjs
+      - name: translate-docs script unit tests
+        run: node --test .claude/skills/translate-docs/scripts/translation-lock.test.mjs .claude/skills/translate-docs/scripts/ui-messages.test.mjs
 
       - name: Website script unit tests
         run: node --test website/scripts/*.test.mjs
@@ -360,6 +393,11 @@ jobs:
       - name: Install dependencies
         working-directory: website
         run: pnpm install --frozen-lockfile
+
+      # 紧接依赖安装：后续闸门失败时，always() 的翻译滞后报告仍要读到这份同步副本
+      - name: Sync CONTRIBUTING copy
+        working-directory: website
+        run: pnpm run sync-contributing
 
       - name: Typecheck
         working-directory: website
@@ -372,10 +410,6 @@ jobs:
       - name: Format check
         working-directory: website
         run: pnpm run format:check
-
-      - name: Sync CONTRIBUTING copy
-        working-directory: website
-        run: pnpm run sync-contributing
 
       - name: Consistency check (doc inventory / orphan translations / anchors / UI JSON keys)
         working-directory: website
@@ -412,10 +446,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build amd64 image (no push)
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64
@@ -475,7 +509,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -521,6 +555,7 @@ jobs:
         changes,
         workflow-static,
         backend-static,
+        conventions,
         test-lint,
         backend-tests,
         postgres-compat,

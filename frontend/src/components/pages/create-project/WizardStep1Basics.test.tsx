@@ -6,7 +6,6 @@ import { WizardStep1Basics } from "./WizardStep1Basics";
 const baseValue = {
   title: "",
   contentMode: "narration" as const,
-  sourceKind: "novel" as const,
   aspectRatio: "9:16" as const,
   outputLanguage: "auto" as const,
   generationRoute: "storyboard" as const,
@@ -132,24 +131,7 @@ describe("WizardStep1Basics", () => {
         onCancel={() => {}}
       />,
     );
-    expect(screen.queryByRole("radiogroup", { name: /源文件性质|Source type|Loại tệp nguồn/ })).not.toBeInTheDocument();
-  });
-
-  it("emits onChange with screenplay when source kind selected in drama mode", () => {
-    const onChange = vi.fn();
-    render(
-      <WizardStep1Basics
-        value={{ ...baseValue, contentMode: "drama" }}
-        onChange={onChange}
-        onNext={() => {}}
-        onCancel={() => {}}
-      />,
-    );
-    const group = screen.getByRole("radiogroup", { name: /源文件性质|Source type|Loại tệp nguồn/ });
-    fireEvent.click(within(group).getByText(/剧本|Screenplay|Kịch bản/));
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ sourceKind: "screenplay" }),
-    );
+    expect(screen.queryByRole("radiogroup", { name: /源文件类型|Source type|Loại tệp nguồn/ })).not.toBeInTheDocument();
   });
 
   it("emits onChange when aspect ratio changes", () => {

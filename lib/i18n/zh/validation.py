@@ -1,7 +1,7 @@
 """校验与归档诊断消息（中文）。
 
 由 ``lib.project.data_validator`` / ``server.services.project.project_archive`` / ``lib.script.script_skeleton``
-以 ``lib.infra.validation_messages.ValidationMessage`` 的形式产出、在各消费边界渲染。
+以 ``arcreel_market_core.validation_messages.ValidationMessage`` 的形式产出、在各消费边界渲染。
 """
 
 MESSAGES = {
@@ -26,7 +26,6 @@ MESSAGES = {
     "val_ledger_source_file_escapes": "source_file 不能是绝对路径或包含 ..",
     "val_ledger_start_after_end": "start 不能大于 end",
     "val_field_bad_timestamp": "{field} 不是合法的 ISO8601 时间戳: {value}",
-    "val_array_empty": "{field} 数组为空",
     "val_item_must_be_object": "{prefix}: 必须是对象",
     "val_item_format_object": "{prefix}: 数据格式错误，应为对象",
     # ---- 路径引用 ----
@@ -37,7 +36,7 @@ MESSAGES = {
     "val_path_must_be_relative": "{field} 必须是项目内相对路径: {path}",
     # ---- 项目级字段 ----
     "val_content_mode_invalid": "content_mode 值无效: '{value}'，必须是 {allowed}",
-    "val_source_kind_invalid": "source_kind 值无效: '{value}'，必须是 {allowed}",
+    "val_source_kind_invalid": "{prefix}: source_kind 值无效: '{value}'，必须是 {allowed}",
     "val_generation_mode_invalid": "generation_mode 值无效: '{value}'，必须是 {allowed}",
     "val_deprecated_clues": "project.json 含已废弃字段 clues，请等待自动迁移或手动重启服务",
     "val_deprecated_field_removable": "{field} 字段已废弃（改为读时计算），可安全移除",
@@ -47,6 +46,9 @@ MESSAGES = {
     "val_novel_must_be_object": "novel 字段必须是对象",
     # ---- 剧集条目与账本 ----
     "val_ledger_status_type": "{prefix}: ledger_status 必须是字符串，当前取值: {value}",
+    "val_source_origin_invalid": "{prefix}: source_origin 值无效: '{value}'，必须是 {allowed}",
+    "val_source_range_requires_whole_source": "{prefix}: 只有切自整本源文（source_origin 为 whole_source）的集可以带 source_range",
+    "val_whole_source_file_invalid": "whole_source_files[{index}] 必须是带 source_file 的对象，文件直接位于 source/ 下，扩展名为 .txt 或 .md",
     "val_episode_missing_num_at": "{prefix}: 缺少必填字段 episode (整数)",
     "val_episode_missing_title_at": "{prefix}: 缺少必填字段 title (字符串，可为空)",
     "val_episode_missing_num": "缺少必填字段: episode (整数)",
@@ -58,7 +60,7 @@ MESSAGES = {
     "val_ad_no_episode_target_duration": "广告/短片项目不持有 episode_target_duration（整集体量按 target_duration 预算规划）",
     "val_ad_no_grid_storyboard": "广告/短片项目不支持多宫格分镜（grid_storyboard）",
     "val_ad_episodes_single": "广告/短片项目 episodes 必须恒为第 1 集单条",
-    "val_ad_shots_missing": "ad 脚本缺少 shots 数组或为空",
+    "val_ad_shots_missing": "ad 脚本缺少 shots 数组",
     "val_ad_duration_drift": (
         "脚本总时长 {total} 秒与 target_duration {target} 秒偏差 {delta:.0%}，"
         "超过 {threshold:.0%} 观察阈值（仅提示，不阻塞保存）"
@@ -102,7 +104,7 @@ MESSAGES = {
     "val_unit_id_missing": "{prefix}: 缺少 unit_id",
     "val_unit_id_missing_required": "{prefix}: 缺少必填字段 unit_id",
     "val_unit_id_duplicate": "{prefix}: unit_id 重复 '{value}'",
-    "val_video_units_missing": "reference_video 脚本缺少 video_units 数组或为空",
+    "val_video_units_missing": "reference_video 脚本缺少 video_units 数组",
     "val_unit_duration_range": "{prefix}: duration_seconds 必须是 {low}-{high} 之间的整数",
     # ---- 骨架与生成模式失配 ----
     "val_skeleton_noun_segments": "分镜",
@@ -198,7 +200,6 @@ MESSAGES = {
     "val_ce_removed_reason_extract_source": "取值根一律是响应体，HTTP 状态码不走 JSONPath",
     "val_ce_removed_reason_extract_usage_keys": "用量改挂 poll.extract.usage",
     "val_ce_removed_reason_mime_types": "素材格式不做白名单，由供应商在提交时拒绝",
-    "val_ce_removed_reason_media_type": "声明式端点恒为视频，媒体类型不可声明",
     "val_ce_removed_reason_comfyui_capabilities": "ComfyUI 端点的能力只从节点绑定推导，定义不存能力声明",
     "val_ce_malformed_placeholder": (
         "{fragment} 不是合法占位符：只支持裸变量（如 prompt、inputs.first_frame），"
@@ -234,6 +235,9 @@ MESSAGES = {
         "submit 引用了 {source} 素材，却没有声明 {capability}，素材会发出去而界面不开放该能力"
     ),
     "val_ce_capability_incoherent": "能力 {capability} 与同组声明矛盾，须满足：{requirement}",
+    "val_ce_capability_not_declared": "须在 capabilities 中把至少一项能力声明为 true：{allowed}",
+    "val_ce_media_type_field_not_allowed": "{name} 不适用于媒体类型为 {media_type} 的定义",
+    "val_ce_artifact_extract_missing": "缺少产物提取路径，至少写一项：{keys}",
     "val_ce_jsonpath_not_a_string": "取值路径必须是字符串：{path_expression}",
     "val_ce_jsonpath_surrounding_whitespace": "取值路径首尾不得有空白：{path_expression}",
     "val_ce_jsonpath_missing_root": "取值路径必须以 $ 开头：{path_expression}",

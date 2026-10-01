@@ -71,6 +71,8 @@ def test_formal_input_selection_retains_identity_for_the_provider_recheck() -> N
         ArtifactKey.episode_audio(12, "segment:/3"),
         ArtifactKey.episode_subtitle(12, "segment:/3", "use_tts"),
         ArtifactKey.episode_presentation(12, "segment:/3", "post_production"),
+        ArtifactKey.episode_final_cut(12, "tl-0a1b2c3d", "without_narration", "no_subtitles"),
+        ArtifactKey.project_bgm("bgm-0a1b2c3d"),
     ],
 )
 def test_artifact_key_round_trips_without_display_string_parsing(key: ArtifactKey) -> None:
@@ -84,6 +86,31 @@ def test_artifact_key_round_trips_without_display_string_parsing(key: ArtifactKe
 def test_rendition_artifact_keys_reject_unknown_variants(variant: object) -> None:
     with pytest.raises(ValueError, match="variant"):
         ArtifactKey.episode_presentation(1, "E1U01", variant)
+
+
+@pytest.mark.parametrize(
+    ("timeline_id", "narration", "subtitles"),
+    [
+        ("E1U01", "without_narration", "no_subtitles"),
+        ("tl-0a1b2c3d", "use_tts", "no_subtitles"),
+        ("tl-0a1b2c3d", "without_narration", "subtitles"),
+    ],
+)
+def test_final_cut_key_rejects_components_outside_its_identity(
+    timeline_id: str, narration: str, subtitles: str
+) -> None:
+    with pytest.raises(ValueError, match="components"):
+        ArtifactKey.episode_final_cut(1, timeline_id, narration, subtitles)
+
+
+@pytest.mark.parametrize("bgm_id", ["bgm-0A1B2C3D", "bgm-0a1b2c3", "theme", "../bgm-0a1b2c3d"])
+def test_bgm_key_rejects_ids_outside_the_assigned_shape(bgm_id: str) -> None:
+    with pytest.raises(ValueError, match="components"):
+        ArtifactKey.project_bgm(bgm_id)
+
+
+def test_bgm_key_belongs_to_no_episode() -> None:
+    assert ArtifactKey.project_bgm("bgm-0a1b2c3d").episode_number is None
 
 
 def test_artifact_key_rejects_direct_construction_that_cannot_round_trip() -> None:

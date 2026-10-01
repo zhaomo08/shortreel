@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 from dataclasses import replace
@@ -19,6 +20,8 @@ import pytest
 from mcp import types
 from mcp.server import Server
 
+from lib.artifacts.artifact_activation import register_current_artifact
+from lib.artifacts.artifact_manifest import ArtifactKey
 from lib.config.resolver import ConfigResolver
 from lib.db import async_session_factory
 from lib.generation.generation_queue import GenerationQueue
@@ -40,13 +43,22 @@ from server.agent_toolset.declaration import (
     UnscopedToolDeclaration,
     tool_description,
 )
+from server.agent_toolset.edit_timelines import (
+    CREATE_TIMELINE,
+    EDIT_TIMELINE,
+    LIST_REVISIONS,
+    READ_TIMELINE,
+    RENAME_TIMELINE,
+    RESTORE_REVISION,
+)
 from server.agent_toolset.embedded import embedded_server
 from server.agent_toolset.envelope import json_value
 from server.agent_toolset.generation_batches import CANCEL_GENERATION_BATCH, GET_GENERATION_BATCH
 from server.agent_toolset.grid_storyboards import GENERATE_GRID, SPLIT_GRIDS
 from server.agent_toolset.orientation import GET_PROMPT_PREVIEW, GET_VIDEO_CAPABILITIES
-from server.agent_toolset.project_entry import CREATE_PROJECT
+from server.agent_toolset.project_entry import CREATE_PROJECT, EDIT_SOURCE_TEXT
 from server.agent_toolset.remote import LONG_TASK_NOTE, remote_tool
+from server.agent_toolset.repair_channel import MERGE_ASSET
 from server.agent_toolset.script_authoring import (
     CONFIRM_SCRIPT_REVIEW,
     GENERATE_EPISODE_SCRIPT,
@@ -56,7 +68,9 @@ from server.agent_toolset.script_authoring import (
 )
 from server.agent_toolset.script_editing import PATCH_EPISODE_SCRIPT
 from server.agent_toolset.toolset import AGENT_TOOLSET, ARCREEL_MCP_TOOL_IDS, MIGRATION_BLOCKED_TOOL_IDS
-from server.agent_toolset.workflow_completion import COMPLETE_ASSET_INVENTORY, COMPLETE_SCRIPT_PLAN_REBUILD
+from server.agent_toolset.video_review import INSPECT_VIDEO_UNITS
+from server.agent_toolset.video_versions import SELECT_VIDEO_VERSION
+from server.agent_toolset.workflow_completion import COMPLETE_SCRIPT_PLAN_REBUILD
 from server.remote_mcp import build_remote_mcp_server
 from server.services.project.workflow_planner import WorkflowPlanner
 from server.tool_runtime import (
@@ -69,6 +83,7 @@ from server.tool_runtime import (
     ToolRequest,
     get_generation_batch,
 )
+from tests.factories import install_current_video, make_test_clip
 
 _ABSENT_REVISION = "sha256-v1:" + "0" * 64
 
@@ -77,7 +92,8 @@ SAMPLE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "list_projects": {},
     "create_project": {"name": "fresh", "title": "Fresh"},
     "upload_source": {"filename": "novel.txt", "content": "第一章\n你好", "on_conflict": "replace"},
-    "get_workflow_plan": {"episode": 1},
+    "edit_source_text": {"filename": "novel.txt", "text": "第一章\n改写"},
+    "get_workflow_plan": {"episode_id": 1},
     "get_video_capabilities": {},
     "get_prompt_preview": {"script": "episode_1.json", "item_id": "E1S01"},
     "get_generation_batch": {"batch_id": "batch-absent"},
@@ -85,12 +101,13 @@ SAMPLE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "patch_project": {"overview": {"synopsis": "梗概"}},
     "patch_episode_meta": {"script": "episode_1.json", "field": "title", "value": "第一集"},
     "rename_asset": {"table": "characters", "old_name": "甲", "new_name": "乙"},
+    "merge_asset": {"table": "characters", "source": "甲", "target": "乙", "dry_run": True},
     "retry_project_migration": {},
     "get_project_content": {},
     "list_source_files": {},
     "get_source_text": {"path": "source/episode_1.txt"},
     "get_episode_script": {"script": "episode_1.json"},
-    "get_script_plan_content": {"episode": 1},
+    "get_script_plan_content": {"episode_id": 1},
     "list_project_files": {},
     "read_project_file": {"path": "project.json"},
     "list_pending_assets": {"type": "character"},
@@ -98,18 +115,18 @@ SAMPLE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "generate_storyboards": {"script": "episode_1.json"},
     "edit_images": {"resource_type": "character", "edits": [{"id": "张三", "instruction": "把头发改成红色"}]},
     "generate_narration_audio": {"script": "episode_1.json", "segment_ids": ["E1S01"]},
-    "generate_episode_script": {"episode": 1, "dry_run": True},
-    "generate_script_plan": {"episode": 1, "dry_run": True},
-    "confirm_script_review": {"episode": 1},
-    "open_draft": {"episode": 1, "doc_type": "drama_script_plan"},
+    "generate_episode_script": {"episode_id": 1, "dry_run": True},
+    "generate_script_plan": {"episode_id": 1, "dry_run": True},
+    "confirm_script_review": {"episode_id": 1},
+    "open_draft": {"episode_id": 1, "doc_type": "drama_script_plan"},
     "patch_draft": {
-        "episode": 1,
+        "episode_id": 1,
         "doc_type": "drama_script_plan",
         "content": {"title": "第一集", "scenes": []},
         "base_revision": _ABSENT_REVISION,
     },
-    "promote_draft": {"episode": 1, "doc_type": "drama_script_plan", "base_revision": _ABSENT_REVISION},
-    "discard_draft": {"episode": 1, "doc_type": "drama_script_plan", "base_revision": _ABSENT_REVISION},
+    "promote_draft": {"episode_id": 1, "doc_type": "drama_script_plan", "base_revision": _ABSENT_REVISION},
+    "discard_draft": {"episode_id": 1, "doc_type": "drama_script_plan", "base_revision": _ABSENT_REVISION},
     "patch_episode_script": {
         "script": "episode_9.json",
         "base_revision": "sha256-v1:" + "0" * 64,
@@ -118,17 +135,26 @@ SAMPLE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "generate_grid": {"script": "episode_1.json", "list_only": True},
     "split_grids": {"grid_ids": ["grid_000000000000"]},
     "plan_episodes": {"instructions": "按章节对齐切分"},
-    "reset_episode_planning": {"from_episode": 1},
-    "complete_asset_inventory": {
-        "scope": {"kind": "all", "files": []},
-        "expected_source_revision": "sha256-v1:" + "0" * 64,
+    "reset_episode_planning": {},
+    "complete_script_plan_rebuild": {"episode_id": 1, "expected_stale_script_plan_revision": None},
+    "generate_videos": {"script": "episode_1.json", "target": {"scope": "all"}},
+    "select_video_version": {"unit_id": "E1S01", "version": 1},
+    "inspect_video_units": {"unit_ids": ["E1S01"]},
+    "create_timeline": {"from": "script", "episode": 1, "name": "完整版"},
+    "list_timelines": {"episode": 1},
+    "read_timeline": {"timeline": "tl-0000abcd"},
+    "list_bgm": {},
+    "edit_timeline": {
+        "timeline": "tl-0000abcd",
+        "base_revision": 1,
+        "summary": "压低开场原声",
+        "operations": [{"op": "set_volume", "clip": "c1", "volume": 0.5}],
     },
-    "complete_script_plan_rebuild": {"episode": 1, "expected_stale_script_plan_revision": None},
-    "generate_videos": {
-        "script": "episode_1.json",
-        "target": {"scope": "all"},
-        "narration_delivery": "post_production",
-    },
+    "rename_timeline": {"timeline": "tl-0000abcd", "name": "定稿"},
+    "list_revisions": {"timeline": "tl-0000abcd"},
+    "restore_revision": {"timeline": "tl-0000abcd", "revision": 1},
+    "render_final_cut": {"timeline": "tl-0000abcd"},
+    "export_jianying_draft": {"timeline": "tl-0000abcd"},
 }
 
 _DECLARATIONS = pytest.mark.parametrize("declaration", AGENT_TOOLSET, ids=lambda declaration: declaration.name)
@@ -499,7 +525,7 @@ def _twin_services(seeded_projects: ProjectManager, tmp_path: Path) -> Services:
 
 
 # 真实 handler 的结果随调用时刻变化，两次调用无法逐字比较；透传一致性由其余用例的 fake handler 覆盖。
-_TIME_DEPENDENT_RESULTS = frozenset({CREATE_PROJECT.name})
+_TIME_DEPENDENT_RESULTS = frozenset({CREATE_PROJECT.name, CREATE_TIMELINE.name})
 
 # 样例入参下合法地返回 problem 的声明：测试项目缺少它们要找的对象或能力配置。其余声明在样例入参下必须成功。
 _PROBLEM_ON_SAMPLE = frozenset(
@@ -515,8 +541,18 @@ _PROBLEM_ON_SAMPLE = frozenset(
         PROMOTE_DRAFT.name,
         PATCH_EPISODE_SCRIPT.name,
         SPLIT_GRIDS.name,
-        COMPLETE_ASSET_INVENTORY.name,
+        SELECT_VIDEO_VERSION.name,
+        INSPECT_VIDEO_UNITS.name,
+        READ_TIMELINE.name,
+        EDIT_TIMELINE.name,
+        RENAME_TIMELINE.name,
+        LIST_REVISIONS.name,
+        RESTORE_REVISION.name,
         COMPLETE_SCRIPT_PLAN_REBUILD.name,
+        # 测试项目只登记了一个角色，没有可并入的保留方。
+        MERGE_ASSET.name,
+        # 测试项目没有登记整本源文的文件。
+        EDIT_SOURCE_TEXT.name,
     }
 )
 
@@ -543,6 +579,39 @@ async def test_embedded_content_carries_the_same_json_as_remote_structured_conte
     assert set(remote.structuredContent) == {"problem" if remote.isError else declaration.domain_key}
     assert _embedded_json(embedded) == remote.structuredContent
     assert _texts(embedded) == _texts(remote)
+
+
+async def test_contact_sheets_reach_both_hosts_as_the_same_image_blocks(
+    seeded_projects: ProjectManager, services: Services
+) -> None:
+    script = {
+        "episode": 1,
+        "title": "E1",
+        "content_mode": "narration",
+        "segments": [{"segment_id": "E1S01", "novel_text": "旁白"}],
+    }
+    seeded_projects.save_script("demo", script, "episode_1.json", validate=False)
+    project_path = seeded_projects.get_project_path("demo")
+    clip = project_path / ".staging" / "E1S01.mp4"
+    make_test_clip(clip, size="160x90", fps=25, seconds=1, tone=False)
+    install_current_video(project_path, "videos", "E1S01", clip)
+    arguments = {"unit_ids": ["E1S01"], "frames": 4}
+
+    embedded = await _call_embedded(INSPECT_VIDEO_UNITS, arguments, services)
+    remote = await _call_remote(INSPECT_VIDEO_UNITS, {"project": "demo", **arguments}, services)
+
+    assert embedded.isError is remote.isError is False
+    assert _embedded_json(embedded) == remote.structuredContent
+    assert _texts(embedded) == _texts(remote)
+    embedded_images = [block for block in embedded.content if isinstance(block, types.ImageContent)]
+    remote_images = [block for block in remote.content if isinstance(block, types.ImageContent)]
+    assert len(embedded_images) == 1
+    assert [(image.mimeType, image.data) for image in embedded_images] == [
+        (image.mimeType, image.data) for image in remote_images
+    ]
+    assert embedded_images[0].mimeType == "image/jpeg"
+    assert base64.b64decode(embedded_images[0].data).startswith(b"\xff\xd8")
+    assert isinstance(embedded.content[-1], types.ImageContent)
 
 
 async def test_a_summary_precedes_the_structured_json_in_both_hosts(services: Services) -> None:
@@ -668,6 +737,24 @@ async def test_a_text_generation_dry_run_returns_the_same_prompt_in_both_hosts(
     seeded_projects: ProjectManager, services: Services, tmp_path: Path
 ) -> None:
     """长任务的 dry_run 不提交批次：两宿主都立即拿到同一份 ``text_generation``，没有批次句柄。"""
+    pending_scene = {
+        "scene_id": "E1S01",
+        "duration_seconds": 4,
+        "characters_in_scene": [],
+        "scenes": [],
+        "props": [],
+        "image_prompt": None,
+        "video_prompt": None,
+        "pending_authoring": True,
+        "generated_assets": {},
+    }
+    (seeded_projects.get_project_path("demo") / "scripts" / "episode_1.json").write_text(
+        json.dumps({"episode": 1, "title": "第一集", "scenes": [pending_scene]}), encoding="utf-8"
+    )
+    seeded_projects.update_project(
+        "demo", lambda project: project.update(episodes=[{"episode": 1, "script_file": "scripts/episode_1.json"}])
+    )
+    register_current_artifact(seeded_projects.get_project_path("demo"), ArtifactKey.episode_script(1))
     twin = _twin_services(seeded_projects, tmp_path)
     arguments = SAMPLE_ARGUMENTS[GENERATE_EPISODE_SCRIPT.name]
 

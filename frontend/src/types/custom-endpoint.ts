@@ -1,8 +1,8 @@
 import type { EndpointInstallation } from "./market";
 // 自定义调用端点（custom endpoint）——端点定义的前端类型，按 kind 分声明式与 ComfyUI 两种。
 // 定义 JSON 本身是唯一真相源，导入导出零封套：文件即 definition 原样 JSON。
-// 后端 schema 在 lib/custom_provider/endpoint_definition/schema.json 与
-// lib/custom_provider/comfyui/schema.json，最终判定以 POST /custom-endpoints/validate 为准，
+// 后端 schema 是 packages/arcreel-market-core/src/arcreel_market_core/ 下的
+// endpoint_definition/schema.json 与 comfyui/schema.json，最终判定以 POST /custom-endpoints/validate 为准，
 // 这里只描述 UI 需要读写的形状。
 
 /** 素材在 ArcReel 侧的来源槽位。 */
@@ -75,6 +75,8 @@ export interface EndpointPollSpec {
   extract: {
     status?: EndpointExtractSpec;
     video_url?: EndpointExtractSpec;
+    image_url?: EndpointExtractSpec;
+    image_b64?: EndpointExtractSpec;
     error?: EndpointExtractSpec;
     failure?: EndpointExtractSpec;
     result_id?: EndpointExtractSpec;
@@ -88,13 +90,21 @@ export interface EndpointResultSpec {
   headers?: Record<string, string>;
   extract: {
     video_url?: EndpointExtractSpec;
+    image_url?: EndpointExtractSpec;
+    image_b64?: EndpointExtractSpec;
     error?: EndpointExtractSpec;
     usage?: Record<string, EndpointExtractSpec>;
   };
 }
 
+/**
+ * 能力字段按媒体类型分集合：视频定义写 VideoCapabilities 同名字段，
+ * 图片定义写 text_to_image、image_to_image 与 max_reference_images。
+ */
 export interface EndpointCapabilities {
   text_to_video?: boolean;
+  text_to_image?: boolean;
+  image_to_image?: boolean;
   first_frame?: boolean;
   last_frame?: boolean;
   max_reference_images?: number;
@@ -112,6 +122,8 @@ export interface EndpointCapabilities {
 export interface EndpointDefinition {
   kind: "declarative";
   schema_version: string;
+  /** 定义产出的媒体类型，不写即视频。 */
+  media_type?: "image" | "video";
   meta: EndpointMeta;
   auth: EndpointAuth;
   inputs?: Record<string, EndpointInputSpec>;
@@ -126,7 +138,7 @@ export interface EndpointDefinition {
 
 /**
  * 节点绑定的语义键名录。视频端点用全部十一个，图像端点没有首尾帧与时间轴那四个。
- * 与服务端 `lib/custom_provider/comfyui/bindings.py` 同名同序。
+ * 与服务端 `packages/arcreel-market-core/src/arcreel_market_core/comfyui/bindings.py` 同名同序。
  */
 export const COMFYUI_VIDEO_BINDING_KEYS = [
   "prompt",
@@ -436,6 +448,9 @@ export interface EndpointStageReport {
   raw_status?: unknown;
   status?: EndpointStandardStatus | null;
   video_url?: string | null;
+  image_url?: string | null;
+  /** `image_b64` 取到的图片解码后的字节数；解不出图片为 null。 */
+  image_bytes?: number | null;
   error?: string | null;
   result_id?: string | null;
   duration_seconds?: number | null;

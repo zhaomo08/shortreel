@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from lib.custom_provider.endpoint_definition import CURRENT_SCHEMA_VERSION
+from arcreel_market_core.endpoint_definition import CURRENT_SCHEMA_VERSION
 from lib.db import get_async_session
 from lib.db.repositories.custom_provider_repo import CustomProviderRepository
 from server.auth import CurrentUserInfo, get_current_user
@@ -109,7 +109,7 @@ class TestCreate:
         assert body["key"] == f"ce-{body['id']}"
         assert body["display_name"] == "示例端点"
         assert body["kind"] == "declarative"
-        assert body["schema_version"] == "1.1.0"
+        assert body["schema_version"] == "1.2.0"
         assert body["media_type"] == "video"
 
     def test_stores_definition_verbatim(self, endpoints_client: TestClient):

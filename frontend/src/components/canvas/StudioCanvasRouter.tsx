@@ -1,15 +1,16 @@
 import { useCallback, useRef } from "react";
 import { errMsg, voidPromise } from "@/utils/async";
-import { Route, Switch, Redirect } from "wouter";
+import { Route, Switch, Redirect, useSearchParams } from "wouter";
 import {
   WORKSPACE_ROUTE_LOREBOOK,
   WORKSPACE_ROUTE_CLUES,
-  WORKSPACE_ROUTE_SOURCE,
   WORKSPACE_ROUTE_CHARACTERS,
   WORKSPACE_ROUTE_SCENES,
   WORKSPACE_ROUTE_PROPS,
   WORKSPACE_ROUTE_PRODUCTS,
   WORKSPACE_ROUTE_EPISODES,
+  EPISODE_VIEW_EDIT,
+  EPISODE_VIEW_PARAM,
 } from "@/app-routes";
 import { useTranslation } from "react-i18next";
 import { useProjectsStore } from "@/stores/projects-store";
@@ -21,8 +22,7 @@ import { useConfigStatusStore } from "@/stores/config-status-store";
 import { useActiveResourceIds } from "@/stores/tasks-store";
 import { TimelineCanvas } from "./timeline/TimelineCanvas";
 import { OverviewCanvas } from "./OverviewCanvas";
-import { SourceFileViewer } from "./SourceFileViewer";
-import { SourceFilesPage } from "./SourceFilesPage";
+import { EpisodesView } from "./episodes/EpisodesView";
 import { CharactersPage } from "./lorebook/CharactersPage";
 import { ScenesPage } from "./lorebook/ScenesPage";
 import { PropsPage } from "./lorebook/PropsPage";
@@ -30,8 +30,24 @@ import { ProductsPage } from "./lorebook/ProductsPage";
 import { ReferenceVideoCanvas } from "./reference/ReferenceVideoCanvas";
 import { GridImageToVideoCanvas } from "./grid/GridImageToVideoCanvas";
 import { EpisodeSourceReview } from "./EpisodeSourceReview";
+import { EditTimelineView } from "./edit/EditTimelineView";
+import { EditTimelineEmptyState } from "./edit-render/EditTimelineEmptyState";
+import { RenderButton } from "./edit-render/RenderButton";
+import {
+  EPISODE_VIEW_PANEL_ID,
+  EpisodeViewSwitch,
+  episodeViewOf,
+  episodeViewTabId,
+  type EpisodeView,
+} from "./EpisodeViewSwitch";
 import { WorkflowPanel } from "@/components/workflow/WorkflowPanel";
-import { API, NarratedVideoDurationError } from "@/api";
+import { API } from "@/api";
+import { PromptAuthoringHost } from "@/components/canvas/shared/PromptAuthoringDialog";
+import { usePromptAuthoringStore } from "@/stores/prompt-authoring-store";
+import { ScriptPlanHost } from "@/components/canvas/shared/ScriptPlanDialog";
+import { previewAspect } from "@/utils/preview-aspect";
+import { TextTaskFailureNote } from "@/components/canvas/shared/TextTaskFailureNote";
+import { AdScriptHost } from "@/components/canvas/shared/AdScriptDialog";
 import {
   enqueueCharacter,
   enqueueEpisodeNarration,
@@ -53,7 +69,6 @@ import type {
   Scene,
   Prop,
   Product,
-  ReferenceGenerationRequestOptions,
 } from "@/types";
 import type { EpisodeScript } from "@/types/script";
 
@@ -102,6 +117,14 @@ export function StudioCanvasRouter() {
   tRef.current = t;
   const { currentProjectData, currentProjectName, currentScripts, projectDetailLoading } =
     useProjectsStore();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const episodeView = episodeViewOf(searchParams);
+  const setEpisodeView = (view: EpisodeView) =>
+    setSearchParams((params) => {
+      if (view === "edit") params.set(EPISODE_VIEW_PARAM, EPISODE_VIEW_EDIT);
+      else params.delete(EPISODE_VIEW_PARAM);
+      return params;
+    });
   // 演示态：资产画布仍走 readOnly 透传，工作台时间线的只读则由组件自己直读同一判定。
   // useDemoWorkbench() 已把路由参数与 store 的判定滞后收口在单一来源，此处直接消费。
   const demoMode = useDemoWorkbench();
@@ -186,27 +209,20 @@ export function StudioCanvasRouter() {
     [handleUpdatePrompt],
   );
 
-  // ad 分镜重排：把目标分镜向前/向后移动一位，提交整列全排列。
+  // 分镜改序（各形态通用）：把分镜移到 afterId 之后，null 移到最前。
   // 返回是否移动成功，供编辑器把选中态跟随到分镜的新位置。
   const handleMoveShot = useCallback(async (
     shotId: string,
-    direction: "earlier" | "later",
+    afterId: string | null,
     scriptFile?: string,
   ): Promise<boolean> => {
     if (!currentProjectName || !currentScripts) return false;
     const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
     if (!resolvedFile) return false;
-    const script = currentScripts[resolvedFile];
-    if (!script || script.content_mode !== "ad") return false;
-    const ids = script.shots.map((s) => s.shot_id);
-    const index = ids.indexOf(shotId);
-    const target = direction === "earlier" ? index - 1 : index + 1;
-    if (index === -1 || target < 0 || target >= ids.length) return false;
-    [ids[index], ids[target]] = [ids[target], ids[index]];
     try {
-      await API.reorderShots(currentProjectName, resolvedFile, ids);
+      await API.moveScriptItem(currentProjectName, resolvedFile, shotId, afterId);
       // 仅在本地 store 已写回新顺序时报告成功：刷新失败时 segments 仍是旧序，
-      // 此时推进 selectedIndex 会让详情面板静默切到相邻分镜。
+      // 此时让选中态跟随新位置会静默切到别的分镜。
       return await refreshProject();
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("reorder_shot_failed", { message: errMsg(err) }), "error");
@@ -223,8 +239,9 @@ export function StudioCanvasRouter() {
     }
   }, [refreshProject]);
 
+  // afterId 为 null 时追加到末尾（空脚本里即第一条）。
   const handleInsertShot = useCallback(async (
-    afterId: string,
+    afterId: string | null,
     novelText: string | undefined,
     scriptFile?: string,
   ): Promise<boolean> => {
@@ -232,7 +249,7 @@ export function StudioCanvasRouter() {
     const resolvedFile = scriptFile ?? Object.keys(currentScripts)[0];
     if (!resolvedFile) return false;
     try {
-      await API.insertScriptItemAfter(currentProjectName, afterId, resolvedFile, novelText);
+      await API.insertScriptItem(currentProjectName, resolvedFile, { afterId: afterId ?? undefined, novelText });
     } catch (err) {
       useAppStore.getState().pushToast(tRef.current("shot_insert_failed", { message: errMsg(err) }), "error");
       return false;
@@ -283,11 +300,7 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentScripts]);
 
-  const handleGenerateVideo = useCallback(async (
-    segmentId: string,
-    scriptFile?: string,
-    requestOptions?: ReferenceGenerationRequestOptions,
-  ) => {
+  const handleGenerateVideo = useCallback(async (segmentId: string, scriptFile?: string) => {
     if (!currentProjectName || !currentScripts) return;
     const resolved = resolveSegmentPrompt(currentScripts, segmentId, "video_prompt", scriptFile);
     if (!resolved) return;
@@ -298,10 +311,8 @@ export function StudioCanvasRouter() {
         resolved.prompt as string | Record<string, unknown>,
         resolved.resolvedFile,
         resolved.duration,
-        requestOptions,
       );
     } catch (err) {
-      if (err instanceof NarratedVideoDurationError) throw err;
       useAppStore.getState().pushToast(tRef.current("generate_video_failed", { message: errMsg(err) }), "error");
     }
   }, [currentProjectName, currentScripts]);
@@ -340,6 +351,9 @@ export function StudioCanvasRouter() {
     }
   }, [currentProjectName, currentScripts, ensureAudioProviderConfigured]);
 
+  // 后期配音项目不生成旁白配音：收起画布上的生成入口，已有配音照常试听。
+  const narrationGenerationEnabled = currentProjectData?.narration_delivery === "use_tts";
+
   // ---- Workflow panel callbacks ----
   // 面板只陈述状态，动作交回既有入口执行：跳转复用 Agent 定位用的同一条 scrollTarget 缝，
   // 重生复用本组件已有的入队回调。面板不自建播放器，也不自建入队路径。
@@ -366,17 +380,8 @@ export function StudioCanvasRouter() {
           await handleGenerateStoryboard(unitId, scriptFile);
         } else if (stepId === "video") {
           await handleGenerateVideo(unitId, scriptFile);
-        } else if (stepId === "narration_delivery") {
-          await handleGenerateNarration(unitId, scriptFile);
         }
       } catch (err) {
-        // 时长档位确认只在单元卡自己的确认弹窗里发生，面板不复刻这套流程——
-        // 把用户带到那张卡上完成确认，而不是甩出一句没有下文的裸错误。
-        if (err instanceof NarratedVideoDurationError) {
-          useAppStore.getState().pushToast(tRef.current("workflow_regenerate_needs_confirmation"), "error");
-          handleViewWorkflowUnit(unitId);
-          continue;
-        }
         useAppStore.getState().pushToast(tRef.current("generate_video_failed", { message: errMsg(err) }), "error");
       }
     }
@@ -385,8 +390,6 @@ export function StudioCanvasRouter() {
     currentScripts,
     handleGenerateStoryboard,
     handleGenerateVideo,
-    handleGenerateNarration,
-    handleViewWorkflowUnit,
   ]);
 
   // ---- Character CRUD callbacks ----
@@ -632,9 +635,13 @@ export function StudioCanvasRouter() {
         <Redirect to={`/${WORKSPACE_ROUTE_SCENES}`} />
       </Route>
 
-      <Route path={`/${WORKSPACE_ROUTE_SOURCE}`}>
-        {/* 演示项目没有源文件、后端也不存在该项目；侧栏已隐藏该入口，这里再兜底直接输入 URL 的情形 */}
-        {demoMode ? <Redirect to="/" /> : <SourceFilesPage projectName={currentProjectName} />}
+      <Route path={`/${WORKSPACE_ROUTE_EPISODES}`}>
+        {/* 演示项目后端不存在，广告/短片恒单集、不经分集；侧栏已隐藏入口，这里兜底直接输入 URL 的情形 */}
+        {demoMode || currentProjectData?.content_mode === "ad" ? (
+          <Redirect to="/" />
+        ) : (
+          <EpisodesView key={currentProjectName} projectName={currentProjectName} />
+        )}
       </Route>
 
       <Route path={`/${WORKSPACE_ROUTE_CHARACTERS}`}>
@@ -698,19 +705,6 @@ export function StudioCanvasRouter() {
         />
       </Route>
 
-      <Route path={`/${WORKSPACE_ROUTE_SOURCE}/:filename`}>
-        {(params) =>
-          demoMode ? (
-            <Redirect to="/" />
-          ) : (
-            <SourceFileViewer
-              projectName={currentProjectName}
-              filename={decodeURIComponent(params.filename)}
-            />
-          )
-        }
-      </Route>
-
       <Route path={EPISODE_ROUTE_PATH}>
         {(params) => {
           const epNum = parseInt(params.episodeId, 10);
@@ -722,6 +716,8 @@ export function StudioCanvasRouter() {
           // reference_video 的参考图约束按 unit 而非按集生效：每个 unit 落哪个桶、可选哪些档位
           // 由服务端按可用参考图逐单元判定，随单元列表到达（reference-video-store），不从这里下发。
           const durationOptions = capabilities.supportedDurations ?? undefined;
+          // 内容确认页按剧本规划档位选时长：端点固定时 supportedDurations 为空，规划仍有借用档位。
+          const planDurationOptions = capabilities.planningDurations ?? undefined;
           const durationWarningReason = (seconds: number) =>
             durationOutOfRangeReason(seconds, capabilities);
           // 档位空集的两种成因说给用户听的不是同一句：型号没登记时长 vs 这份 workflow 自己定片长。
@@ -736,6 +732,9 @@ export function StudioCanvasRouter() {
           // 演示项目没有源文可切片，缺剧本的分集直接说明「演示只做到第 1 集」
           const showSourceReview =
             Boolean(episode) && !script && !hasDraft && !isAd && !demoMode;
+          // 剪辑视图预览按剪辑时间线拼接的视频，需要本集已有正式脚本；演示态不提供。
+          const canEdit = Boolean(script) && !demoMode;
+          const showEditView = canEdit && episodeView === "edit";
 
           return (
             <div className="flex h-full flex-col">
@@ -754,10 +753,76 @@ export function StudioCanvasRouter() {
                       : (stepId, unitIds) =>
                           void handleWorkflowRegenerate(stepId, unitIds, scriptFile)
                   }
+                  onAuthorPrompts={
+                    script
+                      ? () => usePromptAuthoringStore.getState().open({ projectName: currentProjectName, episode: epNum, scope: "pending" })
+                      : undefined
+                  }
                 />
               )}
-              <div className="min-h-0 flex-1">
-                {demoMode && !script ? (
+              {!demoMode && currentProjectName && (
+                <TextTaskFailureNote
+                  projectName={currentProjectName}
+                  episode={epNum}
+                  isAd={isAd}
+                  hasScript={Boolean(script)}
+                />
+              )}
+              {!demoMode && currentProjectName && (
+                <ScriptPlanHost
+                  projectName={currentProjectName}
+                  episode={epNum}
+                  savedInstructions={episode?.script_plan_instructions}
+                />
+              )}
+              {!demoMode && currentProjectName && isAd && (
+                <AdScriptHost projectName={currentProjectName} episode={epNum} />
+              )}
+              {!demoMode && currentProjectName && (
+                <PromptAuthoringHost
+                  projectName={currentProjectName}
+                  episode={epNum}
+                  script={script}
+                  savedInstructions={episode?.prompt_authoring_instructions}
+                />
+              )}
+              {canEdit && <EpisodeViewSwitch view={episodeView} onChange={setEpisodeView} />}
+              <div
+                className="min-h-0 flex-1"
+                role={canEdit ? "tabpanel" : undefined}
+                id={canEdit ? EPISODE_VIEW_PANEL_ID : undefined}
+                aria-labelledby={canEdit ? episodeViewTabId(episodeView) : undefined}
+              >
+                {showEditView ? (
+                  <EditTimelineView
+                    key={`${currentProjectName}::${epNum}`}
+                    projectName={currentProjectName}
+                    episode={epNum}
+                    script={script}
+                    aspect={previewAspect(currentProjectData)}
+                    ttsNarration={currentProjectData?.narration_delivery === "use_tts"}
+                    renderActions={({ timelineId, timelineName, issues, showIssues }) =>
+                      // 读取完成前不知道有没有阻断级 issue，先不给出片入口。
+                      issues === null ? null : (
+                        <RenderButton
+                          projectName={currentProjectName}
+                          timelineId={timelineId}
+                          timelineName={timelineName}
+                          issues={issues}
+                          narrationAvailable={currentProjectData?.narration_delivery === "use_tts"}
+                          onShowIssues={showIssues}
+                        />
+                      )
+                    }
+                    renderEmptyState={({ reload }) => (
+                      <EditTimelineEmptyState
+                        projectName={currentProjectName}
+                        episode={epNum}
+                        onCreated={reload}
+                      />
+                    )}
+                  />
+                ) : demoMode && !script ? (
                   <DemoEpisodePlaceholder />
                 ) : showSourceReview && episode ? (
                   <EpisodeSourceReview
@@ -781,6 +846,7 @@ export function StudioCanvasRouter() {
                     showPreprocess={!isAd}
                     freeDuration={isAd}
                     videoModelUnresolved={capabilities.videoModelUnresolved}
+                    planDurationOptions={planDurationOptions}
                   />
                 ) : gridStoryboardEnabled(currentProjectData) ? (
                   <GridImageToVideoCanvas
@@ -795,6 +861,7 @@ export function StudioCanvasRouter() {
                     scriptFile={scriptFile ?? undefined}
                     projectData={currentProjectData}
                     durationOptions={durationOptions}
+                    planDurationOptions={planDurationOptions}
                     durationWarningReason={durationWarningReason}
                     durationEndpointFixed={durationEndpointFixed}
                     videoModelUnresolved={capabilities.videoModelUnresolved}
@@ -803,11 +870,14 @@ export function StudioCanvasRouter() {
                     onUpdatePrompt={awaitedUpdatePrompt}
                     onGenerateStoryboard={voidPromise(handleGenerateStoryboard)}
                     onGenerateVideo={handleGenerateVideo}
-                    onGenerateNarration={voidPromise(handleGenerateNarration)}
-                    onGenerateEpisodeNarration={voidPromise(handleGenerateEpisodeNarration)}
+                    onGenerateNarration={narrationGenerationEnabled ? voidPromise(handleGenerateNarration) : undefined}
+                    onGenerateEpisodeNarration={narrationGenerationEnabled ? voidPromise(handleGenerateEpisodeNarration) : undefined}
                     onGenerateGrid={handleGenerateGrid}
                     onRestoreStoryboard={handleRestoreAsset}
                     onRestoreVideo={handleRestoreAsset}
+                    onMoveShot={handleMoveShot}
+                    onInsertShot={handleInsertShot}
+                    onRemoveShot={handleRemoveShot}
                   />
                 ) : (
                   <TimelineCanvas
@@ -826,19 +896,20 @@ export function StudioCanvasRouter() {
                     scriptFile={scriptFile ?? undefined}
                     projectData={currentProjectData}
                     durationOptions={durationOptions}
+                    planDurationOptions={planDurationOptions}
                     durationWarningReason={durationWarningReason}
                     durationEndpointFixed={durationEndpointFixed}
                     videoModelUnresolved={capabilities.videoModelUnresolved}
                     lastFrame={capabilities.lastFrame}
                     capabilitiesLoading={capabilities.loading}
                     onUpdatePrompt={awaitedUpdatePrompt}
-                    onMoveShot={isAd ? handleMoveShot : undefined}
+                    onMoveShot={handleMoveShot}
                     onInsertShot={handleInsertShot}
                     onRemoveShot={handleRemoveShot}
                     onGenerateStoryboard={voidPromise(handleGenerateStoryboard)}
                     onGenerateVideo={handleGenerateVideo}
-                    onGenerateNarration={voidPromise(handleGenerateNarration)}
-                    onGenerateEpisodeNarration={voidPromise(handleGenerateEpisodeNarration)}
+                    onGenerateNarration={narrationGenerationEnabled ? voidPromise(handleGenerateNarration) : undefined}
+                    onGenerateEpisodeNarration={narrationGenerationEnabled ? voidPromise(handleGenerateEpisodeNarration) : undefined}
                     onRestoreStoryboard={handleRestoreAsset}
                     onRestoreVideo={handleRestoreAsset}
                   />

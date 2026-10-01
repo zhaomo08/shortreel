@@ -10,6 +10,12 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "arcreel",
+    "arcreel-market-core",
+]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
@@ -193,6 +199,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "arcreel-market-core" },
     { name = "asyncpg" },
     { name = "beautifulsoup4" },
     { name = "charset-normalizer" },
@@ -203,9 +210,9 @@ dependencies = [
     { name = "google-genai" },
     { name = "grpcio" },
     { name = "httpx" },
+    { name = "imageio-ffmpeg" },
     { name = "instructor" },
     { name = "jinja2" },
-    { name = "jsonpath-rfc9535" },
     { name = "jsonschema" },
     { name = "lxml" },
     { name = "mammoth" },
@@ -255,6 +262,7 @@ mutation = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.18.4" },
+    { name = "arcreel-market-core", editable = "packages/arcreel-market-core" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "charset-normalizer", specifier = ">=3.4.6" },
@@ -265,9 +273,9 @@ requires-dist = [
     { name = "google-genai", specifier = ">=1.65.0" },
     { name = "grpcio", specifier = ">=1.83.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "instructor", specifier = ">=1.14.5" },
     { name = "jinja2", specifier = ">=3.1.6" },
-    { name = "jsonpath-rfc9535", specifier = ">=1.0.0" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "lxml", specifier = ">=6.1.0" },
     { name = "mammoth", specifier = ">=1.12.0" },
@@ -281,7 +289,7 @@ requires-dist = [
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.3.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-core", specifier = ">=2.46.4" },
-    { name = "pyjianyingdraft", specifier = ">=0.2.6,<0.3" },
+    { name = "pyjianyingdraft", specifier = ">=0.3.0" },
     { name = "pyjwt", specifier = ">=2.12.1" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "python-multipart", specifier = ">=0.0.22" },
@@ -310,6 +318,41 @@ dev = [
     { name = "ruff", specifier = ">=0.16.0" },
 ]
 mutation = [{ name = "mutmut", specifier = "==3.7.0" }]
+
+[[package]]
+name = "arcreel-market-core"
+version = "0.1.0"
+source = { editable = "packages/arcreel-market-core" }
+dependencies = [
+    { name = "httpx" },
+    { name = "jsonpath-rfc9535" },
+    { name = "jsonschema" },
+    { name = "packaging" },
+    { name = "pillow" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "respx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonpath-rfc9535", specifier = ">=1.0.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "packaging", specifier = ">=24.0" },
+    { name = "pillow", specifier = ">=12.1.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.2" },
+    { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "respx", specifier = ">=0.22.0" },
+]
 
 [[package]]
 name = "argon2-cffi"
@@ -1380,6 +1423,20 @@ wheels = [
 ]
 
 [[package]]
+name = "imageio-ffmpeg"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/bd/c3343c721f2a1b0c9fc71c1aebf1966a3b7f08c2eea8ed5437a2865611d6/imageio_ffmpeg-0.6.0.tar.gz", hash = "sha256:e2556bed8e005564a9f925bb7afa4002d82770d6b08825078b7697ab88ba1755", size = 25210, upload-time = "2025-01-16T21:34:32.747Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/58/87ef68ac83f4c7690961bce288fd8e382bc5f1513860fc7f90a9c1c1c6bf/imageio_ffmpeg-0.6.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.whl", hash = "sha256:9d2baaf867088508d4a3458e61eeb30e945c4ad8016025545f66c4b5aaef0a61", size = 24932969, upload-time = "2025-01-16T21:34:20.464Z" },
+    { url = "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742", size = 21113891, upload-time = "2025-01-16T21:34:00.277Z" },
+    { url = "https://files.pythonhosted.org/packages/33/e7/1925bfbc563c39c1d2e82501d8372734a5c725e53ac3b31b4c2d081e895b/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:1d47bebd83d2c5fc770720d211855f208af8a596c82d17730aa51e815cdee6dc", size = 25632706, upload-time = "2025-01-16T21:33:53.475Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/2d/43c8522a2038e9d0e7dbdf3a61195ecc31ca576fb1527a528c877e87d973/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl", hash = "sha256:c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282", size = 29498237, upload-time = "2025-01-16T21:34:13.726Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/13/59da54728351883c3c1d9fca1710ab8eee82c7beba585df8f25ca925f08f/imageio_ffmpeg-0.6.0-py3-none-win32.whl", hash = "sha256:196faa79366b4a82f95c0f4053191d2013f4714a715780f0ad2a68ff37483cc2", size = 19652251, upload-time = "2025-01-16T21:34:06.812Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl", hash = "sha256:02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a", size = 31246824, upload-time = "2025-01-16T21:34:28.6Z" },
+]
+
+[[package]]
 name = "import-linter"
 version = "2.15"
 source = { registry = "https://pypi.org/simple" }
@@ -2282,11 +2339,11 @@ wheels = [
 
 [[package]]
 name = "portalocker"
-version = "4.3.2"
+version = "4.4.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ea/7a/6371904c17aba3c455eda47001db923d77ba02a858919424d52f56f1e618/portalocker-4.3.2.tar.gz", hash = "sha256:8de4a1330f55b3c9a1d50ab1b70a765f2f136d6399ae206411117ed98c3b8e2b", size = 302990, upload-time = "2026-09-14T01:01:22.79Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/81/cd/d2a23fc80c26f539ac77e7d61bd5e4af5d0b3a09a78ac4c716eead345129/portalocker-4.4.0.tar.gz", hash = "sha256:90c0df939d4ffba121f8e925bbf98ecea8b9381718666ab871a226938d2b63b2", size = 304906, upload-time = "2026-09-19T16:11:09.114Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/b6/3ed645ea033d5eb16e42481fc2b4719bd3a4e36b818006f34e14cf938dce/portalocker-4.3.2-py3-none-any.whl", hash = "sha256:42f0362e7343af78b25eb095c0cde300e746a0ab6647a835cc30764918490c93", size = 128984, upload-time = "2026-09-14T01:01:21.376Z" },
+    { url = "https://files.pythonhosted.org/packages/52/6c/07fa2775e87b6e241c2aca5cef79f65e450bc115de55f03cda6251f81690/portalocker-4.4.0-py3-none-any.whl", hash = "sha256:a8e99ea29bfb61766ee0b4008cbaf0651e8e050f7a2485ebf54316480e99226e", size = 129647, upload-time = "2026-09-19T16:11:07.377Z" },
 ]
 
 [[package]]
@@ -2573,16 +2630,16 @@ wheels = [
 
 [[package]]
 name = "pyjianyingdraft"
-version = "0.2.7"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "imageio" },
     { name = "pymediainfo" },
     { name = "uiautomation", marker = "sys_platform == 'win32'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/1b/9a18384d6afca9f24e38db75afc4a2648d9c3af0460fbd1bff0e367d71f4/pyjianyingdraft-0.2.7.tar.gz", hash = "sha256:f54571e634fad53b98fd1b6e52a2fd8e124b27c8a3f8f8f8e6c5baf495fbb5db", size = 319897, upload-time = "2026-06-25T15:41:20.486Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/37/b353ce55daafe5dd1882370c48dd2cb8017ea8fff8dc2eca14d4e81f0b12/pyjianyingdraft-0.3.0.tar.gz", hash = "sha256:e0b2b70d98f12d09a61ffcbacff3fa72286712727eee80219d8a4c36be576377", size = 324171, upload-time = "2026-07-08T12:39:59.851Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/03/3bc8655095451e5110af3975263203727de25bbea6f1027c499afae80d9a/pyjianyingdraft-0.2.7-py3-none-any.whl", hash = "sha256:756810bc2a55b601fe421854ba7d4fbd32e283889cdfc5799816b084bb3e649c", size = 328030, upload-time = "2026-06-25T15:41:18.976Z" },
+    { url = "https://files.pythonhosted.org/packages/fd/9e/b486e6e7670df7e1defa9d798d5c4015e7e4992b1bc18bd8e05b00d065b6/pyjianyingdraft-0.3.0-py3-none-any.whl", hash = "sha256:09863de4b0cfbb23fff54b4122ef49eff3527685f7978c6230f0651942954bdc", size = 334935, upload-time = "2026-07-08T12:39:58.12Z" },
 ]
 
 [[package]]
@@ -3392,7 +3449,7 @@ name = "uiautomation"
 version = "2.0.29"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "comtypes" },
+    { name = "comtypes", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/bc/23/8238b5cb73e54c3618ce4d443c1830a2749264a0d61a9b61637096b8dc7a/uiautomation-2.0.29.tar.gz", hash = "sha256:3c169112043ce21065aead1d79c3baebdafc9cf03bd24ded02b2db11d423d88d", size = 203970, upload-time = "2025-08-05T05:14:41.194Z" }
 wheels = [

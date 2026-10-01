@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type {
+  PlaybackStartRequest,
   WorkspaceFocusTarget,
   WorkspaceFocusTargetInput,
   WorkspaceNotification,
@@ -18,6 +19,7 @@ interface FocusedContext {
   id: string;
 }
 
+const PLAYBACK_START_TTL_MS = 8000;
 const ALL_ENTITIES_REVISION_KEY = "__all__";
 
 export const ASSISTANT_PANEL_DEFAULT_WIDTH = 505;
@@ -77,6 +79,9 @@ interface AppState {
   scrollTarget: WorkspaceFocusTarget | null;
   triggerScrollTo: (target: WorkspaceFocusTargetInput) => void;
   clearScrollTarget: (requestId?: string) => void;
+  playbackStart: PlaybackStartRequest | null;
+  requestPlaybackStart: (input: Omit<PlaybackStartRequest, "request_id">) => void;
+  clearPlaybackStart: (requestId?: string) => void;
   assistantToolActivitySuppressed: boolean;
   setAssistantToolActivitySuppressed: (suppressed: boolean) => void;
 
@@ -108,10 +113,6 @@ interface AppState {
   /** 顶栏用量悬浮层的开合；画布侧也从这里打开面板。 */
   usagePanelOpen: boolean;
   setUsagePanelOpen: (open: boolean) => void;
-
-  // Source files invalidation signal
-  sourceFilesVersion: number;
-  invalidateSourceFiles: () => void;
 
   // Grid list invalidation signal (incremented on grid_ready SSE events)
   gridsRevision: number;
@@ -195,6 +196,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return s;
     }),
+  playbackStart: null,
+  requestPlaybackStart: (input) => {
+    const requestId = `${Date.now()}-${Math.random()}`;
+    set({ playbackStart: { ...input, request_id: requestId } });
+    // 单元没有可播放的视频时播放器不会出现，到期后作废，免得日后打开该单元时突然开播。
+    setTimeout(() => get().clearPlaybackStart(requestId), PLAYBACK_START_TTL_MS);
+  },
+  clearPlaybackStart: (requestId) =>
+    set((s) => {
+      if (!requestId || s.playbackStart?.request_id === requestId) {
+        return { playbackStart: null };
+      }
+      return s;
+    }),
   assistantToolActivitySuppressed: false,
   setAssistantToolActivitySuppressed: (suppressed) =>
     set({ assistantToolActivitySuppressed: suppressed }),
@@ -274,9 +289,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   usagePanelOpen: false,
   setUsagePanelOpen: (open) => set({ usagePanelOpen: open }),
-
-  sourceFilesVersion: 0,
-  invalidateSourceFiles: () => set((s) => ({ sourceFilesVersion: s.sourceFilesVersion + 1 })),
 
   gridsRevision: 0,
   invalidateGrids: () => set((s) => ({ gridsRevision: s.gridsRevision + 1 })),
