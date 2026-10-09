@@ -1,0 +1,125 @@
+/* 配色主题 — 四套配色挂在 <html data-theme>，由 stores/theme-store 写入。
+   只覆盖 index.css :root 里的语义 token 取值，不新增类名；:root[data-theme] 的优先级高于 :root，
+   与引入顺序无关。浅色主题同时由 theme-store 摘掉 <html> 的 .dark 类，dark: 变体随之失效。
+   --glow-a/b/c 是页面底色上的三团辉光。 */
+
+/* 暗房 — 深色暖调：安全灯照亮的暖石墨，强调色取放大机分色头的青档 */
+:root[data-theme="darkroom"] {
+    color-scheme: dark;
+    --background: oklch(0.196 0.019 58);
+    --foreground: oklch(0.972 0.006 75);
+    --subtle-foreground: oklch(0.825 0.010 70);
+    --card: oklch(0.222 0.022 62);
+    --popover: oklch(0.245 0.022 62);
+    --primary: oklch(0.80 0.095 208);
+    --primary-foreground: oklch(0.14 0 0);
+    --secondary: oklch(0.288 0.022 60);
+    --muted: oklch(0.288 0.022 60);
+    --muted-foreground: oklch(0.645 0.012 68);
+    --accent: oklch(0.30 0.022 60 / 0.5);
+    --border: oklch(0.48 0.024 60 / 0.35);
+    --input: oklch(0.54 0.028 60 / 0.55);
+    --ring: oklch(0.80 0.095 208);
+    --good: oklch(0.80 0.105 158);
+    --warn: oklch(0.83 0.125 82);
+    --sidebar: oklch(0.170 0.017 46);
+    --scrim: oklch(0.10 0.015 50 / 0.78);
+    --glow-a: oklch(0.50 0.115 62 / 0.42);
+    --glow-b: oklch(0.42 0.105 352 / 0.40);
+    --glow-c: oklch(0.44 0.070 208 / 0.26);
+}
+
+/* 定影 — 深色冷调：定影液的青灰，强调色换到琥珀 */
+:root[data-theme="fixer"] {
+    color-scheme: dark;
+    --background: oklch(0.192 0.017 228);
+    --foreground: oklch(0.972 0.006 230);
+    --subtle-foreground: oklch(0.825 0.012 230);
+    --card: oklch(0.216 0.020 232);
+    --popover: oklch(0.240 0.020 232);
+    --primary: oklch(0.84 0.115 78);
+    --primary-foreground: oklch(0.14 0 0);
+    --secondary: oklch(0.282 0.022 230);
+    --muted: oklch(0.282 0.022 230);
+    --muted-foreground: oklch(0.645 0.014 230);
+    --accent: oklch(0.30 0.022 230 / 0.5);
+    --border: oklch(0.48 0.026 230 / 0.35);
+    --input: oklch(0.54 0.030 230 / 0.55);
+    --ring: oklch(0.84 0.115 78);
+    --sidebar: oklch(0.166 0.015 222);
+    --scrim: oklch(0.10 0.015 228 / 0.78);
+    --glow-a: oklch(0.48 0.090 232 / 0.40);
+    --glow-b: oklch(0.40 0.095 300 / 0.34);
+    --glow-c: oklch(0.46 0.075 78 / 0.22);
+}
+
+/* 相纸 — 浅色暖调：钡地相纸的微黄白，墨色正文 */
+:root[data-theme="baryta"] {
+    color-scheme: light;
+    --background: oklch(0.972 0.010 82);
+    --foreground: oklch(0.245 0.020 62);
+    --subtle-foreground: oklch(0.395 0.020 64);
+    --card: oklch(0.986 0.008 84);
+    --popover: oklch(0.995 0.005 84);
+    --primary: oklch(0.50 0.115 212);
+    --primary-foreground: oklch(0.985 0.004 84);
+    --secondary: oklch(0.918 0.016 78);
+    --muted: oklch(0.918 0.016 78);
+    --muted-foreground: oklch(0.49 0.018 66);
+    --accent: oklch(0.86 0.020 76 / 0.5);
+    --destructive: oklch(0.52 0.19 27);
+    --border: oklch(0.55 0.022 70 / 0.30);
+    --input: oklch(0.44 0.026 70 / 0.46);
+    --ring: oklch(0.50 0.115 212);
+    --good: oklch(0.50 0.115 158);
+    --warn: oklch(0.54 0.125 72);
+    --asset-product: oklch(0.48 0.15 294);
+    --asset-character: oklch(0.48 0.12 240);
+    --asset-scene: oklch(0.46 0.11 165);
+    --asset-prop: oklch(0.48 0.10 85);
+    --sidebar: oklch(0.944 0.014 78);
+    --scrim: oklch(0.25 0.020 62 / 0.45);
+    --glow-a: oklch(0.90 0.065 78 / 0.55);
+    --glow-b: oklch(0.88 0.055 352 / 0.30);
+    --glow-c: oklch(0.88 0.050 212 / 0.34);
+}
+
+/* 银盐 — 浅色冷调：银灰中性底，品红强调 */
+:root[data-theme="silver"] {
+    color-scheme: light;
+    --background: oklch(0.968 0.005 240);
+    --foreground: oklch(0.235 0.014 250);
+    --subtle-foreground: oklch(0.385 0.014 250);
+    --card: oklch(0.986 0.004 240);
+    --popover: oklch(0.995 0.003 240);
+    --primary: oklch(0.50 0.145 352);
+    --primary-foreground: oklch(0.985 0.004 84);
+    --secondary: oklch(0.906 0.010 240);
+    --muted: oklch(0.906 0.010 240);
+    --muted-foreground: oklch(0.48 0.012 250);
+    --accent: oklch(0.85 0.012 242 / 0.5);
+    --destructive: oklch(0.52 0.19 27);
+    --border: oklch(0.54 0.014 245 / 0.30);
+    --input: oklch(0.43 0.018 245 / 0.46);
+    --ring: oklch(0.50 0.145 352);
+    --good: oklch(0.50 0.115 158);
+    --warn: oklch(0.54 0.125 72);
+    --asset-product: oklch(0.48 0.15 294);
+    --asset-character: oklch(0.48 0.12 240);
+    --asset-scene: oklch(0.46 0.11 165);
+    --asset-prop: oklch(0.48 0.10 85);
+    --sidebar: oklch(0.930 0.008 238);
+    --scrim: oklch(0.25 0.010 250 / 0.45);
+    --glow-a: oklch(0.90 0.045 250 / 0.50);
+    --glow-b: oklch(0.88 0.055 352 / 0.26);
+    --glow-c: oklch(0.89 0.045 212 / 0.34);
+}
+
+:root[data-theme] body {
+    background:
+        radial-gradient(1250px 640px at 4% -14%, var(--glow-a), transparent 62%),
+        radial-gradient(900px 520px at 99% 108%, var(--glow-b), transparent 60%),
+        radial-gradient(820px 500px at 86% 4%, var(--glow-c), transparent 62%),
+        linear-gradient(180deg, var(--card), var(--sidebar));
+    background-attachment: fixed;
+}

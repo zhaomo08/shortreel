@@ -94,6 +94,7 @@ export function CreateProjectModal() {
     title: "",
     contentMode: null,
     aspectRatio: "9:16",
+    outputLanguage: "auto",
     generationRoute: null,
     gridStoryboard: false,
   });
@@ -252,6 +253,7 @@ export function CreateProjectModal() {
         title: basics.title.trim(),
         content_mode: contentMode,
         aspect_ratio: basics.aspectRatio,
+        source_language: basics.outputLanguage,
         generation_mode: generationRoute,
         grid_storyboard: basics.gridStoryboard,
         // 口播语速估算未填即不传（服务端不落盘，回退语言默认）

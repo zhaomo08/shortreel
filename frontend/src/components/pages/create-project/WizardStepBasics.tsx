@@ -9,11 +9,20 @@ import { WizardSection } from "./WizardSection";
 
 export type ContentMode = "drama" | "narration" | "ad";
 
+/**
+ * 成片语言。``auto`` 跟随源文——语言事实由概述生成时的识别结果补上；三个语言码锁定语言，
+ * 取值域与后端 ``lib/output_language.py`` 的 SUPPORTED_LANGUAGE_CODES 同一套。
+ */
+export const OUTPUT_LANGUAGES = ["auto", "en", "zh", "vi"] as const;
+export type OutputLanguage = (typeof OUTPUT_LANGUAGES)[number];
+
 export interface WizardBasicsValue {
   title: string;
   /** 创作类型。null = 未选：必选，没有默认值。 */
   contentMode: ContentMode | null;
   aspectRatio: "9:16" | "16:9";
+  /** 成片语言：剧本、口播、字幕与视觉提示词都按它产出，与梗概原文语言无关。 */
+  outputLanguage: OutputLanguage;
   /** 生成模式，创建时锁定。null = 未选：必选，没有默认值。 */
   generationRoute: GenerationRoute | null;
   /** 多宫格分镜装配开关；只对分镜图生视频有意义，广告项目不支持。 */
@@ -53,6 +62,7 @@ export function WizardStepBasics({ value, onChange, titleRef }: WizardStepBasics
   const titleHintId = `${reactId}-title-hint`;
   const contentModeId = `${reactId}-content-mode`;
   const aspectId = `${reactId}-aspect`;
+  const languageId = `${reactId}-language`;
 
   return (
     <div className="flex flex-col gap-6">
@@ -114,6 +124,25 @@ export function WizardStepBasics({ value, onChange, titleRef }: WizardStepBasics
               />
               <span aria-hidden className={cn("rounded-xs border border-muted-foreground", glyph)} />
               <span className="text-sm text-foreground">{t(labelKey)}</span>
+            </label>
+          ))}
+        </div>
+      </WizardSection>
+
+      {/* 成片语言：默认跟随源文；锁定某个语言是为了跨语言场景——中文梗概做英文片 */}
+      <WizardSection title={<span id={languageId}>{t("output_language")}</span>} description={t("output_language_hint")}>
+        <div role="radiogroup" aria-labelledby={languageId} className="flex gap-2.5">
+          {OUTPUT_LANGUAGES.map((lang) => (
+            <label key={lang} className={cn(choiceClass(value.outputLanguage === lang), "items-center px-3 py-2")}>
+              <input
+                type="radio"
+                name={languageId}
+                value={lang}
+                checked={value.outputLanguage === lang}
+                onChange={() => onChange({ ...value, outputLanguage: lang })}
+                className="sr-only"
+              />
+              <span className="text-sm text-foreground">{t(`output_language_${lang}`)}</span>
             </label>
           ))}
         </div>

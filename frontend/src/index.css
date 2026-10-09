@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "./css/themes.css";
 /* Streamdown 的代码块、表格工具条用 Tailwind 类排版，按它的安装说明让 Tailwind 扫描它的产物 */
 @source "../node_modules/streamdown/dist/*.js";
 

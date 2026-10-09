@@ -155,7 +155,8 @@ describe("CreateProjectModal", () => {
   it("has no default content mode or generation route and lists what step 1 still needs", () => {
     render(<CreateProjectModal />);
     for (const radio of screen.getAllByRole("radio")) {
-      if (/竖屏/.test(radio.closest("label")?.textContent ?? "")) continue;
+      // 画面比例与成片语言有默认值（竖屏、跟随源文）
+      if (/竖屏|跟随源文/.test(radio.closest("label")?.textContent ?? "")) continue;
       expect(radio).not.toBeChecked();
     }
     expect(nextButton()).toBeDisabled();
@@ -187,6 +188,7 @@ describe("CreateProjectModal", () => {
         title: "demo",
         content_mode: "narration",
         aspect_ratio: "9:16",
+        source_language: "auto",
         generation_mode: "storyboard",
         grid_storyboard: false,
         style_template_id: "live_premium_drama",

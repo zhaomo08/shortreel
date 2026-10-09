@@ -79,6 +79,13 @@ describe("theme-store", () => {
     expect(DARK_THEMES.has("baryta")).toBe(false);
   });
 
+  it("keeps the dark class in step with the theme", () => {
+    setTheme("baryta");
+    expect(document.documentElement).not.toHaveClass("dark");
+    setTheme("fixer");
+    expect(document.documentElement).toHaveClass("dark");
+  });
+
   it("applies a theme without touching storage", () => {
     applyTheme("fixer");
     expect(document.documentElement.dataset.theme).toBe("fixer");

@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { useId, useSyncExternalStore, type ReactNode } from "react";
 import { Play } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LANGUAGE_DISPLAY_LABELS, SUPPORTED_LANGUAGES, type SupportedLanguage } from "@/i18n";
 import { useOnboardingStore } from "@/stores/onboarding-store";
+import { THEMES, getTheme, isTheme, setTheme, subscribeTheme } from "@/stores/theme-store";
 
 const LANGUAGE_ITEMS = SUPPORTED_LANGUAGES.map((lang) => ({ value: lang, label: LANGUAGE_DISPLAY_LABELS[lang] }));
 
@@ -14,13 +15,16 @@ function isSupportedLanguage(value: unknown): value is SupportedLanguage {
 }
 
 /**
- * 全局设置「通用」：界面语言与重看新手引导。
- * 两项都立即生效：界面语言是本机偏好，不经后端保存，选中后整页文案随即切换，因此这个视图没有保存栏。
+ * 全局设置「通用」：界面语言、配色与重看新手引导。
+ * 各项都立即生效：界面语言是本机偏好，不经后端保存，选中后整页文案随即切换，因此这个视图没有保存栏。
  */
 export function GeneralSection() {
   const { t, i18n } = useTranslation(["dashboard", "onboarding"]);
   const startTour = useOnboardingStore((s) => s.start);
   const languageLabelId = useId();
+  const themeLabelId = useId();
+  const theme = useSyncExternalStore(subscribeTheme, getTheme, getTheme);
+  const themeItems = THEMES.map((value) => ({ value, label: t(`dashboard:theme_${value}`) }));
   const currentLanguage = i18n.language.split("-")[0];
 
   return (
@@ -46,6 +50,32 @@ export function GeneralSection() {
             </SelectTrigger>
             <SelectContent>
               {LANGUAGE_ITEMS.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          label={
+            <span id={themeLabelId} className="text-sm font-medium">
+              {t("dashboard:theme_setting")}
+            </span>
+          }
+        >
+          <Select
+            items={themeItems}
+            value={theme}
+            onValueChange={(value) => {
+              if (isTheme(value)) setTheme(value);
+            }}
+          >
+            <SelectTrigger aria-labelledby={themeLabelId} className="w-44">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {themeItems.map((item) => (
                 <SelectItem key={item.value} value={item.value}>
                   {item.label}
                 </SelectItem>
