@@ -41,7 +41,6 @@ function summary(name: string): EditTimelineSummary {
     updated_at: "",
     updated_by: { kind: "creator", user_id: null },
     update_summary: "",
-    agent_turn: null,
   };
 }
 
@@ -71,9 +70,27 @@ describe("EditTimelineEmptyState", () => {
 
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(result));
     expect(create).toHaveBeenCalledWith("demo", 2, "完整版");
-    expect(useProjectsStore.getState().refreshProject).toHaveBeenCalledWith("demo");
+    expect(useProjectsStore.getState().refreshProject).toHaveBeenCalledWith("demo", undefined);
     expect(useAppStore.getState().assistantPanelOpen).toBe(false);
-    expect(useAppStore.getState().toast?.text).toBe("已新建剪辑时间线「完整版」");
+    // 新建的剪辑时间线随即成为选中的标签，不另弹提示
+    expect(useAppStore.getState().toast).toBeNull();
+  });
+
+  it("新建后项目刷新失败时提示，新时间线照常选中（剪辑视图自行重读时间线）", async () => {
+    vi.mocked(useProjectsStore.getState().refreshProject).mockRestore();
+    vi.spyOn(API, "getProject").mockRejectedValue(new Error("offline"));
+    const result = created("完整版");
+    vi.spyOn(API, "createEditTimeline").mockResolvedValue(result);
+    const onCreated = vi.fn();
+
+    render(<EditTimelineEmptyState projectName="demo" episode={2} onCreated={onCreated} />);
+    await userEvent.click(screen.getByRole("button", { name: "新建剪辑时间线" }));
+
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(result));
+    expect(useAppStore.getState().toast).toMatchObject({
+      text: "操作已完成，但页面数据刷新失败，请手动刷新查看最新状态",
+      tone: "warning",
+    });
   });
 
   it("显示名与「剪辑」行同一规则：集内已有「完整版」时加序号", async () => {

@@ -79,6 +79,7 @@ MESSAGES = {
     "task_fail_provider_unsupported_media": "供应商 {provider_id} 不支持 {media_type} 生成",
     "task_fail_provider_rejected": "供应商拒绝了这次生成请求（HTTP {status}）",
     "task_fail_dispatch_provider_requeue_failed": "任务供应商从 {claimed_provider_id} 变为 {actual_provider_id}，但无法回队重新认领，请重试",
+    "task_fail_project_deleted_during_task": "项目已在任务执行期间删除，本次生成结果未保存",
     "task_fail_restart_lost_image": "图片任务在服务重启时中断且无法接续，请手动重试以避免重复计费",
     "task_fail_restart_lost_audio": "配音任务在服务重启时中断且无法接续，请手动重试以避免重复计费",
     "task_fail_restart_lost_text": "文本任务在服务重启时中断且无法接续，请手动重试以避免重复计费",
@@ -277,7 +278,7 @@ MESSAGES = {
     "source_too_large": "源文件「{filename}」过大（{size_mb} MB > {limit_mb} MB）",
     "source_conflict": "源文件「{existing}」已存在，建议改名为「{suggested}」",
     # Providers
-    "unknown_provider": "未知供应商: {provider_id}",
+    "unknown_provider": "未知供应商: {value}",
     "max_workers_must_be_positive_integer": "{field} 必须是正整数，收到：{value}",
     "credentials_not_found": "凭证不存在",
     "vertex_json_read_failed": "读取上传文件失败",
@@ -371,10 +372,10 @@ MESSAGES = {
         "ComfyUI 协议没有可发现的模型列表：能调用什么由 workflow 自身决定，请改为导入 ComfyUI 端点并挂到模型行上"
     ),
     "custom_endpoint_kind_conflicts_with_attachment": (
-        "这份定义换了容器类型，与该端点当前的挂接不相容：模型 {model_id}（供应商 {provider}）的协议接不了它。请先改动模型行的挂接，再替换定义"
+        "这份定义换了容器类型，与该端点当前的挂接不相容：模型 {model}（供应商 {provider}）的协议接不了它。请先改动模型行的挂接，再替换定义"
     ),
     "custom_endpoint_media_type_conflicts_with_attachment": (
-        "这份定义产出的是{media_type}，与端点当前的媒体类型不同，而模型 {model_id}（供应商 {provider}）还挂着它："
+        "这份定义产出的是{media_type}，与端点当前的媒体类型不同，而模型 {model}（供应商 {provider}）还挂着它："
         "模型行归哪一路由端点决定。请先摘掉挂接，再替换定义"
     ),
     "comfyui_endpoint_requires_comfyui_provider": (
@@ -575,7 +576,10 @@ MESSAGES = {
     "video_capability_missing_i2v": "{provider}/{model} 不支持图生视频；请在设置中为「图生视频」单独指定支持该用途的模型，或更换默认视频模型",
     "video_capability_missing_r2v": "{provider}/{model} 不支持参考生视频；请在设置中为「参考生视频」单独指定支持该用途的模型，或更换默认视频模型",
     "video_capability_reference_unavailable": "配置的视频模型 {provider}/{model} 已不可用（模型被删除、能力已变更或供应商被移除）；请在设置中重新选择视频模型",
+    "video_resolution_not_supported": "模型 {model} 不支持 {resolution} 分辨率（仅支持 {supported}）；请选择支持的分辨率",
+    "video_aspect_ratio_not_supported": "模型 {model} 不支持 {aspect_ratio} 比例（仅支持 {supported}）；请选择支持的比例",
     "video_resolution_duration_unsupported": "模型 {model} 在 {resolution} 分辨率下不支持 {duration}s（仅支持 {supported}）；请调整分辨率或时长",
+    "video_reference_resolution_unsupported": "模型 {model} 使用参考图或尾帧时最高支持 {max_resolution}，当前为 {resolution}；请把分辨率改为 {max_resolution}，或移除参考图与尾帧",
     "video_reference_images_duration_unsupported": "模型 {model} 使用参考图时不支持 {duration}s（仅支持 {supported}）；请把时长改为 {supported}，或移除参考图",
     "video_reference_images_required": "模型 {model} 需要至少一张参考图；请提供参考图",
     "video_reference_images_unreadable": "模型 {model} 有参考图缺失或无法读取，已中止生成：{names}；请检查参考图路径",
@@ -615,11 +619,12 @@ MESSAGES = {
     "version_not_found": "版本 {version} 不存在",
     "version_resource_not_found": "资源 '{resource_type}/{resource_id}' 不存在",
     "version_snapshot_path_unmanaged": "'{resource_type}' 的版本记录指向非托管的快照路径，已拒绝该操作",
-    "session_busy": "会话正在处理中，请等待当前回复完成后再发送",
     "session_capacity_exceeded": "并发会话数已达上限，请稍后再试",
     "session_question_unavailable": "会话未运行或没有待回答的问题",
     "rewrite_anchor_invalid": "要改写的消息不在这个会话里，请刷新后重试",
     "rewrite_blocked_by_question": "请先回答对话中的提问卡片，再改写消息",
+    "rewrite_blocked_by_queued_messages": "请等排队消息进入对话后，再改写消息",
+    "message_accepted_but_unrecorded": "这条消息已开始处理，但没能写入对话记录；为避免重复执行，不会再次发送。请等待 Agent 回复，无需重发",
     "session_already_superseded": "这个会话已被一次消息改写取代，请在新的对话中继续",
     "rewrite_unavailable": "当前部署未开启会话记录存储，无法改写消息",
     "rewrite_interrupt_timeout": "等待当前回复停止超时，请稍后重试",

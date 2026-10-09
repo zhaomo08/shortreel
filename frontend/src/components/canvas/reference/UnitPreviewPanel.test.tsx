@@ -22,8 +22,21 @@ vi.mock("@/components/canvas/timeline/VersionTimeMachine", () => ({
 }));
 
 vi.mock("@/components/shared/PresentationPlayer", () => ({
-  PresentationPlayer: ({ resourceId, startAt }: { resourceId: string; startAt?: { seconds: number } }) => (
-    <div data-testid="presentation-player" data-resource-id={resourceId} data-start-at={startAt?.seconds} />
+  PresentationPlayer: ({
+    resourceId,
+    startAt,
+    posterPath,
+  }: {
+    resourceId: string;
+    startAt?: { seconds: number };
+    posterPath?: string | null;
+  }) => (
+    <div
+      data-testid="presentation-player"
+      data-resource-id={resourceId}
+      data-start-at={startAt?.seconds}
+      data-poster-path={posterPath ?? undefined}
+    />
   ),
 }));
 
@@ -56,7 +69,7 @@ function mkUnit(
 describe("UnitPreviewPanel", () => {
   it("shows placeholder when no unit is selected", () => {
     render(<UnitPreviewPanel unit={null} />);
-    expect(screen.getByText(/Select a unit|选中左侧 Unit/)).toBeInTheDocument();
+    expect(screen.getByText(/Select a unit|选中左侧的视频单元/)).toBeInTheDocument();
   });
 
   it("shows empty-video placeholder when unit has no video_clip", () => {
@@ -74,6 +87,23 @@ describe("UnitPreviewPanel", () => {
     });
     render(<UnitPreviewPanel unit={unit} projectName="proj" />);
     expect(screen.getByTestId("presentation-player")).toHaveAttribute("data-resource-id", "E1U1");
+    expect(screen.getByTestId("presentation-player")).not.toHaveAttribute("data-poster-path");
+  });
+
+  it("uses the extracted thumbnail as the player poster", () => {
+    const unit = mkUnit({
+      generated_assets: {
+        ...mkUnit().generated_assets,
+        status: "completed",
+        video_clip: "reference_videos/E1U1.mp4",
+        video_thumbnail: "reference_videos/thumbnails/E1U1.jpg",
+      },
+    });
+    render(<UnitPreviewPanel unit={unit} projectName="proj" />);
+    expect(screen.getByTestId("presentation-player")).toHaveAttribute(
+      "data-poster-path",
+      "reference_videos/thumbnails/E1U1.jpg",
+    );
   });
 
   it("invokes onUploadVideo with unit id and selected file", () => {
@@ -94,7 +124,7 @@ describe("UnitPreviewPanel", () => {
   });
 
   it("disables upload button while the unit is generating", () => {
-    const { container } = render(
+    render(
       <UnitPreviewPanel
         unit={mkUnit()}
         projectName="proj"
@@ -102,9 +132,7 @@ describe("UnitPreviewPanel", () => {
         onUploadVideo={vi.fn()}
       />,
     );
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
-    const button = input?.nextElementSibling as HTMLButtonElement;
-    expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "上传视频" })).toBeDisabled();
   });
 
   it("keeps retained narration audio visible after the unit loses narration", () => {
@@ -167,8 +195,7 @@ describe("UnitPreviewPanel", () => {
           restoring
         />,
       );
-      const uploadButton = container.querySelector<HTMLInputElement>('input[type="file"]')
-        ?.nextElementSibling as HTMLButtonElement;
+      const uploadButton = screen.getByRole("button", { name: "上传视频" });
       const generateButton = [...container.querySelectorAll("button")].find((b) =>
         b.textContent?.trim(),
       );

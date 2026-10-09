@@ -21,6 +21,7 @@ const SUMMARY: ProjectStatus = {
   repair_reason: null,
   assets: {},
   episodes_summary: { total: 3, scripted: 2, in_production: 1, completed: 1 },
+  source_remaining: false,
 };
 
 const EPISODES: Partial<EpisodeMeta>[] = [
@@ -275,5 +276,22 @@ describe("ProjectStatusBar", () => {
     expect(await screen.findByText("1/3 集")).toBeInTheDocument();
     expect(screen.queryByText("数据升级没有完成")).not.toBeInTheDocument();
     expect(useAppStore.getState().toast?.text).toBe("数据升级已完成，生成功能已恢复。");
+  });
+
+  it("warns instead of reporting success when the refresh after a successful retry fails", async () => {
+    setProject({ ...SUMMARY, needs_repair: true, repair_reason: "step 0014 failed" });
+    vi.spyOn(API, "getWorkflowStatus").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(API, "retryProjectMigration").mockResolvedValue({ success: true });
+    vi.spyOn(API, "getProject").mockRejectedValue(new Error("offline"));
+    const pushToast = vi.spyOn(useAppStore.getState(), "pushToast");
+    renderBar();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "重试" }));
+
+    await vi.waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith("操作已完成，但页面数据刷新失败，请手动刷新查看最新状态", "warning"),
+    );
+    expect(pushToast).not.toHaveBeenCalledWith("数据升级已完成，生成功能已恢复。", "success");
   });
 });

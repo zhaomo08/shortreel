@@ -63,7 +63,7 @@ function renderHighlightedTokens(
       return (
         <span
           key={key}
-          className={`${MENTION_SPAN_CLASS} bg-[color-mix(in_oklab,var(--raise)_6%,transparent)] ${tk.speaker ? palette.textClass : ""}`}
+          className={`${MENTION_SPAN_CLASS} bg-foreground/5 ${tk.speaker ? palette.textClass : ""}`}
           title={tk.speaker || voiceoverLabel}
         >
           {sliceText}
@@ -101,6 +101,21 @@ export interface ReferenceVideoCardProps {
   value: string;
   /** Fires on every edit; parent decides whether to debounce, persist, or queue. */
   onChange: (next: string) => void;
+  beforePreview?: () => Promise<boolean>;
+  dirty?: boolean;
+  saving?: boolean;
+}
+
+/** 提示词预览里的参考图；单独订阅这张图的指纹，地址随重新生成换版本。 */
+function ReferencePreviewImage({ projectName, path, name }: { projectName: string; path: string; name: string }) {
+  const fingerprint = useProjectsStore((s) => s.getAssetFingerprint(path));
+  return (
+    <img
+      src={API.getFileUrl(projectName, path, fingerprint, { width: 160 })}
+      alt={name}
+      className="h-12 w-16 rounded-sm object-contain"
+    />
+  );
 }
 
 export function ReferenceVideoCard({
@@ -109,6 +124,9 @@ export function ReferenceVideoCard({
   episode,
   value,
   onChange,
+  beforePreview,
+  dirty,
+  saving,
 }: ReferenceVideoCardProps) {
   const { t } = useTranslation("dashboard");
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -292,61 +310,54 @@ export function ReferenceVideoCard({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="mb-1 flex items-center justify-between text-[11px] text-gray-500">
-        <span className="font-mono text-gray-400" translate="no">
+    <div className="flex flex-1 flex-col">
+      <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+        <span className="font-mono" translate="no">
           {itemIdWithinEpisode(unit.unit_id)}
         </span>
         <div className="flex items-center gap-2">
           <PromptPreviewButton
             title={t("reference_prompt_preview_title")}
-            notice={t("reference_prompt_preview_notice")}
+            beforeOpen={beforePreview}
+            saveFirst={dirty}
+            disabled={saving}
             load={(signal) => API.previewReferenceUnitPrompt(projectName, episode, unit.unit_id, currentText, { signal })}
             renderExtra={(result) => result.text ? (
               <section aria-label={t("reference_prompt_preview_images")} className="mt-2">
-                <h3 className="mb-2 text-xs text-gray-400">{t("reference_prompt_preview_images")}</h3>
+                <h3 className="mb-2 text-xs text-muted-foreground">{t("reference_prompt_preview_images")}</h3>
                 {result.references.length ? (
                   <ol className="space-y-2">
                     {result.references.map((reference, index) => (
-                      <li key={`${reference.path}-${index}`} className="flex items-center gap-3 text-xs text-gray-300">
-                        <img
-                          src={API.getFileUrl(projectName, reference.path)}
-                          alt={reference.name}
-                          className="h-12 w-16 rounded object-contain"
-                        />
+                      <li key={`${reference.path}-${index}`} className="flex items-center gap-3 text-xs text-subtle-foreground">
+                        <ReferencePreviewImage projectName={projectName} path={reference.path} name={reference.name} />
                         <span>{t("reference_prompt_preview_image", { index: index + 1, name: reference.name })}</span>
                       </li>
                     ))}
                   </ol>
-                ) : <p className="text-xs text-gray-500">{t("reference_prompt_preview_no_images")}</p>}
+                ) : <p className="text-xs text-muted-foreground">{t("reference_prompt_preview_no_images")}</p>}
               </section>
             ) : null}
           />
-          <span className="tabular-nums text-gray-500">
+          <span className="tabular-nums">
             {t("reference_editor_unit_meta", { duration: unit.duration_seconds })}
           </span>
         </div>
       </div>
 
       {unit.pending_authoring === true && (
-        <div
-          role="status"
-          className="mb-2 flex-shrink-0 rounded-lg px-3 py-2 text-[11.5px]"
-          style={{
-            color: "var(--color-text-2)",
-            background: "var(--color-warm-tint-faint)",
-            border: "1px solid var(--color-hairline-soft)",
-          }}
-        >
+        <div role="status" className="mb-2 shrink-0 rounded-lg border border-border/50 bg-warn/5 px-3 py-2 text-xs text-subtle-foreground">
           {t("reference_editor_pending_authoring_hint")}
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1 rounded-md border border-gray-800 bg-gray-950/60">
+      {/* 编辑框随栏高撑开，栏太矮时不低于 12rem，由外层滚动。 */}
+      <div className="relative min-h-48 flex-1 rounded-md border border-input bg-background/60 transition-colors duration-fast focus-within:border-ring">
         <pre
           ref={preRef}
           aria-hidden
-          className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre-wrap break-words p-3 font-mono text-sm leading-6"
+          // 着色镜像层：只显示与输入框同步滚动的那一段，溢出部分由输入框自己滚动到达。
+          data-overflow-ok="与输入框同步滚动的着色镜像层"
+          className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre-wrap break-words p-3 text-sm leading-6"
         >
           {pickerOpen
             ? renderHighlightedTokens(tokens, atStart, setAnchorEl, voiceoverLabel)
@@ -372,7 +383,7 @@ export function ReferenceVideoCard({
           placeholder={t("reference_editor_placeholder")}
           aria-label={t("reference_editor_aria_name")}
           spellCheck={false}
-          className="absolute inset-0 h-full w-full resize-none bg-transparent p-3 font-mono text-sm leading-6 text-transparent caret-gray-200 placeholder:text-gray-600 focus:outline-none"
+          className="absolute inset-0 h-full w-full resize-none bg-transparent p-3 text-sm leading-6 text-transparent caret-foreground placeholder:text-muted-foreground focus:outline-none"
         />
 
         {pickerOpen && anchorEl && (
@@ -394,7 +405,7 @@ export function ReferenceVideoCard({
         )}
       </div>
 
-      <SourceTextReadonly text={unit.source_text} className="mt-3 flex-shrink-0" />
+      <SourceTextReadonly text={unit.source_text} className="mt-3 shrink-0" />
 
       {unknownMentions.length > 0 && (
         <div
@@ -409,7 +420,7 @@ export function ReferenceVideoCard({
             return (
               <span
                 key={name}
-                className={`rounded border px-2 py-0.5 text-[11px] ${palette.textClass} ${palette.bgClass} ${palette.borderClass}`}
+                className={`rounded-sm border px-2 py-0.5 text-xs ${palette.textClass} ${palette.bgClass} ${palette.borderClass}`}
               >
                 {t("reference_editor_unknown_mention", { name })}
               </span>

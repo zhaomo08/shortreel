@@ -96,6 +96,7 @@ atexit.register(_remove_owned_test_home_dir)
 
 import lib.generation.generation_queue as generation_queue_module
 from lib.db.base import Base
+from lib.db.engine import register_sqlite_functions
 from lib.generation.video_request_facts import VideoRequestFacts, VideoRequestFactsFailure
 from server.agent_runtime.session_manager import SessionManager
 from server.agent_runtime.session_store import SessionMetaStore
@@ -153,6 +154,21 @@ def video_request_facts(set_video_request_facts) -> None:
     from tests.factories import make_video_request_facts
 
     set_video_request_facts(make_video_request_facts(route="reference_video", generation_type="i2v"))
+
+
+@pytest.fixture
+def set_error_handler_sessions(monkeypatch: pytest.MonkeyPatch) -> Callable[[async_sessionmaker[AsyncSession]], None]:
+    """让 app 级错误处理器加载显示名目录时用测试给定的会话工厂。
+
+    错误处理器拿不到依赖注入，自开会话（见 ``server.i18n.request_display_names``），
+    ``dependency_overrides[get_async_session]`` 管不到它。
+    """
+    from server import i18n
+
+    def configure(sessions: async_sessionmaker[AsyncSession]) -> None:
+        monkeypatch.setattr(i18n, "async_session_factory", sessions)
+
+    return configure
 
 
 def _discard_pooled_connections_in_forked_child() -> None:
@@ -392,15 +408,16 @@ async def make_test_engine(*, dialect_aware: bool = True, file_path: Path | None
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{file_path}", poolclass=pool.NullPool)
 
-        # 由 SQLAlchemy 的 event.listens_for 注册，模块内无其它引用；basedpyright 把函数作用域内的
-        # 符号一律判为私有，本处的 reportUnusedFunction 是工具误报。
-        @event.listens_for(engine.sync_engine, "connect")
-        def _set_sqlite_pragma(dbapi_conn, _record):  # pyright: ignore[reportUnusedFunction]
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.execute("PRAGMA foreign_keys=OFF")
-            cursor.close()
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, _record):
+        register_sqlite_functions(dbapi_conn)
+        if file_path is None:
+            return
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.close()
 
     async with engine.begin() as conn:
         _register_models()

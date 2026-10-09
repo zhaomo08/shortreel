@@ -2,8 +2,10 @@ import { startTransition, useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "wouter";
 import { API } from "@/api";
+import { useHasUnsavedChanges } from "@/components/shared/edit-unit/LeaveGuard";
 import type { SseStreamHandle } from "@/utils/sse-stream";
 import { useAppStore } from "@/stores/app-store";
+import { useAssistantStore } from "@/stores/assistant-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useCostStore } from "@/stores/cost-store";
 import { SCRIPT_PLAN_TASK_TYPES, useTasksStore } from "@/stores/tasks-store";
@@ -145,7 +147,12 @@ function getPrimaryGroupTarget(
   return primaryChange ? buildNotificationTarget(primaryChange) : null;
 }
 
-function isWorkspaceEditing(): boolean {
+/**
+ * 用户正在编辑时，Agent 改动带来的自动定位与跳转一律不执行：焦点在输入控件里、旧式卡片标了编辑中，
+ * 或有编辑单元带着未保存修改（分镜详情、视频单元正文等不靠焦点判断，切走会触发离开拦截）。
+ */
+function isWorkspaceEditing(hasUnsavedChanges: () => boolean): boolean {
+  if (hasUnsavedChanges()) return true;
   const active = document.activeElement;
   if (active instanceof HTMLElement) {
     const tagName = active.tagName.toLowerCase();
@@ -183,6 +190,8 @@ export function useProjectEventsSSE(projectName?: string | null): void {
     (s) => s.setAssistantToolActivitySuppressed
   );
 
+  const hasUnsavedChanges = useHasUnsavedChanges();
+
   const sourceRef = useRef<SseStreamHandle | null>(null);
   const lastFingerprintRef = useRef<string | null>(null);
   const queuedFocusRef = useRef<WorkspaceNotificationTarget | null>(null);
@@ -207,11 +216,11 @@ export function useProjectEventsSSE(projectName?: string | null): void {
     const target = queuedFocusRef.current;
     if (!target) return;
     queuedFocusRef.current = null;
-    if (isWorkspaceEditing()) {
+    if (isWorkspaceEditing(hasUnsavedChanges)) {
       return;
     }
     executeFocus(target);
-  }, [executeFocus]);
+  }, [executeFocus, hasUnsavedChanges]);
 
   const refreshProject = useCallback(async () => {
     if (!projectName) return;
@@ -281,6 +290,9 @@ export function useProjectEventsSSE(projectName?: string | null): void {
         if (previousFingerprint) {
           void useUsageHeaderStore.getState().refresh();
         }
+        // 会话恢复通知只推一次，订阅建立之前（含首次建连前的失败重试）发出的已经错过；
+        // 首次快照也要核对：会话 hook 的加载读到的状态可能早于这次恢复。
+        useAssistantStore.getState().requestSessionResync(projectName);
       },
       onChanges(payload: ProjectChangeBatchPayload) {
         if (disposed) return;
@@ -357,7 +369,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
               change.entity_type === "draft" &&
               change.action === "created" &&
               typeof change.episode === "number" &&
-              !isWorkspaceEditing()
+              !isWorkspaceEditing(hasUnsavedChanges)
             ) {
               startTransition(() => {
                 setLocation(`/episodes/${change.episode}`);
@@ -380,7 +392,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
                 })
                 .find(Boolean) ?? null;
 
-            queuedFocusRef.current = isWorkspaceEditing() ? null : nextFocusTarget;
+            queuedFocusRef.current = isWorkspaceEditing(hasUnsavedChanges) ? null : nextFocusTarget;
           }
         }
 
@@ -466,6 +478,10 @@ export function useProjectEventsSSE(projectName?: string | null): void {
           useAppStore.getState().invalidateGrids();
         }
       },
+      onAssistantSessionResumed(payload) {
+        if (disposed) return;
+        useAssistantStore.getState().notifySessionResumed(payload.project_name, payload.session_id);
+      },
       onProjectDeleted() {
         if (disposed) return;
         // 项目目录已被删除：后端正常关流，关闭句柄停止自动重建——不对已删项目周期性发起请求。
@@ -486,6 +502,7 @@ export function useProjectEventsSSE(projectName?: string | null): void {
     };
   }, [
     clearWorkspaceNotifications,
+    hasUnsavedChanges,
     invalidateEntities,
     projectName,
     pushNotification,

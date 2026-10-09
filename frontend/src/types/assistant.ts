@@ -36,6 +36,7 @@ export interface ContentBlock {
     | "interrupt_notice"
     | "question_answer"
     | "agent_failure"
+    | "compact_summary"
     | "image";
   text?: string;
   thinking?: string;
@@ -75,6 +76,11 @@ export interface FailureObservation {
   project_name: string | null;
   session_id: string | null;
   summary: {
+    /**
+     * 一句话结论的稳定机器 key，只从结构化证据派生（见 server/agent_runtime/failure_observation.py）。
+     * 早于该字段物化的历史事件没有 key，按阶段的通用 key 显示。
+     */
+    key?: string;
     source: string;
     /** SDK / 上游可新增任意 JSON 形态；前端只呈现，不做枚举推断。 */
     type: unknown;
@@ -116,8 +122,8 @@ export interface TimelineEntry {
   // tool_result / question_answer 条目字段
   tool_use_id?: string | null;
   is_error?: boolean;
-  // 写入点定型的子类型：system 条目为 task_* / interrupt / skill_invocation；
-  // user 条目为 question_answer
+  // 写入点定型的子类型：system 条目为 task_* / interrupt / skill_invocation /
+  // agent_turn_failure / subagent_outcome；user 条目为 question_answer / compact_summary
   subtype?: string;
   task_id?: string | null;
   description?: string;
@@ -131,6 +137,30 @@ export interface TimelineEntry {
   answers?: Record<string, string> | null;
   // agent_turn_failure 系统条目
   failure?: FailureObservation;
+}
+
+/** 排队消息的状态：已交给 Agent、等待被接纳。 */
+export type QueuedMessageState = "queued";
+
+/**
+ * 排队消息：已发出、Agent 尚未接纳进对话的用户消息（服务端内存态，不入事件日志）。
+ * `id` 即被接纳后时间线用户条目的 uuid。
+ */
+export interface QueuedMessage {
+  id: string;
+  content: ContentBlock[];
+  timestamp?: string | null;
+  state: QueuedMessageState;
+}
+
+/** 发送与改写端点的受理响应：排队消息与权威条目二者恰有其一。 */
+export interface AcceptedMessageResponse {
+  status: string;
+  session_id: string;
+  /** 新会话首条消息，或同一 client_key 的重试命中已被接纳的消息。 */
+  entry: TimelineEntry | null;
+  /** 已有会话的消息：等待 Agent 接纳。 */
+  queued_message: QueuedMessage | null;
 }
 
 /** 服务端流式预览态快照（身份为 message_id，不入日志）。 */

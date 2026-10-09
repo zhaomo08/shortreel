@@ -19,7 +19,7 @@ script_plan 就先取回一份草稿、改完走同一条晋升通道写盘。�
 信封形状::
 
     {"kind": ..., "episode": N, "meta": {..., "schema_version": V},
-     "violations": [{"code","label","message", "item_index"?, "item_id"?}, ...], "content": {...}}
+     "violations": [{"code","label","message", "item_index"?, "item_id"?, "params"?}, ...], "content": {...}}
 
 ``violations`` 是上一轮判定的快照，供 Agent 阅读定位与 Web 呈现——晋升时一律按 ``content`` 现值重判，
 不信任草稿里的这份记录。``meta`` 存重判所需、又无法从项目状态重新导出的上下文：script_plan 的源文
@@ -49,6 +49,7 @@ from lib.episode.episode_paths import (
 )
 from lib.infra.content_digest import prefixed_canonical_json_digest
 from lib.infra.json_io import atomic_write_json, load_json_or_none
+from lib.project.project_activity import record_project_activity
 from lib.script.draft_violation import DraftViolation, render_violation_report
 
 #: 草稿的产出来源。``content`` 与该来源那一步的模型输出 schema 同形：参考生视频 script_plan 是
@@ -252,6 +253,8 @@ def violation_entries(violations: list[DraftViolation]) -> list[dict[str, Any]]:
             entry["item_index"] = violation.item_index
         if violation.item_id is not None:
             entry["item_id"] = violation.item_id
+        if violation.params is not None:
+            entry["params"] = violation.params
         entries.append(entry)
     return entries
 
@@ -282,6 +285,7 @@ def write_quarantine(
             meta=meta,
         ),
     )
+    record_project_activity(project_path)
     return path
 
 
@@ -330,9 +334,19 @@ def quarantine_exists(project_path: Path, episode: int, kind: str) -> bool:
     return quarantine_path(project_path, episode, kind).exists()
 
 
-def clear_quarantine(project_path: Path, episode: int, kind: str) -> None:
-    """晋升成功后清除草稿。缺失时静默——晋升可能来自一次直接重跑，本就没有草稿要清。"""
-    quarantine_path(project_path, episode, kind).unlink(missing_ok=True)
+def clear_quarantine(project_path: Path, episode: int, kind: str, *, record_activity: bool = True) -> bool:
+    """清除草稿（晋升成功或用户丢弃），返回是否真的删掉了文件；删掉时推进项目活动。
+
+    缺失时静默——晋升可能来自一次直接重跑，本就没有草稿要清。在外层写事务内清除时传
+    ``record_activity=False``，由外层提交后记账：账本是项目全局的，不随事务回滚。
+    """
+    try:
+        quarantine_path(project_path, episode, kind).unlink()
+    except FileNotFoundError:
+        return False
+    if record_activity:
+        record_project_activity(project_path)
+    return True
 
 
 def render_report(draft: Path, kind: str, violations: list[DraftViolation], *, episode: int) -> str:

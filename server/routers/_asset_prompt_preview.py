@@ -8,12 +8,13 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from lib.i18n import render_generation_input_error
+from lib.i18n import render_generation_input_error, render_message
+from lib.i18n.display_names import DisplayNames
 from lib.infra.api_errors import NotFoundError
 from lib.project.asset_derivatives import resolve_derivative_target
 from lib.project.asset_types import AssetSpec, resolve_asset_key
 from lib.project.project_manager import ProjectManager
-from server.i18n import Translator
+from server.i18n import DisplayNamesCatalog, Translator
 from server.services.admission.asset_prompt_preview import render_asset_prompt
 from server.services.admission.prompt_preview import UNAVAILABLE_MISSING, RenderedPrompt
 
@@ -33,6 +34,7 @@ def register_asset_prompt_preview_routes(
         entry_name: str,
         req: AssetPromptPreviewRequest,
         translate: Translator,
+        names: DisplayNames,
         derivative_name: str | None = None,
     ):
         def load() -> tuple[dict[str, Any], Path, str, str | None] | None:
@@ -72,33 +74,32 @@ def register_asset_prompt_preview_routes(
                 (
                     translate("asset_prompt_preview_missing")
                     if result.unavailable == UNAVAILABLE_MISSING
-                    else render_generation_input_error(result.unavailable, result.unavailable_params, translate)
+                    else render_generation_input_error(result.unavailable, result.unavailable_params, translate, names)
                 )
                 if result.unavailable
                 else None
             ),
             "is_text_form": result.is_text_form,
-            "warnings": [translate(w["key"], **w["params"]) for w in result.warnings],
+            "warnings": [render_message(w["key"], w["params"], translate, names) for w in result.warnings],
         }
 
     base = f"/projects/{{project_name}}/{spec.subdir}/{{entry_name}}"
 
-    # 以下处理器由 @router.* 就地注册，模块内无其它引用；basedpyright 把函数作用域内的符号
-    # 一律判为私有，逐个标注的 reportUnusedFunction 均为工具误报。
     @router.post(f"{base}/prompt-preview")
-    async def preview_asset(  # pyright: ignore[reportUnusedFunction]
-        project_name: str, entry_name: str, req: AssetPromptPreviewRequest, _t: Translator
+    async def preview_asset(
+        project_name: str, entry_name: str, req: AssetPromptPreviewRequest, _t: Translator, names: DisplayNamesCatalog
     ):
-        return await preview(project_name, entry_name, req, _t)
+        return await preview(project_name, entry_name, req, _t, names)
 
     if spec.supports_derivatives:
 
         @router.post(f"{base}/derivatives/{{derivative_name}}/prompt-preview")
-        async def preview_derivative(  # pyright: ignore[reportUnusedFunction]
+        async def preview_derivative(
             project_name: str,
             entry_name: str,
             derivative_name: str,
             req: AssetPromptPreviewRequest,
             _t: Translator,
+            names: DisplayNamesCatalog,
         ):
-            return await preview(project_name, entry_name, req, _t, derivative_name)
+            return await preview(project_name, entry_name, req, _t, names, derivative_name)

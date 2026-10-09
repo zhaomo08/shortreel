@@ -1,5 +1,6 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import i18n from "@/i18n";
 import { useAppStore } from "@/stores/app-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { StreamMarkdown } from "./StreamMarkdown";
@@ -51,6 +52,8 @@ function clickableElements(root: HTMLElement): string[] {
 
 async function renderLoaded(content: string) {
   const view = render(<StreamMarkdown content={content} />);
+  // 等实际按需模块加载完成，再断言 Markdown 结构，不把加载耗时计入查询超时。
+  await act(async () => { await import("streamdown"); });
   await waitFor(() => {
     expect(view.container.querySelector(".markdown-body")).not.toBeNull();
   });
@@ -97,12 +100,54 @@ const PAYLOADS: Record<string, string> = {
   "行内 HTML 链接": 'text <a href="javascript:window.__marker=1">x</a> text',
   "行内 HTML 事件属性": 'text <b onclick="window.__marker=1">x</b> text',
   "行内 HTML 实体编码协议": 'text <a href="&#106;avascript:window.__marker=1">x</a>',
+  "应用链接 javascript 协议": '<app-link href="javascript:window.__marker=1" onclick="window.__marker=1">x</app-link>',
+  "应用链接实体编码协议": '<app-link href="&#106;avascript:window.__marker=1">x</app-link>',
   "autolink javascript": "<javascript:window.__marker=1>",
   "裸 URL autolink": "见 javascript:window.__marker=1 与后文",
   "autolink data": "<data:text/html,window.__marker=1>",
   "form formaction": '<form><button formaction="javascript:window.__marker=1">x</button></form>',
   "style 标签": "<style>body{background:url(javascript:window.__marker=1)}</style>",
 };
+
+describe("StreamMarkdown 横向滚动区", () => {
+  it("代码块与表格可用键盘聚焦，并带有区域名称", async () => {
+    await renderLoaded("```ts\nconst answer = 42;\n```\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n");
+
+    const code = await screen.findByRole("region", { name: "代码块" });
+    expect(code).toHaveAttribute("tabindex", "0");
+    expect(code.querySelector("pre")).not.toBeNull();
+    expect(screen.getByRole("table", { name: "表格" })).toHaveAttribute("tabindex", "0");
+  });
+
+  it("切换界面语言后，已渲染的代码块与表格换成新语言的名称", async () => {
+    await renderLoaded("```ts\nconst answer = 42;\n```\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n");
+    expect(await screen.findByRole("region", { name: "代码块" })).toBeInTheDocument();
+
+    try {
+      await act(async () => {
+        await i18n.changeLanguage("en");
+      });
+      expect(await screen.findByRole("region", { name: "Code block" })).toHaveTextContent("const answer = 42;");
+      expect(screen.getByRole("table", { name: "Table" })).toBeInTheDocument();
+    } finally {
+      await act(async () => {
+        await i18n.changeLanguage("zh");
+      });
+    }
+  });
+});
+
+describe("StreamMarkdown 工具条", () => {
+  it("代码块与表格工具条按钮的名称跟随界面语言", async () => {
+    await renderLoaded("```ts\nconst answer = 42;\n```\n\n| 列 A | 列 B |\n| --- | --- |\n| 1 | 2 |\n");
+
+    expect(await screen.findByRole("button", { name: "复制代码" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载文件" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制表格" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "下载表格" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /copy|download/i })).not.toBeInTheDocument();
+  });
+});
 
 describe("StreamMarkdown 渲染惰性", () => {
   it.each(Object.entries(PAYLOADS))("%s 渲染为惰性内容", async (_name, payload) => {
@@ -120,7 +165,7 @@ describe("StreamMarkdown 渲染惰性", () => {
       expect(collectActiveContent(container), `cut=${cut} 前段`).toEqual([]);
       // 前段中不完整链接渲染为占位链接按钮，点击后既不打开确认框也不打开窗口。
       for (const el of container.querySelectorAll('a, button, [data-streamdown="link"]')) fireEvent.click(el);
-      expect(screen.queryByRole("button", { name: "Open link" }), `cut=${cut} 前段确认框`).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "打开链接" }), `cut=${cut} 前段确认框`).not.toBeInTheDocument();
       expect(open, `cut=${cut} 前段打开窗口`).not.toHaveBeenCalled();
       rerender(<StreamMarkdown content={payload} />);
       expect(collectActiveContent(container), `cut=${cut} 全文`).toEqual([]);
@@ -143,7 +188,7 @@ describe("StreamMarkdown 渲染惰性", () => {
     const { container } = await renderLoaded("[站点](https://example.com/a)");
     fireEvent.click(container.querySelector('[data-streamdown="link"]')!);
     expect(open).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole("button", { name: "Open link" }));
+    fireEvent.click(await screen.findByRole("button", { name: "打开链接" }));
     expect(open).toHaveBeenCalledWith("https://example.com/a", "_blank", "noreferrer");
   });
 });
@@ -166,7 +211,7 @@ describe("StreamMarkdown 应用内链接", () => {
     fireEvent.click(link!);
     expect(window.location.pathname + window.location.search).toBe(href);
     expect(open).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Open link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开链接" })).not.toBeInTheDocument();
   });
 
   it("不以斜杠开头的站内写法，链接地址规范成从站点根开始，新开标签页也落到同一处", async () => {

@@ -64,8 +64,7 @@ class TestListProviders:
                     media_types=["video", "image"],
                     capabilities=["text_to_video", "image_to_video"],
                     required_keys=["api_key"],
-                    configured_keys=["api_key"],
-                    missing_keys=[],
+                    credential_count=1,
                 ),
                 ProviderStatus(
                     name="ark",
@@ -75,8 +74,7 @@ class TestListProviders:
                     media_types=["video", "image"],
                     capabilities=["text_to_video"],
                     required_keys=["api_key"],
-                    configured_keys=[],
-                    missing_keys=["api_key"],
+                    credential_count=0,
                 ),
             ]
         )
@@ -107,7 +105,6 @@ class TestListProviders:
         assert first["display_name"] == "AI Studio"
         assert first["status"] == "ready"
         assert "video" in first["media_types"]
-        assert first["missing_keys"] == []
 
     def test_provider_without_translation_keeps_source_name(self):
         svc = MagicMock(spec=ConfigService)
@@ -121,8 +118,7 @@ class TestListProviders:
                     media_types=[],
                     capabilities=[],
                     required_keys=[],
-                    configured_keys=[],
-                    missing_keys=[],
+                    credential_count=0,
                 )
             ]
         )
@@ -137,7 +133,6 @@ class TestListProviders:
             resp = client.get("/api/v1/providers")
         second = resp.json()["providers"][1]
         assert second["status"] == "unconfigured"
-        assert "api_key" in second["missing_keys"]
 
     def _mock_svc_with_models(self) -> ConfigService:
         """构造带 models 字段的 ProviderStatus，用于校验 ModelInfoResponse 透传。"""
@@ -152,8 +147,7 @@ class TestListProviders:
                     media_types=["video", "image"],
                     capabilities=["text_to_video", "image_to_video"],
                     required_keys=["api_key"],
-                    configured_keys=["api_key"],
-                    missing_keys=[],
+                    credential_count=1,
                     models={
                         "veo-3.1-fast-generate-preview": {
                             "display_name": "Veo 3.1 Fast",
@@ -237,8 +231,7 @@ class TestListProviders:
                     media_types=["video"],
                     capabilities=["text_to_video"],
                     required_keys=["api_key"],
-                    configured_keys=["api_key"],
-                    missing_keys=[],
+                    credential_count=1,
                     models={
                         "kling-v3": {
                             "display_name": "可灵 v3",
@@ -304,8 +297,7 @@ class TestListProviders:
                     media_types=["video"],
                     capabilities=["text_to_video"],
                     required_keys=["api_key"],
-                    configured_keys=["api_key"],
-                    missing_keys=[],
+                    credential_count=1,
                     models={
                         "doubao-seedance-2-0-260128": {
                             "display_name": "Seedance 2.0",
@@ -832,6 +824,21 @@ class TestTestProviderConnection:
         body = resp.json()
         assert body["success"] is False
         assert "API key invalid" in body["message"]
+
+    def test_unsupported_check_survives_a_failing_display_name_catalog(self):
+        """没有连通性检查的供应商走 connectivity_check_unsupported；目录查询失败时仍如实回执。"""
+        app, session = _make_session_app()
+        session.execute.side_effect = RuntimeError("catalog unavailable")
+        with (
+            patch("server.routers.providers.CredentialRepository", return_value=self._mock_cred_repo_configured()),
+            patch("server.routers.providers.ConfigService", return_value=self._mock_svc()),
+            patch.dict(providers._CONNECTIVITY_CHECK_DISPATCH, clear=True),
+            TestClient(app) as client,
+        ):
+            resp = client.post("/api/v1/providers/gemini-aistudio/test")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is False
+        session.rollback.assert_awaited_once()
 
     def test_dashscope_registered_in_dispatch(self):
         # dashscope 作为内置 provider 暴露在设置页，连接测试必须有 dispatcher，

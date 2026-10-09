@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -15,6 +17,7 @@ from lib.edit_timeline import EditTimelineError, EditTimelineService, RevisionAu
 from lib.edit_timeline.operations import TimelineOperationAdapter
 from lib.final_cut.basis import FinalCutVariant, final_cut_artifact_path, final_cut_key
 from lib.jianying_draft.basis import jianying_draft_artifact_path, jianying_draft_key
+from lib.project.project_activity import ACTIVITY_FILENAME, recorded_project_activity
 from lib.project.project_manager import ProjectManager
 
 pytestmark = pytest.mark.usefixtures("three_clips")
@@ -56,7 +59,7 @@ async def test_copy_of_a_given_revision_matches_the_source_content(service: Edit
     await _edit(service, source_id, 2, {"op": "delete", "clip": "c3"})
     before = await service.read("demo", source_id, revision=2)
 
-    copied = await service.copy("demo", source_id, name="快节奏版", revision=2, author=AGENT, agent_turn="user-3")
+    copied = await service.copy("demo", source_id, name="快节奏版", revision=2, author=AGENT)
 
     assert copied.timeline.id != source_id
     assert (copied.timeline.name, copied.timeline.episode, copied.revision, copied.latest_revision) == (
@@ -70,7 +73,7 @@ async def test_copy_of_a_given_revision_matches_the_source_content(service: Edit
     assert [clip.source_volume for clip in copied.clips] == [1.0, 0.6, 1.0]
     history = await service.list_revisions("demo", copied.timeline.id)
     [only] = history.revisions
-    assert (only.author, only.agent_turn, only.parent) == (AGENT, "user-3", None)
+    assert (only.author, only.parent) == (AGENT, None)
     assert "初剪" in only.summary
     assert "修订 2" in only.summary
     # 源时间线不受影响。
@@ -153,7 +156,6 @@ async def test_revision_history_lists_authors_summaries_and_changed_clips(servic
         summary="压低 c2 原声",
         operations=_ops({"op": "set_volume", "clip": "c2", "volume": 0.5}),
         author=AGENT,
-        agent_turn="user-9",
     )
 
     history = await service.list_revisions("demo", timeline_id)
@@ -167,13 +169,7 @@ async def test_revision_history_lists_authors_summaries_and_changed_clips(servic
         3,
         None,
     )
-    assert (second.number, second.parent, second.author, second.summary, second.agent_turn) == (
-        2,
-        1,
-        AGENT,
-        "压低 c2 原声",
-        "user-9",
-    )
+    assert (second.number, second.parent, second.author, second.summary) == (2, 1, AGENT, "压低 c2 原声")
     assert second.changed_clip_ids == ("c2",)
 
 
@@ -183,7 +179,7 @@ async def test_restore_appends_a_revision_with_the_target_content(service: EditT
     await _edit(service, timeline_id, 2, {"op": "delete", "clip": "c3"}, {"op": "move", "clip": "c2", "after": None})
     original = await service.read("demo", timeline_id, revision=1)
 
-    result = await service.restore("demo", timeline_id, revision=1, author=CREATOR, agent_turn=None)
+    result = await service.restore("demo", timeline_id, revision=1, author=CREATOR)
 
     assert (result.revision, result.base_revision) == (4, 3)
     assert result.deleted_clip_ids == ()
@@ -322,3 +318,34 @@ async def test_deleted_ids_are_not_reused_by_new_timelines(service: EditTimeline
     second = await _create(service)
 
     assert second != first
+
+
+_STALE_ACTIVITY = datetime(2026, 3, 1, 8, 0, tzinfo=UTC)
+
+_TIMELINE_WRITES: dict[str, Callable[[EditTimelineService, str], Awaitable[object]]] = {
+    "create": lambda service, _timeline_id: _create(service, name="新版"),
+    "edit": lambda service, timeline_id: _edit(service, timeline_id, 2, {"op": "delete", "clip": "c3"}),
+    "copy": lambda service, timeline_id: service.copy("demo", timeline_id, name="副本", author=CREATOR),
+    "rename": lambda service, timeline_id: service.rename("demo", timeline_id, name="改名"),
+    "restore": lambda service, timeline_id: service.restore("demo", timeline_id, revision=1, author=CREATOR),
+    "delete": lambda service, timeline_id: service.delete("demo", timeline_id),
+}
+
+
+@pytest.mark.parametrize("write", _TIMELINE_WRITES.values(), ids=_TIMELINE_WRITES.keys())
+async def test_every_timeline_write_moves_project_activity_forward(
+    service: EditTimelineService,
+    pm: ProjectManager,
+    write: Callable[[EditTimelineService, str], Awaitable[object]],
+) -> None:
+    # 剪辑时间线是 JSON，修改时间不计入活动；删除后文件也不在了，只能靠写入出口记账。
+    timeline_id = await _create(service)
+    await _edit(service, timeline_id, 1, {"op": "set_volume", "clip": "c2", "volume": 0.6})
+    project_path = pm.get_project_path("demo")
+    (project_path / ACTIVITY_FILENAME).write_text(_STALE_ACTIVITY.isoformat(), encoding="utf-8")
+
+    await write(service, timeline_id)
+
+    recorded = recorded_project_activity(project_path)
+    assert recorded is not None
+    assert recorded > _STALE_ACTIVITY

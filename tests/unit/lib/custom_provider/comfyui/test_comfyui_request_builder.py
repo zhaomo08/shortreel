@@ -15,7 +15,7 @@ from lib.custom_provider.comfyui.request_builder import (
     workflow_sha256,
 )
 from lib.generation.task_failure import FAILURE_CODE_KEYS, encode_failure, render_failure
-from tests.factories import comfyui_endpoint_definition, make_translator
+from tests.factories import comfyui_endpoint_definition, make_display_names, make_translator
 
 
 def _build(definition: dict[str, Any], **kwargs: Any):
@@ -366,6 +366,20 @@ class TestImageDrop:
         assert _inputs(built, "30")["start_image"] == ["20", 0]
         assert "21" in built.dropped_nodes
 
+    def test_surplus_autogrow_reference_slots_lose_their_keys(self):
+        """海螺 H3 参考图少于槽位：多余的 ``ref_images.ref_image_N`` 键摘掉，节点本身留下。"""
+        definition = _autogrow_reference_definition(slots=3)
+
+        built = _build(definition, media=MediaInputs(reference_images=("a.png",)))
+
+        assert _inputs(built, "50")["ref_images.ref_image_0"] == ["40", 0]
+        assert "ref_images.ref_image_1" not in _inputs(built, "50")
+        assert "ref_images.ref_image_2" not in _inputs(built, "50")
+        assert "41" not in built.workflow
+        assert "42" not in built.workflow
+        assert built.workflow["50"]["class_type"] == "MiniMaxH3ReferenceToVideo"
+        assert _dangling_links(built.workflow) == []
+
     def test_a_pairwise_merge_node_is_bypassed_and_its_consumer_rewired(self):
         definition = _reference_definition()
 
@@ -513,7 +527,7 @@ class TestFailureCodeRegistration:
         reason = encode_failure(IMAGE_DROP_UNSUPPORTED, node="30")
 
         for locale in ("zh", "en", "vi"):
-            rendered = render_failure(reason, make_translator(locale))
+            rendered = render_failure(reason, make_translator(locale), make_display_names(locale))
             assert "30" in rendered
             assert IMAGE_DROP_UNSUPPORTED not in rendered
 
@@ -568,6 +582,33 @@ def _reference_definition() -> dict[str, Any]:
             "consumer": {"node": "22", "input": "image2", "class_type": "ImageBatch"},
         },
     ]
+    return definition
+
+
+def _autogrow_reference_definition(*, slots: int) -> dict[str, Any]:
+    """若干参考图格子直连海螺 H3 参考生视频节点的 autogrow 口 ``ref_images.ref_image_N``。"""
+    definition = comfyui_endpoint_definition()
+    h3_inputs: dict[str, Any] = {"prompt": "一只猫"}
+    targets = []
+    for slot in range(slots):
+        loader = str(40 + slot)
+        definition["workflow"][loader] = {"class_type": "LoadImage", "inputs": {"image": f"ref_{slot}.png"}}
+        h3_inputs[f"ref_images.ref_image_{slot}"] = [loader, 0]
+        targets.append(
+            {
+                "node": loader,
+                "input": "image",
+                "class_type": "LoadImage",
+                "consumer": {
+                    "node": "50",
+                    "input": f"ref_images.ref_image_{slot}",
+                    "class_type": "MiniMaxH3ReferenceToVideo",
+                },
+            }
+        )
+    definition["workflow"]["50"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": h3_inputs}
+    definition["workflow"]["3"]["inputs"]["latent_image"] = ["50", 0]
+    definition["bindings"]["reference_images"] = targets
     return definition
 
 

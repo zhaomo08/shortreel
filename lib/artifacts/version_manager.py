@@ -25,6 +25,7 @@ from lib.infra.json_io import atomic_write_bytes, atomic_write_json
 from lib.infra.path_safety import PathTraversalError, safe_join
 from lib.infra.schema_guards import is_bool
 from lib.project.asset_types import resolve_asset_key
+from lib.project.project_activity import record_project_activity
 from lib.project.resource_paths import RESOURCE_TYPES as _RESOURCE_TYPES
 from lib.project.resource_paths import (
     resource_extension,
@@ -32,6 +33,7 @@ from lib.project.resource_paths import (
     version_snapshot_dir,
     version_snapshot_relative_path,
 )
+from lib.project.task_project_claim import ensure_task_project_claim
 
 _LOCKS_GUARD = threading.Lock()
 _LOCKS_BY_VERSIONS_FILE: dict[str, threading.RLock] = {}
@@ -156,8 +158,10 @@ class VersionManager:
         """确保版本目录结构存在。
 
         由写路径按需调用，不在 ``__init__`` 里建：只读用法（含改名的 ``dry_run`` 预演）
-        构造本类时不应在项目下留下空的 ``versions/`` 目录树。
+        构造本类时不应在项目下留下空的 ``versions/`` 目录树。项目已在执行中的任务期间删除时，
+        写路径在这里以 ``ProjectDeletedDuringTaskError`` 中止，不写进同名的新项目。
         """
+        ensure_task_project_claim(self.project_path.name)
         self.versions_dir.mkdir(parents=True, exist_ok=True)
         for resource_type in self.RESOURCE_TYPES:
             # 快照桶目录取自路径真相源：多段 id 的类型（角色衍生）落在嵌套子目录下。
@@ -353,6 +357,7 @@ class VersionManager:
             resource_data["current_version"] = new_version
 
             self._save_versions(data)
+            record_project_activity(self.project_path)
             return new_version
 
     def commit_staged_version(
@@ -410,6 +415,7 @@ class VersionManager:
                 if on_commit is not None:
                     on_commit()
                 activation_succeeded = True
+                record_project_activity(self.project_path)
                 return new_version
             except BaseException as failure:
                 rollback_errors: list[OSError] = []
@@ -559,6 +565,7 @@ class VersionManager:
                 self._save_versions(data)
                 if on_commit is not None:
                     on_commit()
+                record_project_activity(self.project_path)
                 return result
             except BaseException as failure:
                 rollback_errors: list[OSError] = []
@@ -689,6 +696,7 @@ class VersionManager:
                 if on_commit is not None:
                     on_commit()
                 activation_succeeded = True
+                record_project_activity(self.project_path)
                 return result
             except BaseException as failure:
                 rollback_errors: list[OSError] = []
@@ -834,6 +842,8 @@ class VersionManager:
                     ) from history_rollback_errors[0]
                 raise
 
+            # 付费历史已持久化；即使随后选中失败，历史内容仍然新增。
+            record_project_activity(self.project_path)
             try:
                 should_select = (
                     False
@@ -900,6 +910,7 @@ class VersionManager:
         restore_version: int | None = None,
         current_file: Path,
         on_reject: Callable[[], None] | None = None,
+        record_activity: bool = True,
     ) -> bool:
         """Keep a rejected paid result in history while restoring its prior selection.
 
@@ -912,6 +923,9 @@ class VersionManager:
         ``on_reject`` extends the rollback boundary to a final synchronous
         registration update. If it raises, media and the version pointer return
         to the rejected result.
+
+        ``record_activity=False`` leaves the activity stamp to an enclosing
+        batch, which records once after the whole batch commits.
 
         """
 
@@ -996,6 +1010,8 @@ class VersionManager:
                 if on_reject is not None:
                     on_reject()
                 rejection_succeeded = True
+                if record_activity:
+                    record_project_activity(self.project_path)
                 return True
             except BaseException as failure:
                 rollback_errors: list[OSError] = []
@@ -1042,6 +1058,7 @@ class VersionManager:
             )
             if not current:
                 return current
+            # 账本是项目全局的，不进回滚集合：逐条拒绝不记账，整批提交后记一次
             with formal_write_transaction(
                 self.versions_file,
                 *(Path(rejections[identity][1]) for identity in current),
@@ -1053,10 +1070,12 @@ class VersionManager:
                         resource_id,
                         rejected_version=version,
                         current_file=current_file,
+                        record_activity=False,
                     ):
                         raise RuntimeError("version selection changed during batch rejection")
                 if on_reject is not None:
                     on_reject(current)
+            record_project_activity(self.project_path)
             return current
 
     def rename_resource(self, resource_type: str, old_id: str, new_id: str, *, dry_run: bool = False) -> int:
@@ -1120,6 +1139,7 @@ class VersionManager:
             # 与资产删除只删桶 key、快照留存是同一口径，宁可留下也不静默删除用户的历史。
             rekey_equivalent_entries(bucket, old_id, new_id)
             self._save_versions(data)
+            record_project_activity(self.project_path)
             return len(versions)
 
     def backup_current(
@@ -1211,6 +1231,7 @@ class VersionManager:
             ]
             del bucket[key]
             self._save_versions(data)
+            record_project_activity(self.project_path)
             _report_cleanup_failures(_unlink_paths(*snapshots), active_failure=sys.exception())
             return len(snapshots)
 
@@ -1277,6 +1298,7 @@ class VersionManager:
                 if on_restore is not None:
                     on_restore(dict(target_version))
                 restore_succeeded = True
+                record_project_activity(self.project_path)
             except BaseException as failure:
                 rollback_errors: list[OSError] = []
                 try:
@@ -1339,6 +1361,7 @@ class VersionManager:
                 if record.get("version") == version:
                     record.update(metadata)
                     self._save_versions(data)
+                    record_project_activity(self.project_path)
                     return True
             return False
 

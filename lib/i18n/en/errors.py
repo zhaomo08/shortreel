@@ -79,6 +79,7 @@ MESSAGES = {
     "task_fail_provider_unsupported_media": "Provider {provider_id} does not support {media_type} generation",
     "task_fail_provider_rejected": "The provider rejected this generation request (HTTP {status})",
     "task_fail_dispatch_provider_requeue_failed": "The task provider changed from {claimed_provider_id} to {actual_provider_id}, but the task could not be requeued for a new slot; please retry",
+    "task_fail_project_deleted_during_task": "The project was deleted while the task was running; the generated result was not saved",
     "task_fail_restart_lost_image": "The image task was interrupted by a service restart and cannot be resumed; please retry manually to avoid duplicate billing",
     "task_fail_restart_lost_audio": "The audio task was interrupted by a service restart and cannot be resumed; please retry manually to avoid duplicate billing",
     "task_fail_restart_lost_text": "The text task was interrupted by a service restart and cannot be resumed; please retry manually to avoid duplicate billing",
@@ -294,7 +295,7 @@ MESSAGES = {
     "source_too_large": "Source file '{filename}' is too large ({size_mb} MB > {limit_mb} MB)",
     "source_conflict": "Source file '{existing}' already exists; suggested rename: '{suggested}'",
     # Providers
-    "unknown_provider": "Unknown provider: {provider_id}",
+    "unknown_provider": "Unknown provider: {value}",
     "max_workers_must_be_positive_integer": "{field} must be a positive integer, got: {value}",
     "credentials_not_found": "Credentials not found",
     "vertex_json_read_failed": "Failed to read the uploaded file",
@@ -392,11 +393,11 @@ MESSAGES = {
         "itself. Import a ComfyUI endpoint and attach it to a model row instead"
     ),
     "custom_endpoint_kind_conflicts_with_attachment": (
-        "The replacement definition changes the endpoint kind, which no longer fits the current attachment: the provider protocol of model {model_id} (provider {provider}) cannot take it. Change the model row's attachment first, then replace the definition"
+        "The replacement definition changes the endpoint kind, which no longer fits the current attachment: the provider protocol of model {model} (provider {provider}) cannot take it. Change the model row's attachment first, then replace the definition"
     ),
     "custom_endpoint_media_type_conflicts_with_attachment": (
         "This definition produces {media_type}, which differs from the endpoint's current media type, while model "
-        "{model_id} (provider {provider}) is still attached: an endpoint decides which lane its models belong to. "
+        "{model} (provider {provider}) is still attached: an endpoint decides which lane its models belong to. "
         "Detach the models first, then replace the definition"
     ),
     "comfyui_endpoint_requires_comfyui_provider": (
@@ -638,7 +639,10 @@ MESSAGES = {
     "video_capability_missing_i2v": "{provider}/{model} does not support image-to-video generation; assign a model that supports it for image-to-video in Settings, or change the default video model",
     "video_capability_missing_r2v": "{provider}/{model} does not support reference-to-video generation; assign a model that supports it for reference-to-video in Settings, or change the default video model",
     "video_capability_reference_unavailable": "The configured video model {provider}/{model} is no longer available (model deleted, capabilities changed, or provider removed); re-select a video model in Settings",
+    "video_resolution_not_supported": "Model {model} does not support {resolution} resolution (only {supported}); choose a supported resolution",
+    "video_aspect_ratio_not_supported": "Model {model} does not support aspect ratio {aspect_ratio} (only {supported}); choose a supported aspect ratio",
     "video_resolution_duration_unsupported": "Model {model} does not support {duration}s at {resolution} resolution (only {supported}); adjust the resolution or duration",
+    "video_reference_resolution_unsupported": "Model {model} supports at most {max_resolution} when reference images or a last frame are used, but {resolution} was requested; change the resolution to {max_resolution}, or remove the reference images and last frame",
     "video_reference_images_duration_unsupported": "Model {model} does not support {duration}s with reference images (only {supported}); change the duration to {supported} or remove the reference images",
     "video_reference_images_required": "Model {model} requires at least one reference image; please provide reference images",
     "video_reference_images_unreadable": "Model {model} has reference images that are missing or unreadable; generation aborted: {names}; check the reference image paths",
@@ -678,11 +682,12 @@ MESSAGES = {
     "version_not_found": "Version {version} does not exist",
     "version_resource_not_found": "Resource '{resource_type}/{resource_id}' does not exist",
     "version_snapshot_path_unmanaged": "A '{resource_type}' version record points to an unmanaged snapshot path; the operation was refused",
-    "session_busy": "The session is busy; wait for the current reply to finish before sending",
     "session_capacity_exceeded": "Concurrent session limit reached, please try again later",
     "session_question_unavailable": "The session is not running or has no pending question",
     "rewrite_anchor_invalid": "The message you are editing is not part of this conversation; refresh and try again",
     "rewrite_blocked_by_question": "Answer the question card in the conversation before editing a message",
+    "rewrite_blocked_by_queued_messages": "Wait until queued messages join the conversation before editing a message",
+    "message_accepted_but_unrecorded": "This message is already being processed but wasn't saved to the conversation history; it won't be sent again, to avoid running it twice. Wait for the Agent's reply instead of resending it",
     "session_already_superseded": "This conversation has been replaced by an earlier edit; continue in the new one",
     "rewrite_unavailable": "Message editing is unavailable because conversation storage is turned off",
     "rewrite_interrupt_timeout": "Timed out waiting for the current reply to stop, please try again",

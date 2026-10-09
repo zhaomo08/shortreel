@@ -16,7 +16,12 @@ from typing import IO, Any
 import pytest
 
 from lib.artifacts.artifact_activation import register_current_artifact
-from lib.artifacts.artifact_manifest import MANIFEST_FILENAME, ArtifactKey
+from lib.artifacts.artifact_manifest import (
+    LOCK_FILENAME,
+    MANIFEST_FILENAME,
+    ArtifactKey,
+    reset_manifest_read_cache_for_tests,
+)
 from lib.episode.episode_ledger import SOURCE_FINGERPRINTS_KEY, compute_source_fingerprints
 from lib.episode.episode_sources import discover_sources
 from lib.infra.json_io import atomic_write_json
@@ -24,12 +29,17 @@ from lib.project.project_manager import ProjectManager
 from lib.project.project_migrations.runner import migrate_project_with_verdict
 from lib.project.resource_paths import resource_relative_path
 from lib.project.source_revision import SourceRevisionResult, compute_source_revision
+from lib.script import script_review
 from lib.workflow.workflow_state import WorkflowStateService
+from tests.factories import register_project_sources
+from tests.integration.lib.episode_media_support import episodes_with_media
+from tests.integration.lib.manifest_parse_support import count_manifest_parses, count_versions_parses
 from tests.integration.lib.workflow.test_workflow_state import (
     _complete_episode_media,
     _count_source_reads,
     _create_edit_timeline,
     _make_project,
+    _one_complete_episode,
     _register_produced_artifacts,
     _valid_ad_shot,
     _valid_narration_segment,
@@ -367,6 +377,39 @@ def test_stale_ledger_episode_falls_back_to_pending_preprocess(tmp_path: Path) -
     assert summary.episodes[0].videos.total == 0
 
 
+def test_stale_episode_counts_as_complete_only_after_its_script_plan_is_rebuilt(tmp_path: Path) -> None:
+    """大厅与顶栏对 stale 集同一口径：未重建时两处都不算完成，重建后两处都按常规进度算完成。"""
+
+    pm, project_path = _make_project(tmp_path, "narration")
+    _one_complete_episode(pm, project_path)
+    _create_edit_timeline(pm)
+
+    def _mark_stale(project: dict) -> None:
+        script_review.mark_ledger_stale(project_path, project, project["episodes"][0], 1)
+
+    pm.update_project("demo", _mark_stale)
+    service = WorkflowStateService(pm)
+
+    awaiting = service.get_project_summary("demo", currency="registered")
+    assert awaiting.episodes[0].script_status == "none"
+    assert awaiting.episodes_summary.completed == 0
+    awaiting_status = service.get_status("demo")
+    assert awaiting_status.content is not None
+    assert awaiting_status.content.project_complete is False
+
+    atomic_write_json(
+        project_path / "drafts" / "episode_1" / "script_plan_segments.json",
+        {"episode": 1, "segments": [{"segment_id": "E1S01"}]},
+    )
+
+    rebuilt = service.get_project_summary("demo", currency="registered")
+    assert rebuilt.episodes[0].status == "completed"
+    assert rebuilt.episodes_summary.completed == 1
+    rebuilt_status = service.get_status("demo")
+    assert rebuilt_status.content is not None
+    assert rebuilt_status.content.project_complete is True
+
+
 def test_stale_artifacts_stay_available_and_are_counted_separately(tmp_path: Path) -> None:
     pm, project_path = _make_project(tmp_path, "narration")
     source_text = "完整原文"
@@ -544,7 +587,8 @@ def test_registered_currency_never_reads_artifact_content(tmp_path: Path, monkey
     """列出 N 个项目不该哈希 N 个项目的图：列表口径不按路径打开任何产物、单个产物描述符上
     最多读一个字节（在场探针），清单每项目只读一次。
 
-    ``verified`` 口径在同一夹具上会整读产物内容并多次打开清单，用来证明夹具有区分力。
+    ``verified`` 口径在同一夹具上会整读产物内容，用来证明夹具有区分力；它逐件比对时清单
+    仍至多整份解析一次。
     """
 
     pm, project_path = _make_project(tmp_path, "narration")
@@ -554,7 +598,9 @@ def test_registered_currency_never_reads_artifact_content(tmp_path: Path, monkey
     _episode_with_media(pm, project_path, source_text)
     service = WorkflowStateService(pm)
 
+    reset_manifest_read_cache_for_tests()
     verified_counts = _count_artifact_opens(monkeypatch, project_path)
+    verified_parses = count_manifest_parses(monkeypatch)
     verified = service.get_project_summary("demo", currency="verified")
     monkeypatch.undo()
 
@@ -563,11 +609,83 @@ def test_registered_currency_never_reads_artifact_content(tmp_path: Path, monkey
 
     assert verified.episodes_summary.completed == registered.episodes_summary.completed == 1
     assert verified_counts["artifact_bytes"] > 0
-    assert verified_counts["manifest_opens"] > 2
+    assert verified_parses["parses"] == 1
     assert registered_counts["artifact_bytes"] == 0
     assert registered_counts["artifact_max_read"] <= 1
     # 无锁读取为保证一致性读两遍同一份清单，算作一次读入。
     assert registered_counts["manifest_opens"] <= 2
+
+
+def _episode_with_storyboards(pm: ProjectManager, project_path: Path, count: int) -> None:
+    """一集 ``count`` 个分镜，分镜图与视频齐备并补录进清单。"""
+
+    source_text = "完整原文"
+    _write_source(pm, project_path, source_text)
+    _plan_one_episode(pm, project_path, source_text)
+    _write_script_plan(project_path)
+    segments = [
+        _valid_narration_segment(
+            segment_id=resource_id, generated_assets=_complete_episode_media(project_path, resource_id)
+        )
+        for resource_id in (f"E1S{index:02d}" for index in range(1, count + 1))
+    ]
+    _write_registered_script(
+        project_path,
+        {"episode": 1, "title": "第一集", "content_mode": "narration", "segments": segments},
+    )
+    _register_produced_artifacts(project_path)
+
+
+@pytest.mark.parametrize("lock_file", [True, False], ids=("locked-read", "lockless-read"))
+def test_verified_manifest_parses_do_not_grow_with_the_artifact_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_file: bool
+) -> None:
+    """完整口径逐件比对产物，但清单整份解析的次数与产物件数无关：分镜数翻倍，解析次数不变。
+
+    有锁文件时读取经清单锁串行；从未有写入方建锁的项目走无锁双读，两条读取路径都要成立。
+    """
+
+    parses: dict[int, int] = {}
+    for count in (4, 8):
+        pm, project_path = _make_project(tmp_path / f"storyboards-{count}", "narration")
+        _episode_with_storyboards(pm, project_path, count)
+        lock_path = project_path / LOCK_FILENAME
+        if not lock_file:
+            lock_path.unlink()
+
+        reset_manifest_read_cache_for_tests()
+        counts = _count_artifact_opens(monkeypatch, project_path)
+        manifest_parses = count_manifest_parses(monkeypatch)
+        summary = WorkflowStateService(pm).get_project_summary("demo", currency="verified")
+        monkeypatch.undo()
+
+        episode = summary.episodes[0]
+        assert (episode.videos.total, episode.videos.available) == (count, count)
+        assert counts["artifact_bytes"] > 0
+        assert lock_path.exists() is lock_file
+        parses[count] = manifest_parses["parses"]
+
+    assert parses[8] == parses[4] == 1
+
+
+def test_verified_versions_parses_do_not_grow_with_the_episode_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """完整口径按集比对产物，但版本历史整份解析的次数与集数无关：集数从 1 到 3，解析次数不变。"""
+
+    parses: dict[int, int] = {}
+    for count in (1, 3):
+        pm, project_path = _make_project(tmp_path / f"episodes-{count}", "narration")
+        episodes_with_media(pm, project_path, count)
+
+        versions_parses = count_versions_parses(monkeypatch)
+        summary = WorkflowStateService(pm).get_project_summary("demo", currency="verified")
+        monkeypatch.undo()
+
+        assert [(episode.videos.total, episode.videos.available) for episode in summary.episodes] == [(1, 1)] * count
+        parses[count] = versions_parses["parses"]
+
+    assert parses[3] == parses[1] == 1
 
 
 def test_externally_replaced_upload_is_stale_but_still_available(tmp_path: Path) -> None:
@@ -586,3 +704,41 @@ def test_externally_replaced_upload_is_stale_but_still_available(tmp_path: Path)
 
     assert verified.videos.model_dump() == {"total": 1, "available": 1, "stale": 1}
     assert registered.videos.model_dump() == {"total": 1, "available": 1, "stale": 0}
+
+
+def test_source_remaining_follows_ledger_commands_like_the_workbench(tmp_path: Path) -> None:
+    """列表口径「源文还有未规划的原文」由账本命令记下，与工作台「继续分集规划」同一判定。
+
+    项目列表不读源文，靠写账本的命令把结论写进 project.json；每一步都与按源文现算的制作状态一致。
+    """
+
+    from lib.episode.episode_manual_split import cut_unsplit_source
+
+    pm, project_path = _make_project(tmp_path, "narration")
+    text = "第一章。少年下山。第二章。城里起火。"
+    _write_source(pm, project_path, text)
+    service = WorkflowStateService(pm)
+
+    def _assert_remaining(expected: bool) -> None:
+        summary = service.get_project_summary("demo", currency="registered")
+        status = service.get_status("demo")
+        assert summary.source_remaining is expected
+        assert status.content is not None
+        assert status.content.source_remaining is expected
+
+    _assert_remaining(True)
+
+    cut_unsplit_source(project_path, source_file="source/novel.txt", end=text.index("第二章"))
+    _assert_remaining(True)
+
+    cut_unsplit_source(project_path, source_file="source/novel.txt", end=len(text))
+    _assert_remaining(False)
+
+    register_project_sources(pm, "demo", whole_source={"sequel.txt": "第三章。重逢。"})
+    _assert_remaining(True)
+
+
+def test_ad_project_never_reports_remaining_source(tmp_path: Path) -> None:
+    pm, _project_path = _make_project(tmp_path, "ad")
+
+    assert WorkflowStateService(pm).get_project_summary("demo", currency="registered").source_remaining is False

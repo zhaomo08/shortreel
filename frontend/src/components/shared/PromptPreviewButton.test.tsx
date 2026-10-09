@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { PromptPreviewButton } from "./PromptPreviewButton";
+import { createDeferred } from "@/test/deferred";
 import { copyText } from "@/utils/clipboard";
 import type { RenderedPromptPreview } from "@/types";
 
@@ -23,7 +24,7 @@ describe("PromptPreviewButton", () => {
     expect(load).not.toHaveBeenCalled();
     const dialog = openPreview();
 
-    expect(await within(dialog).findByText(/最终提示词$/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/^Style: Anime/)).toBeInTheDocument();
     expect(within(dialog).getByText("按已保存内容渲染")).toBeInTheDocument();
     expect(load).toHaveBeenCalledTimes(1);
   });
@@ -31,7 +32,7 @@ describe("PromptPreviewButton", () => {
   it("一键复制交付的是最终文本本身", async () => {
     render(<PromptPreviewButton title="分镜图最终提示词" load={() => Promise.resolve(rendered())} />);
     const dialog = openPreview();
-    await within(dialog).findByText(/最终提示词$/);
+    await within(dialog).findByText(/^Style: Anime/);
 
     fireEvent.click(within(dialog).getByRole("button", { name: "复制最终提示词" }));
 
@@ -44,7 +45,7 @@ describe("PromptPreviewButton", () => {
     render(<PromptPreviewButton title="分镜图最终提示词" load={load} />);
     const dialog = openPreview();
 
-    expect(await within(dialog).findByText(/最终提示词$/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/^Style: Anime/)).toBeInTheDocument();
     expect(within(dialog).getByRole("list", { name: "生成提示" })).toHaveTextContent(
       "参考图数量 8 超出 gpt-image-2 上限 7，已取前 7 张",
     );
@@ -67,7 +68,7 @@ describe("PromptPreviewButton", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "重新渲染" }));
 
-    expect(await within(dialog).findByText(/最终提示词$/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/^Style: Anime/)).toBeInTheDocument();
     expect(within(dialog).queryByText("渲染失败")).not.toBeInTheDocument();
     await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
   });
@@ -119,4 +120,15 @@ describe("PromptPreviewButton", () => {
 
     expect(await within(dialog).findByRole("list", { name: "参考图" })).toHaveTextContent("角色A.png");
   });
+  it("前置保存期间卸载后，不再打开或请求预览", async () => {
+    const saved = createDeferred<boolean>();
+    const load = vi.fn().mockResolvedValue(rendered());
+    const { unmount } = render(<PromptPreviewButton title="分镜图最终提示词" load={load} saveFirst beforeOpen={() => saved.promise} />);
+    fireEvent.click(screen.getByRole("button", { name: "保存并预览" }));
+    unmount();
+    await act(async () => saved.resolve(true));
+    expect(load).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
 });

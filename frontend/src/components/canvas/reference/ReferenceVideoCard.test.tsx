@@ -67,7 +67,7 @@ const PROJECT: ProjectData = {
 };
 
 beforeEach(() => {
-  useProjectsStore.setState({ currentProjectName: "proj", currentProjectData: PROJECT });
+  useProjectsStore.setState({ currentProjectName: "proj", currentProjectData: PROJECT, assetFingerprints: {} });
 });
 
 afterEach(() => {
@@ -306,7 +306,7 @@ describe("ReferenceVideoCard combobox ARIA", () => {
     expect(ta).toHaveAttribute("aria-controls", "reference-editor-picker");
     expect(ta).toHaveAttribute("aria-autocomplete", "list");
     // aria-label 是短名，不是长 placeholder
-    expect(ta).toHaveAttribute("aria-label", "Unit 提示词");
+    expect(ta).toHaveAttribute("aria-label", "视频单元提示词");
 
     await user.clear(ta);
     await user.type(ta, "@");
@@ -340,7 +340,8 @@ describe("ReferenceVideoCard combobox ARIA", () => {
 });
 
 describe("ReferenceVideoCard final prompt preview", () => {
-  it("renders the unsaved body with the numbered request images, notice and warnings", async () => {
+  it("renders the requested body with numbered request images and warnings", async () => {
+    useProjectsStore.setState({ assetFingerprints: { "scenes/酒馆.png": 1712345678901 } });
     const user = userEvent.setup();
     const preview = vi.spyOn(API, "previewReferenceUnitPrompt").mockResolvedValue({
       text: "<酒馆>@图片1。\n草稿正文\n电影质感",
@@ -354,9 +355,11 @@ describe("ReferenceVideoCard final prompt preview", () => {
     expect(preview).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "查看提示词" }));
     const dialog = await screen.findByRole("dialog", { name: "参考生视频提示词" });
-    expect(within(dialog).getByText("按当前模型能力计算，执行时以实际为准")).toBeInTheDocument();
     expect(await within(dialog).findByText(/草稿正文/)).toBeInTheDocument();
-    expect(within(dialog).getByRole("img", { name: "酒馆" })).toHaveAttribute("src", API.getFileUrl("proj", "scenes/酒馆.png"));
+    expect(within(dialog).getByRole("img", { name: "酒馆" })).toHaveAttribute(
+      "src",
+      API.getFileUrl("proj", "scenes/酒馆.png", 1712345678901, { width: 160 }),
+    );
     expect(within(dialog).getByText("图片1 · 酒馆")).toBeInTheDocument();
     expect(within(dialog).getByText("参考图已裁剪")).toBeInTheDocument();
     expect(preview).toHaveBeenCalledWith("proj", 1, "E1U1", "未保存草稿", { signal: expect.any(AbortSignal) });
@@ -381,5 +384,13 @@ describe("ReferenceVideoCard final prompt preview", () => {
     await user.click(within(dialog).getByRole("button", { name: "重新渲染" }));
     expect(await within(dialog).findByText("重新渲染的文本")).toBeInTheDocument();
     expect(within(dialog).getByText("本次请求不携带参考图")).toBeInTheDocument();
+  });
+
+  // 提示词是正文，与着色镜像层一起用比例字体；两层字体一致，光标才对得上着色。
+  it("keeps the prompt editor and its overlay in the proportional font", () => {
+    const { container } = render(<ControlledCard unit={mkUnit({ text: "张三推开了门。" })} />);
+
+    expect(screen.getByRole("combobox")).not.toHaveClass("font-mono");
+    expect(container.querySelector("pre")).not.toHaveClass("font-mono");
   });
 });

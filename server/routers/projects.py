@@ -17,6 +17,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -32,6 +33,7 @@ from starlette.background import BackgroundTask
 logger = logging.getLogger(__name__)
 
 from lib.agent.profile_manifest import ContentMode
+from lib.backends.text_backends.base import TextOutputTruncatedError
 from lib.config.resolver import (
     ConfigResolver,
     VideoBucketCapabilityError,
@@ -53,8 +55,9 @@ from lib.episode.episode_target_duration import (
 )
 from lib.episode.source_kinds import SourceKind
 from lib.generation.video_request_facts import ResolutionOverride, VideoRequestFactsError, planning_durations
-from lib.i18n import render_generation_input_error
+from lib.i18n import render_generation_input_error, render_message
 from lib.infra.api_errors import ApiError, BadRequestError, ConflictError, NotFoundError, UnprocessableError
+from lib.infra.async_thread import EventLoopBridge, run_sync_transaction
 from lib.infra.json_io import domain_error_on_value_error
 from lib.output_language import LANGUAGE_FOLLOWS_SOURCE_FIELD
 from lib.project.asset_fingerprints import compute_asset_fingerprints
@@ -89,7 +92,7 @@ from lib.workflow.workflow_state import (
 )
 from server.auth import CurrentUser, create_download_token, verify_download_token
 from server.dependencies import require_project_migration_ok
-from server.i18n import Translator
+from server.i18n import DisplayNamesCatalog, Translator
 from server.routers._episode_source_errors import episode_source_http_error
 from server.routers._script_edits import (
     execute_current_script_edit,
@@ -106,15 +109,18 @@ from server.services.project.narration_settings import (
     validate_tts_backend,
     validate_tts_speed,
 )
+from server.services.project.project_activity import project_last_activity_at
 from server.services.project.project_archive import (
     ProjectArchiveService,
     ProjectArchiveValidationError,
 )
 from server.services.project.project_cover import resolve_project_cover
+from server.services.project.project_retirement import retire_project, retire_project_on
 from server.services.tasks.video_caps import (
     capability_request_facts,
     duration_constraints_payload,
 )
+from server.tool_runtime import truncation_problem
 
 router = APIRouter()
 
@@ -166,8 +172,12 @@ def _merge_episode_summaries(project: dict[str, Any], summary: ProjectSummary) -
     return project
 
 
-def get_archive_service() -> ProjectArchiveService:
-    return ProjectArchiveService(get_project_manager())
+async def get_archive_service() -> ProjectArchiveService:
+    # 在事件循环上构造：覆盖导入跑在工作线程里，经捕获的事件循环收尾现有项目的记录。
+    return ProjectArchiveService(
+        get_project_manager(),
+        retire_project=retire_project_on(EventLoopBridge.capture(), async_session_factory),
+    )
 
 
 ArchiveServiceDep = Annotated[ProjectArchiveService, Depends(get_archive_service)]
@@ -431,7 +441,7 @@ async def import_project_archive(
                 translate=_t,
             )
 
-        result = await asyncio.to_thread(_sync)
+        result = await run_sync_transaction(_sync)
         return {
             "success": True,
             "project_name": result.project_name,
@@ -537,13 +547,17 @@ async def export_project_archive(
         raise HTTPException(status_code=500, detail=_t("internal_server_error")) from exc
 
 
+_NO_ACTIVITY = datetime.min.replace(tzinfo=UTC)
+
+
 @router.get("/projects")
 async def list_projects(summaries: WorkflowStateServiceDep, _t: Translator):
-    """列出所有项目"""
+    """列出所有项目，最近有活动的在前。"""
 
     def _sync():
         manager = get_project_manager()
         projects = []
+        last_activity: dict[str, datetime] = {}
         for name in manager.list_projects():
             try:
                 # 列举之后被删除的项目不再列出
@@ -589,6 +603,12 @@ async def list_projects(summaries: WorkflowStateServiceDep, _t: Translator):
                         _t,
                     )
 
+                    activity = project_last_activity_at(
+                        manager.get_project_path(name), project, preloaded_scripts.values()
+                    )
+                    if activity is not None:
+                        last_activity[name] = activity
+
                     raw_title = project.get("title")
                     projects.append(
                         {
@@ -601,13 +621,18 @@ async def list_projects(summaries: WorkflowStateServiceDep, _t: Translator):
                             "style_image": project.get("style_image"),
                             "thumbnail": thumbnail,
                             "status": status,
+                            "last_activity_at": activity.isoformat() if activity is not None else None,
                         }
                     )
             except Exception as e:
                 # 出错时返回基本信息
                 logger.warning("加载项目 '%s' 元数据失败: %s", name, e)
-                projects.append({"name": name, "title": "", "style": "", "thumbnail": None, "status": {}})
+                projects.append(
+                    {"name": name, "title": "", "style": "", "thumbnail": None, "status": {}, "last_activity_at": None}
+                )
 
+        # 没有活动时间的项目排在最后，彼此保持按名字的列举顺序。
+        projects.sort(key=lambda p: last_activity.get(p["name"], _NO_ACTIVITY), reverse=True)
         return {"projects": projects}
 
     return await asyncio.to_thread(_sync)
@@ -1151,12 +1176,12 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
 async def delete_project(name: str, _t: Translator):
     """删除项目"""
     try:
-
-        def _sync():
-            get_project_manager().delete_project_directory(name)
-            return {"success": True, "message": _t("project_deleted", name=name)}
-
-        return await asyncio.to_thread(_sync)
+        manager = get_project_manager()
+        project_dir = await asyncio.to_thread(manager.get_project_path, name)
+        # 先收尾记录再删目录：排队任务不会在删了一半的目录上开跑，执行中的任务照常跑完但放弃落盘。
+        await retire_project(async_session_factory, project_dir.name)
+        await asyncio.to_thread(manager.delete_project_directory, name)
+        return {"success": True, "message": _t("project_deleted", name=name)}
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except (HTTPException, ApiError):
@@ -1227,6 +1252,7 @@ async def preview_script_item_prompts(
     name: str,
     item_id: str,
     _t: Translator,
+    names: DisplayNamesCatalog,
     script_file: str = Query(..., description="剧本文件名"),
 ):
     """渲染该条目当前会送进图像 / 视频模型的最终提示词文本。
@@ -1250,12 +1276,12 @@ async def preview_script_item_prompts(
     def _side(rendered):
         return {
             "text": rendered.text,
-            "unavailable": render_generation_input_error(rendered.unavailable, rendered.unavailable_params, _t)
+            "unavailable": render_generation_input_error(rendered.unavailable, rendered.unavailable_params, _t, names)
             if rendered.unavailable
             else None,
             "is_text_form": rendered.is_text_form,
             # 渲染时产生的提示（如参考图超限裁剪）与任务结果的 warnings 同源，同样按请求语言渲染成成品文案
-            "warnings": [_t(warning["key"], **warning["params"]) for warning in rendered.warnings],
+            "warnings": [render_message(warning["key"], warning["params"], _t, names) for warning in rendered.warnings],
         }
 
     return {
@@ -2006,6 +2032,12 @@ async def generate_overview(name: str, _t: Translator):
         # 裸 pydantic 错误串含模型原始输出片段，不透传给用户
         logger.exception("概述生成响应解析失败")
         raise HTTPException(status_code=400, detail=_t("overview_ai_response_invalid")) from exc
+    except TextOutputTruncatedError as exc:
+        # 输出被最大输出长度截断：与各文本任务同一个问题票形状，前端据此给出登记输出长度或换模型的出路
+        logger.warning("概述生成输出被截断: name=%s (%s)", name, exc)
+        raise UnprocessableError(
+            "text_output_truncated", provider_id=exc.provider_id or exc.provider, model=exc.model
+        ).with_diagnostic(truncation_problem(exc).model_dump()) from exc
     except EmptySourceError as e:
         logger.warning("生成概述参数错误: name=%s (%s)", name, e)
         raise BadRequestError("overview_source_empty") from e

@@ -55,6 +55,7 @@ from lib.generation.video_request_facts import (
     reference_migration_durations,
     require_video_request_facts,
 )
+from lib.i18n import _ as translate
 from lib.infra.async_thread import run_sync_transaction
 from lib.infra.content_digest import sha256_file
 from lib.infra.text_utils import strip_json_code_fences
@@ -680,10 +681,8 @@ class ScriptGenerator:
         script["metadata"] = metadata
         return script
 
-    async def _load_plan_entries_for_materialization(
-        self, episode: int
-    ) -> tuple[ScriptPlanKind, list[dict], str | None]:
-        """按项目路线读脚本规划并过物化的准入断言，返回 (变体, 条目, 标题)。
+    async def _load_plan_entries_for_materialization(self, episode: int) -> tuple[ScriptPlanKind, list[dict]]:
+        """按项目路线读脚本规划并过物化的准入断言，返回 (变体, 条目)。
 
         三条路线各自的加载器负责结构校验、待修复草稿守卫与规划指纹 / 输入登记的冻结；时长档位与
         发声准入按当前视频能力判定。参考生视频单元正文不按机器口径预判：单元以待编写落盘，正文由之后的
@@ -698,7 +697,7 @@ class ScriptGenerator:
                 self._load_reference_script_plan, episode, self._reference_migration_durations(facts)
             )
             self._assert_reference_script_plan_durations(units, facts=facts)
-            return "reference_video", units, None
+            return "reference_video", units
         if self.content_mode != "narration":
             content = self._load_drama_script_plan_content(episode)
             raw_scenes = content.get("scenes")
@@ -706,11 +705,9 @@ class ScriptGenerator:
             for scene in scenes:
                 require_script_unit_admitted("scenes", scene)
             await self._assert_drama_script_plan_durations(scenes)
-            raw_title = content.get("title")
-            title = raw_title if isinstance(raw_title, str) and raw_title.strip() else None
-            return "drama", scenes, title
+            return "drama", scenes
         supported = self._storyboard_planning_durations(await self._fetch_video_request_facts())
-        return "narration", self._load_narration_script_plan(episode, supported), None
+        return "narration", self._load_narration_script_plan(episode, supported)
 
     async def materialize_script_plan(
         self,
@@ -732,7 +729,7 @@ class ScriptGenerator:
         self._script_plan_new_assets = None
         self._artifact_basis = None
         self._script_plan_input_claim = None
-        plan_kind, plan_entries, title = await self._load_plan_entries_for_materialization(episode)
+        plan_kind, plan_entries = await self._load_plan_entries_for_materialization(episode)
         # 加载器在 await 内冻结了本次读到的规划指纹；静态收窄看不到这次改写。
         loaded_revision = cast(str | None, self._script_plan_fingerprint)
         if loaded_revision != expected_plan_revision:
@@ -751,8 +748,9 @@ class ScriptGenerator:
             project_update(project)
 
         filename = formal_script_filename(self.project_path, self.project_json, episode)
+        # 集标题取分集账本：drama 规划里模型起的标题照填、不采用，免得冻结派生集名或覆盖用户的标题。
         script_data = build_materialized_script(
-            self.project_json, episode, plan_kind=plan_kind, plan_entries=plan_entries, title=title
+            self.project_json, episode, plan_kind=plan_kind, plan_entries=plan_entries, title=None
         )
         items_key = plan_variant(plan_kind).skeleton_kind
         id_field = entry_id_field(plan_kind)
@@ -2097,11 +2095,15 @@ class ScriptGenerator:
             raise AdScriptRejected([problem.message for problem in exc.problems]) from exc
 
     def _parse_ad_storyboard_response(self, response_text: str, episode: int) -> tuple[dict, NewAssetResolution]:
-        """解析广告/短片分镜整份生成的输出：剧本与本次新增资产的处理决定。"""
+        """解析广告/短片分镜整份生成的输出：剧本与本次新增资产的处理决定。
+
+        集标题取分集账本（可为空），模型给出的标题不采用。
+        """
         try:
             data = self._parse_response(response_text, episode)
         except ValueError as exc:
             raise AdScriptRejected([str(exc)]) from exc
+        data["title"] = episode_title(self.project_json, episode)
         raw_new_assets = data.pop(NEW_ASSETS_FIELD, None)
         return data, self._resolve_ad_new_assets(raw_new_assets)
 
@@ -2109,7 +2111,7 @@ class ScriptGenerator:
         """把广告/短片的参考生视频的扁平 LLM 输出机械提升为自包含 ``video_units``，并解析本次新增资产。
 
         正文里的 ``@[名称]`` 须已登记或在本次新增项中：校验对着叠加了新增项的项目视图判。发声归属问题
-        由 ``needs_replan`` 承接，其余违约一并收齐后拒绝。
+        由 ``needs_replan`` 承接，其余违约一并收齐后拒绝。集标题取分集账本（可为空），模型给出的标题不采用。
         """
         text = strip_json_code_fences(response_text)
         try:
@@ -2145,7 +2147,7 @@ class ScriptGenerator:
 
         script = ReferenceVideoScript.model_validate(
             {
-                "title": flat.title or episode_title(self.project_json, episode),
+                "title": episode_title(self.project_json, episode),
                 "content_mode": "ad",
                 "video_units": units,
             }
@@ -2211,12 +2213,14 @@ class ScriptGenerator:
                 try:
                     facts.require(bucket)
                 except VideoRequestFactsError as exc:
-                    state, remedy = ("带参考图", "参考生视频") if bucket == "r2v" else ("无参考图", "图生视频")
+                    # 视频模型配置问题而非正文违约：按问题码陈述原因与出路，Web 视图按问题码本地化。
+                    params: dict[str, Any] = exc.params
                     raise DraftViolation(
-                        f"unit {s[id_field]} {state}视频档位未知（{exc.failure.summary()}）；请配置可用的{remedy}模型",
+                        f"unit {s[id_field]}：{translate(exc.code, **params)}（{exc.failure.summary()}）",
                         code=exc.code,
                         label=f"unit {s[id_field]}",
                         item_id=str(s[id_field]),
+                        params=params,
                     ) from exc
                 unit_tiers = self._unit_duration_off_tier(target_duration, facts=facts, generation_type=bucket)
                 if unit_tiers is not None:

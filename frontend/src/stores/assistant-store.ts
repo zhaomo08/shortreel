@@ -4,6 +4,7 @@ import type {
   DraftState,
   FailureObservation,
   PendingQuestion,
+  QueuedMessage,
   SessionMeta,
   SessionStatus,
   SkillInfo,
@@ -23,6 +24,10 @@ import {
 /** 启动失败的来源入口——决定故障卡片的重试重放哪一处输入。 */
 export type StartupFailureOrigin = "send" | "rewrite";
 
+export type SessionResumeSignal =
+  | { kind: "resumed"; projectName: string; sessionId: string }
+  | { kind: "resync"; projectName: string };
+
 interface AssistantState {
   // Sessions
   sessions: SessionMeta[];
@@ -37,6 +42,14 @@ interface AssistantState {
   turns: Turn[];
   draftTurn: Turn | null;
   messagesLoading: boolean;
+  /**
+   * 载入会话时已有的最后一条条目的 seq：不大于它的条目是打开会话前的历史，大于它的是
+   * 查看期间新到达的，失败卡片只为后者播报。null 表示历史仍在回放（running 会话经
+   * entry 流补发存量），此时到达的条目都算历史。没有载入过程的会话（新建、草稿）为 -1。
+   */
+  historySeq: number | null;
+  /** 排队消息托盘：已发出、Agent 尚未接纳的消息，按发送顺序排列；不进时间线。 */
+  queuedMessages: QueuedMessage[];
 
   // Input
   input: string;
@@ -75,6 +88,13 @@ interface AssistantState {
   // Draft session (lazy creation)
   isDraftSession: boolean;
 
+  /**
+   * 项目事件流送来、尚未消费的会话恢复信号，由会话 hook 整批取走。resumed：会话未经发送、
+   * 自主回到 running；resync：事件流（重新）建连，此前的恢复通知可能已错过，需要核对。
+   * 排队而非只留最新一条：同一批事件里的多条信号在 hook 消费前到达，后者会覆盖前者。
+   */
+  sessionResumeSignals: SessionResumeSignal[];
+
   // Actions
   setSessions: (sessions: SessionMeta[]) => void;
   setCurrentSessionId: (id: string | null) => void;
@@ -91,6 +111,18 @@ interface AssistantState {
   /** 清空时间线（项目切换 / 新会话）。 */
   resetTimeline: () => void;
   setMessagesLoading: (loading: boolean) => void;
+  /** 开始载入会话历史：此后到达的条目都算历史，直到 settleHistory。 */
+  beginHistory: () => void;
+  /** 会话历史载入完毕：以当前最后一条条目为界；已经定界时不变。 */
+  settleHistory: () => void;
+  /** 整体替换排队消息（entry 流开场快照）。 */
+  setQueuedMessages: (messages: QueuedMessage[]) => void;
+  /** 加入或更新一条排队消息；已离开排队的消息不再加回。 */
+  upsertQueuedMessage: (message: QueuedMessage) => void;
+  /** 移出一条排队消息（已被接纳或已被丢弃）。 */
+  removeQueuedMessage: (id: string) => void;
+  /** 这条消息是否已经离开排队（被接纳或被丢弃）。 */
+  hasLeftQueue: (id: string) => boolean;
   setInput: (input: string) => void;
   setSending: (sending: boolean) => void;
   setInterrupting: (interrupting: boolean) => void;
@@ -105,6 +137,10 @@ interface AssistantState {
   setEditingTurnUuid: (uuid: string | null) => void;
   setCurrentProject: (project: string | null) => void;
   setIsDraftSession: (draft: boolean) => void;
+  notifySessionResumed: (projectName: string, sessionId: string) => void;
+  requestSessionResync: (projectName: string) => void;
+  /** 取走并清空待处理的恢复信号。 */
+  takeSessionResumeSignals: () => SessionResumeSignal[];
 }
 
 export const useAssistantStore = create<AssistantState>((set, get) => {
@@ -122,6 +158,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
   let projectorSource: TimelineEntry[] | null = null;
   let committedIds = new Set<string>();
   let committedSource: TimelineEntry[] | null = null;
+  // 已离开排队的消息 id：发送响应可能晚于流上的移出事件到达，据此不把它加回托盘
+  let settledQueuedIds = new Set<string>();
+
+  const withoutQueued = (messages: QueuedMessage[], id: string): QueuedMessage[] => {
+    settledQueuedIds.add(id);
+    return messages.some((m) => m.id === id) ? messages.filter((m) => m.id !== id) : messages;
+  };
 
   // base 是本次 mutation 之前 get().entries 持有的引用，next 是即将写入 state
   // 的新引用（二者恒不相等——每次 mutation 都会构造新数组）。自愈检查必须
@@ -158,6 +201,8 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
     turns: [],
     draftTurn: null,
     messagesLoading: false,
+    historySeq: -1,
+    queuedMessages: [],
     input: "",
     sending: false,
     interrupting: false,
@@ -173,6 +218,7 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
     editingTurnUuid: null,
     currentProject: null,
     isDraftSession: false,
+    sessionResumeSignals: [],
 
     setSessions: (sessions) => set({ sessions }),
     setCurrentSessionId: (id) => set({ currentSessionId: id }),
@@ -207,9 +253,13 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
         entry.message_id != null &&
         entry.message_id === draft.message_id;
       const nextDraft = draftReplaced ? null : draft;
+      // 用户条目即被接纳的排队消息，同一身份不在托盘与时间线上各出现一次
+      const queuedMessages =
+        entry.type === "user" && entry.uuid ? withoutQueued(get().queuedMessages, entry.uuid) : get().queuedMessages;
       set({
         entries: next,
         draft: nextDraft,
+        queuedMessages,
         turns: projectEntries(entries, next),
         draftTurn: buildDraftTurn(nextDraft, isDraftReplaced(nextDraft, ids)),
       });
@@ -242,12 +292,15 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
       projectorSource = null;
       committedIds = new Set<string>();
       committedSource = null;
+      settledQueuedIds = new Set<string>();
       set({
         entries: [],
+        queuedMessages: [],
         draft: null,
         draftRev: 0,
         turns: [],
         draftTurn: null,
+        historySeq: -1,
         startupFailure: null,
         startupFailureOrigin: null,
         // 编辑态锚在被清空的那条时间线上，重建后锚点不再存在
@@ -256,6 +309,28 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
     },
 
     setMessagesLoading: (loading) => set({ messagesLoading: loading }),
+    beginHistory: () => set({ historySeq: null }),
+    settleHistory: () => {
+      const { historySeq, entries } = get();
+      if (historySeq === null) set({ historySeq: entries.at(-1)?.seq ?? -1 });
+    },
+    setQueuedMessages: (messages) => set({ queuedMessages: messages }),
+    upsertQueuedMessage: (message) => {
+      const { queuedMessages, entries } = get();
+      if (settledQueuedIds.has(message.id) || entries.some((e) => e.uuid === message.id)) return;
+      const index = queuedMessages.findIndex((m) => m.id === message.id);
+      set({
+        queuedMessages:
+          index < 0
+            ? [...queuedMessages, message]
+            : queuedMessages.map((m, i) => (i === index ? message : m)),
+      });
+    },
+    removeQueuedMessage: (id) => {
+      const queuedMessages = withoutQueued(get().queuedMessages, id);
+      if (queuedMessages !== get().queuedMessages) set({ queuedMessages });
+    },
+    hasLeftQueue: (id) => settledQueuedIds.has(id),
     setInput: (input) => set({ input }),
     setSending: (sending) => set({ sending }),
     setInterrupting: (interrupting) => set({ interrupting }),
@@ -272,5 +347,14 @@ export const useAssistantStore = create<AssistantState>((set, get) => {
     setEditingTurnUuid: (uuid) => set({ editingTurnUuid: uuid }),
     setCurrentProject: (project) => set({ currentProject: project }),
     setIsDraftSession: (draft) => set({ isDraftSession: draft }),
+    notifySessionResumed: (projectName, sessionId) =>
+      set((s) => ({ sessionResumeSignals: [...s.sessionResumeSignals, { kind: "resumed", projectName, sessionId }] })),
+    requestSessionResync: (projectName) =>
+      set((s) => ({ sessionResumeSignals: [...s.sessionResumeSignals, { kind: "resync", projectName }] })),
+    takeSessionResumeSignals: () => {
+      const signals = get().sessionResumeSignals;
+      if (signals.length > 0) set({ sessionResumeSignals: [] });
+      return signals;
+    },
   };
 });

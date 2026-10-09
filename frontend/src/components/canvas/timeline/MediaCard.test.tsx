@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEMO_PROJECT_NAME } from "@/onboarding/demo-project";
 import { useProjectsStore } from "@/stores/projects-store";
@@ -17,6 +17,26 @@ function renderCard(props: Partial<Parameters<typeof MediaCard>[0]> = {}) {
   );
 }
 
+describe("MediaCard storyboard image", () => {
+  afterEach(() => useProjectsStore.setState({ assetFingerprints: {} }));
+
+  it("offers 640 and 1280 thumbnails to the card and keeps the original for the full-screen preview", () => {
+    useProjectsStore.setState({ assetFingerprints: { "storyboards/E1S01.png": 5 } });
+    renderCard({ assetPath: "storyboards/E1S01.png" });
+
+    const card = screen.getByRole("img", { name: /分镜图$/ });
+    expect(card).toHaveAttribute(
+      "srcset",
+      "/api/v1/files/demo/storyboards/E1S01.png?v=5&w=640 640w, /api/v1/files/demo/storyboards/E1S01.png?v=5&w=1280 1280w",
+    );
+    expect(card).toHaveAttribute("src", "/api/v1/files/demo/storyboards/E1S01.png?v=5");
+
+    fireEvent.click(screen.getByRole("button", { name: /分镜图」的大图$/ }));
+    const preview = screen.getAllByRole("img", { name: /分镜图$/ }).find((img) => !img.hasAttribute("srcset"));
+    expect(preview).toHaveAttribute("src", "/api/v1/files/demo/storyboards/E1S01.png?v=5");
+  });
+});
+
 describe("MediaCard upload", () => {
   it("invokes onUpload with the selected file", () => {
     const onUpload = vi.fn();
@@ -34,17 +54,13 @@ describe("MediaCard upload", () => {
   });
 
   it("disables upload button while generating", () => {
-    const { container } = renderCard({ onUpload: vi.fn(), generating: true });
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
-    const button = input?.nextElementSibling as HTMLButtonElement;
-    expect(button).toBeDisabled();
+    renderCard({ onUpload: vi.fn(), generating: true });
+    expect(screen.getByRole("button", { name: "上传分镜图" })).toBeDisabled();
   });
 
   it("disables upload button when a sibling upload is in flight (uploadDisabled)", () => {
-    const { container } = renderCard({ onUpload: vi.fn(), uploadDisabled: true });
-    const input = container.querySelector<HTMLInputElement>('input[type="file"]');
-    const button = input?.nextElementSibling as HTMLButtonElement;
-    expect(button).toBeDisabled();
+    renderCard({ onUpload: vi.fn(), uploadDisabled: true });
+    expect(screen.getByRole("button", { name: "上传分镜图" })).toBeDisabled();
   });
 
   it("accepts video formats for the video card", () => {
@@ -93,7 +109,7 @@ describe("MediaCard in the demo workbench", () => {
 
     expect(container.querySelector('input[type="file"]')).not.toBeNull();
     expect(getByRole("button", { name: /版本/ })).toBeInTheDocument();
-    expect(getByRole("button", { name: /编辑/ })).toBeInTheDocument();
+    expect(getByRole("button", { name: /局部修改/ })).toBeInTheDocument();
     expect(getByRole("button", { name: /重新生成分镜/ })).toBeInTheDocument();
   });
 });

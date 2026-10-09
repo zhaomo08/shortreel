@@ -1,16 +1,16 @@
 [project]
 name = "arcreel"
 # managed by release-please — do not bump manually
-version = "0.31.0"
+version = "0.33.0"
 description = "AI video generation workspace"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "claude-agent-sdk>=0.1.76",
+    "claude-agent-sdk>=0.2.153",
     "fastapi>=0.138.2",
     # fastapi 未 re-export 的 ASGI 类型与 MutableHeaders / FormData / UploadFile 直接取自 starlette。
     "starlette>=1.6.0",
-    "google-genai>=1.65.0",
+    "google-genai>=2.21.0",
     "Pillow>=12.1.1",
     "pydantic>=2.12.5",
     # pydantic 未 re-export 的 ErrorDetails / PydanticCustomError 直接取自 pydantic-core。
@@ -27,9 +27,9 @@ dependencies = [
     "pwdlib[argon2]>=0.3.0",
     "volcengine-python-sdk[ark]>=5.0.17",
     "openai>=2.30.0",
-    "xai-sdk>=1.8.2",
+    "xai-sdk>=1.20.0",
     "pyjianyingdraft>=0.3.0",
-    "instructor>=1.14.5",
+    "instructor>=1.16.0",
     "charset-normalizer>=3.4.6",
     "docx2txt>=0.9",
     "mammoth>=1.12.0",
@@ -65,6 +65,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "respx>=0.22.0",
     "deptry>=0.24.0",
+    "pytest-testmon>=2.2.0",
 ]
 # 变异测试工具，不进 dev：只在按批次跑 mutmut 时 `uv sync --group mutation` 装入。
 # 独立成组是为了让版本 pin 进 uv.lock、被 dependabot 看到；流程见 docs/testing/mutmut-runbook.md。
@@ -169,7 +170,6 @@ ignore_imports = [
     "lib.backends.backend_assembly.assembler -> lib.custom_provider",
     "lib.backends.backend_assembly.assembler -> lib.custom_provider.loader",
     "lib.billing.cost_calculator -> lib.custom_provider",
-    "lib.db.repositories.usage_repo -> lib.custom_provider",
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider",
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider.endpoints",
     "lib.db.models.custom_provider -> lib.custom_provider",
@@ -299,6 +299,7 @@ DEP002 = [
     "socksio",          # httpx 的 SOCKS 代理传输后端
     "lxml",             # BeautifulSoup 的 lxml / lxml-xml 解析器后端
     "mutmut",           # 变异测试 CLI，源码不 import 它；变异后的模块只在 mutants/ 副本里 import
+    "pytest-testmon",   # pytest 插件，经 entry point 加载；按改动选测试，用法见 docs/agents/testing.md
 ]
 # DEP004（import 了 dev 依赖）——tests/ 与 scripts/ 在扫描范围内，deptry 无法按目录区分
 # dev 与生产文件，故逐项列出它们正当 import 的测试框架包；其余 dev 依赖仍受本规则守护。

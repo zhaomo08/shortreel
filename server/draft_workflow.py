@@ -17,9 +17,10 @@ from lib.artifacts.artifact_manifest import ArtifactBasis
 from lib.config.resolver import ConfigResolver
 from lib.episode.episode_ids import episode_title
 from lib.episode.episode_paths import SCRIPT_PLAN_FILENAMES, episode_drafts_dir, episode_script_filename
-from lib.generation.video_request_facts import VideoRequestFactsError
+from lib.generation.video_request_facts import VideoRequestFactsError, VideoRequestFactsFailure
 from lib.infra.async_thread import run_sync_transaction
 from lib.infra.json_io import atomic_write_json, load_json_or_none
+from lib.project.project_activity import record_project_activity
 from lib.project.project_manager import ProjectManager, ScriptWriteConflict
 from lib.script import script_review
 from lib.script.draft_quarantine import (
@@ -69,13 +70,13 @@ from server.text_generation import (
     _narration_script_plan_path,
     _narration_script_plan_result_text,
     _reference_result_text,
-    _video_facts_failure_text,
     fetch_storyboard_durations,
     load_novel_source,
     reference_soft_violations,
     render_soft_violation_lines,
     render_soft_violation_section,
     uses_reference_video_units,
+    video_facts_failure_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -155,13 +156,29 @@ class DiscardDraftRequest(_DraftRequest):
 
 
 class DraftWorkflowError(Exception):
-    """``draft_refreshed`` 为真表示晋升被违约挡下、且违约报告已按现值写回草稿。"""
+    """``draft_refreshed`` 为真表示晋升被违约挡下、且违约报告已按现值写回草稿。
 
-    def __init__(self, code: str, detail: str, *, draft_refreshed: bool = False):
+    ``failure`` 非空表示重判被视频请求事实挡下（模型能力不满足、档位缺失等配置问题，不是草稿本身的
+    违约）：``code`` 即其问题码，Web 与 Agent 都按问题码、参数与修复指引呈现真实原因。
+    """
+
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        *,
+        draft_refreshed: bool = False,
+        failure: VideoRequestFactsFailure | None = None,
+    ):
         super().__init__(detail)
         self.code = code
         self.detail = detail
         self.draft_refreshed = draft_refreshed
+        self.failure = failure
+
+    @classmethod
+    def video_facts(cls, failure: VideoRequestFactsFailure) -> DraftWorkflowError:
+        return cls(failure.code, video_facts_failure_text(failure), failure=failure)
 
 
 class ReferenceDraftRevalidation(NamedTuple):
@@ -413,7 +430,7 @@ async def _promote_reference_script_plan(
             config_resolver=ctx.config_resolver,
         )
     except VideoRequestFactsError as exc:
-        raise DraftWorkflowError("draft_invalid", _video_facts_failure_text(exc.failure)) from exc
+        raise DraftWorkflowError.video_facts(exc.failure) from exc
     except ValueError as exc:
         raise DraftWorkflowError("draft_invalid", f"❌ {exc}") from exc
     violations, flat_units, split_caps = revalidation.violations, revalidation.flat_units, revalidation.caps
@@ -699,7 +716,7 @@ async def _promote_drama_script_plan(
             config_resolver=ctx.config_resolver,
         )
     except VideoRequestFactsError as exc:
-        raise DraftWorkflowError("draft_invalid", _video_facts_failure_text(exc.failure)) from exc
+        raise DraftWorkflowError.video_facts(exc.failure) from exc
     except ValueError as exc:
         raise DraftWorkflowError("draft_invalid", f"❌ {exc}") from exc
 
@@ -901,7 +918,7 @@ async def _promote_narration_script_plan(
             config_resolver=ctx.config_resolver,
         )
     except VideoRequestFactsError as exc:
-        raise DraftWorkflowError("draft_invalid", _video_facts_failure_text(exc.failure)) from exc
+        raise DraftWorkflowError.video_facts(exc.failure) from exc
     except ValueError as exc:
         raise DraftWorkflowError("draft_invalid", f"❌ {exc}") from exc
 
@@ -1300,6 +1317,7 @@ class DraftWorkflow:
                 meta=meta,
             ),
         )
+        record_project_activity(self.ctx.project_path)
         return self._read(episode, resolved)
 
     async def patch(
@@ -1459,8 +1477,7 @@ class DraftWorkflow:
                     "revision_conflict",
                     f"draft revision changed: expected {base_revision}, actual {actual_revision}",
                 )
-            discarded = path.exists()
-            path.unlink(missing_ok=True)
+            discarded = clear_quarantine(self.ctx.project_path, episode, resolved)
         return {"episode": episode, "doc_type": doc_type, "discarded": discarded}
 
 

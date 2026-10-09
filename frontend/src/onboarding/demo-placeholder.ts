@@ -10,8 +10,6 @@
  * object-cover 裁切，只有居中的构图能在各比例下都完整。
  */
 
-import { hashHue } from "@/components/ui/darkroom-tokens";
-
 export type DemoPlaceholderMotif = "character" | "scene" | "prop" | "storyboard";
 
 /** 取景标记：四角 L 形，四类母题共用的签名元素。 */
@@ -46,6 +44,15 @@ const MOTIFS: Record<DemoPlaceholderMotif, string> = {
     '<circle cx="57" cy="43" r="4.5" fill="none" stroke="var(--pl-line)" stroke-width="1.6"/>',
 };
 
+/** 由资源名派生稳定色相（0–359）：同名同 salt 恒得同色，换名字才换色。 */
+function hashHue(name: string, salt: number): number {
+  let hash = salt;
+  for (let i = 0; i < name.length; i += 1) {
+    hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  }
+  return hash % 360;
+}
+
 /**
  * 按 seed 现算一张占位图，返回可直接放进 `<img src>` 的 data URI。
  *
@@ -62,7 +69,7 @@ export function demoPlaceholder(seed: string, motif: DemoPlaceholderMotif): stri
     '<radialGradient id="g" cx="32%" cy="26%" r="92%">' +
     `<stop offset="0%" stop-color="oklch(0.46 0.11 ${hue})"/>` +
     `<stop offset="52%" stop-color="oklch(0.27 0.06 ${hue2})"/>` +
-    '<stop offset="100%" stop-color="color-mix(in oklab, var(--color-bg-grad-b) 100%, transparent)"/>' +
+    '<stop offset="100%" stop-color="oklch(0.15 0.02 265)"/>' +
     "</radialGradient>" +
     "</defs>" +
     '<rect width="100" height="100" fill="url(#g)"/>' +

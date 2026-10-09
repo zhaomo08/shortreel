@@ -19,7 +19,8 @@ from collections.abc import Callable
 from typing import Any, TypeGuard
 
 from lib.custom_provider.comfyui.artifacts import expected_suffixes_text
-from lib.i18n import render_generation_input_error
+from lib.i18n import render_generation_input_error, render_message
+from lib.i18n.display_names import DisplayNames
 
 # Backend capability rejections (``ImageCapabilityError`` / ``VideoCapabilityError`` /
 # ``ReferencePayloadFloorError``). Their ``.code`` is already an ``errors`` catalog key,
@@ -49,13 +50,16 @@ CAPABILITY_FAILURE_CODES: frozenset[str] = frozenset(
         "video_reference_images_unreadable",
         "video_reference_images_unsupported",
         "video_reference_images_with_frames_unsupported",
+        "video_reference_resolution_unsupported",
         "video_reference_audio_duration_exceeded",
         "video_reference_audio_exceeded",
         "video_reference_audio_format_unsupported",
         "video_reference_audio_slots_insufficient",
         "video_reference_audio_unreadable",
         "video_reference_audio_unsupported",
+        "video_aspect_ratio_not_supported",
         "video_resolution_duration_unsupported",
+        "video_resolution_not_supported",
         "video_start_image_unreadable",
     }
 )
@@ -119,6 +123,8 @@ FAILURE_CODE_KEYS: dict[str, str] = {
     # 译文模板：它不该被翻译，读侧按独立字段原样展示。
     "provider_rejected": "task_fail_provider_rejected",
     "dispatch_provider_requeue_failed": "task_fail_dispatch_provider_requeue_failed",
+    # 项目在任务执行期间被删除：任务放弃落盘，见 lib.project.task_project_claim。
+    "project_deleted_during_task": "task_fail_project_deleted_during_task",
     "restart_lost_image": "task_fail_restart_lost_image",
     "restart_lost_audio": "task_fail_restart_lost_audio",
     "restart_lost_text": "task_fail_restart_lost_text",
@@ -344,7 +350,7 @@ def bound_reason(reason: str, limit: int) -> str:
 _COMFYUI_ARTIFACT_MISMATCH_CODES = frozenset({"comfyui_output_type_mismatch", "comfyui_output_container_mismatch"})
 
 
-def render_failure(error_message: str | None, translate: Callable[..., str]) -> str | None:
+def render_failure(error_message: str | None, translate: Callable[..., str], names: DisplayNames) -> str | None:
     """Render a stored failure reason for display via the request Translator.
 
     Recognised ``[code]`` / ``[code] {params}`` strings render to localized text; cascade
@@ -355,6 +361,9 @@ def render_failure(error_message: str | None, translate: Callable[..., str]) -> 
     Cascade nesting is self-limiting: each layer re-encodes the previous envelope into JSON,
     so escaping makes the string grow super-linearly and the write side caps it well before
     the depth could threaten the recursion limit.
+
+    Provider and model IDs in the params render as display names from ``names``; the stored
+    params keep the IDs.
 
     The two ComfyUI artifact-mismatch codes take their ``expected`` extension list from the
     stored ``media_type`` here rather than from the row: the list is a projection of a static
@@ -370,15 +379,15 @@ def render_failure(error_message: str | None, translate: Callable[..., str]) -> 
     if code == CASCADE_FAILURE_CODE:
         nested_reason = params.get("reason")
         if isinstance(nested_reason, str):
-            params = {**params, "reason": render_failure(nested_reason, translate)}
+            params = {**params, "reason": render_failure(nested_reason, translate, names)}
     if code in {"declarative_template_render_failed", "declarative_response_extract_failed"}:
         detail = params.get("detail")
         if _is_validation_message(detail):
-            params = {**params, "detail": translate(detail["key"], **detail["params"])}
+            params = {**params, "detail": render_message(detail["key"], detail["params"], translate, names)}
     if code in _COMFYUI_ARTIFACT_MISMATCH_CODES:
         media_type = params.get("media_type")
         params = {**params, "expected": expected_suffixes_text(media_type if isinstance(media_type, str) else "")}
-    return render_generation_input_error(FAILURE_CODE_KEYS[code], params, translate)
+    return render_generation_input_error(FAILURE_CODE_KEYS[code], params, translate, names)
 
 
 def parse_failure(error_message: str | None) -> tuple[str, dict[str, Any]] | None:

@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next";
 
 import { API } from "@/api";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { useAppStore } from "@/stores/app-store";
-import { useProjectsStore } from "@/stores/projects-store";
+import { refreshAfterWrite } from "@/components/canvas/shared/refreshAfterWrite";
 import type { EpisodesView, ManualSplitAction, ManualSplitResponse } from "@/types";
 import { errMsg } from "@/utils/async";
 
+import { ImpactConfirmDialog, ImpactText } from "./ImpactConfirmDialog";
 import { resolvePointAction, stepPoint, type ManuscriptPoint, type PointAction } from "./manual-split-model";
 
 interface PendingConfirm {
@@ -50,7 +50,8 @@ function isKeyedControl(target: EventTarget | null): boolean {
 
 /**
  * 「分集」视图的手工切分：插入光标、←/→ 微调（Shift 一次 10 字）、Enter 确认、Esc 取消，
- * 以及波及有产物的集或合并会并入未切分的原文时由服务端成文的确认清单。`onApplied` 收到切分或拆分出的新集 ID。
+ * 以及波及有产物的集或合并会并入未切分的原文时由服务端成文的确认清单。`onApplied` 收到切分或拆分出的新集 ID；
+ * 随后的项目刷新没成功时收到 null，不定位。
  */
 export function useManualSplit(
   projectName: string,
@@ -77,9 +78,9 @@ export function useManualSplit(
       setMoving(null);
       setTitle("");
       setConfirm(null);
-      useAppStore.getState().pushToast(t("manual_split_done"), "success");
-      await useProjectsStore.getState().refreshProject(projectName);
-      onApplied(response.episode);
+      // 刷新没成功时新集不在项目数据里，不定位过去
+      const refreshed = await refreshAfterWrite(projectName, t);
+      onApplied(refreshed === "success" ? response.episode : null);
     },
     [onApplied, projectName, t],
   );
@@ -208,13 +209,18 @@ export function useManualSplit(
   }, []);
 
   const dialog = (
-    <ConfirmDialog
-      open={confirm !== null}
-      title={confirm?.title ?? ""}
-      description={<span className="whitespace-pre-line">{confirm?.text}</span>}
-      confirmLabel={t("manual_split_dialog_confirm")}
-      tone="danger"
-      loading={busy}
+    <ImpactConfirmDialog
+      request={
+        confirm === null
+          ? null
+          : {
+              title: confirm.title,
+              body: <ImpactText text={confirm.text} />,
+              confirmLabel: t("manual_split_dialog_confirm"),
+              destructive: true,
+            }
+      }
+      busy={busy}
       onCancel={() => setConfirm(null)}
       onConfirm={() => {
         if (confirm) {

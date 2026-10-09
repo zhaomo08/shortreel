@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Router, useLocation } from "wouter";
 import { memoryLocation } from "wouter/memory-location";
 import { API, type ProjectEventStreamOptions } from "@/api";
+import { LeaveGuardProvider, useLeaveGuard } from "@/components/shared/edit-unit/LeaveGuard";
 import { useProjectEventsSSE } from "./useProjectEventsSSE";
 import { useAppStore } from "@/stores/app-store";
+import { useAssistantStore } from "@/stores/assistant-store";
 import { useProjectsStore } from "@/stores/projects-store";
 import { useCostStore } from "@/stores/cost-store";
 import { useTasksStore } from "@/stores/tasks-store";
@@ -309,6 +311,35 @@ describe("useProjectEventsSSE", () => {
 
     expect(revision()).toBeGreaterThan(before);
     expect(useAppStore.getState().getEntityRevision("draft:episode_4_prompt_authoring")).toBeGreaterThan(0);
+  });
+
+  it("forwards an assistant session resuming on its own to the assistant store", () => {
+    useAssistantStore.setState(useAssistantStore.getInitialState(), true);
+    const stream = mockProjectEventStream();
+    renderHarness("/");
+
+    act(() =>
+      stream.options?.onAssistantSessionResumed?.({ project_name: "demo", session_id: "session-1", status: "running" }),
+    );
+
+    expect(useAssistantStore.getState().sessionResumeSignals).toEqual([
+      { kind: "resumed", projectName: "demo", sessionId: "session-1" },
+    ]);
+  });
+
+  it("asks the assistant to re-check its session on every snapshot, the first one included", () => {
+    // 恢复通知只推一次：订阅建立之前发出的（含首次建连前的失败重试、断线空窗）要靠快照核对
+    useAssistantStore.setState(useAssistantStore.getInitialState(), true);
+    const stream = mockProjectEventStream();
+    renderHarness("/");
+
+    act(() => stream.options?.onSnapshot?.({ project_name: "demo", fingerprint: "fp-a" } as never));
+    act(() => stream.options?.onSnapshot?.({ project_name: "demo", fingerprint: "fp-a" } as never));
+
+    expect(useAssistantStore.getState().sessionResumeSignals).toEqual([
+      { kind: "resync", projectName: "demo" },
+      { kind: "resync", projectName: "demo" },
+    ]);
   });
 
   it("names an episode the Agent just created from the refreshed ledger", async () => {
@@ -670,6 +701,51 @@ describe("useProjectEventsSSE", () => {
     });
     expect(screen.getByTestId("location")).toHaveTextContent("/characters");
     expect(useAppStore.getState().scrollTarget).toBeNull();
+  });
+
+  it("有编辑单元带着未保存修改时，Agent 改动不触发自动跳转与定位", async () => {
+    const stream = mockProjectEventStream();
+    const saveNothing = async () => true;
+    function DirtyUnit() {
+      useLeaveGuard({ dirty: true, save: saveNothing });
+      return null;
+    }
+    const { hook } = memoryLocation({ path: "/episodes/1" });
+    render(
+      <Router hook={hook}>
+        <LeaveGuardProvider>
+          <DirtyUnit />
+          <HookHarness projectName="demo" />
+        </LeaveGuardProvider>
+      </Router>,
+    );
+
+    act(() => {
+      stream.options?.onChanges?.({
+        project_name: "demo",
+        batch_id: "batch-dirty",
+        fingerprint: "fp-dirty",
+        generated_at: "2026-03-01T00:00:00Z",
+        source: "filesystem",
+        changes: [
+          {
+            entity_type: "scene",
+            action: "updated",
+            entity_id: "酒馆",
+            label: "场景「酒馆」",
+            focus: { pane: "scenes", anchor_type: "scene", anchor_id: "酒馆" },
+            important: true,
+          },
+        ],
+      });
+    });
+
+    await waitFor(() => {
+      expect(useAppStore.getState().workspaceNotifications[0]?.target?.id).toBe("酒馆");
+    });
+    expect(screen.getByTestId("location")).toHaveTextContent("/episodes/1");
+    expect(useAppStore.getState().scrollTarget).toBeNull();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
   it("一次不带聚焦目标的刷新（如 onSnapshot）落定时，不应抢先消费更晚一批 onChanges 排队的目标", async () => {

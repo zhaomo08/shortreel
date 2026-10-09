@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import { API } from "@/api";
 import { useAppStore } from "@/stores/app-store";
@@ -25,11 +25,13 @@ const CHANGED: ExternalSourceChange = {
 };
 
 describe("ExternalChangeNotice", () => {
+  let refresh: MockInstance;
+
   beforeEach(() => {
     vi.restoreAllMocks();
     useAppStore.setState(useAppStore.getInitialState(), true);
     useProjectsStore.setState(useProjectsStore.getInitialState(), true);
-    vi.spyOn(useProjectsStore.getState(), "refreshProject").mockResolvedValue("success");
+    refresh = vi.spyOn(useProjectsStore.getState(), "refreshProject").mockResolvedValue("success");
   });
 
   it("lists the affected episodes and updates the ledger with the listed revision", async () => {
@@ -42,10 +44,24 @@ describe("ExternalChangeNotice", () => {
     expect(screen.getByText("原文有变化、还没有产物，标为「原文已重新规划」：下山")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "更新分集账本" }));
 
-    await waitFor(() =>
-      expect(useAppStore.getState().toast?.text).toBe("已按「上卷.txt」的改动更新分集账本"),
-    );
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith("demo", undefined));
     expect(accept).toHaveBeenCalledWith("demo", "上卷.txt", "r1");
+  });
+
+  it("warns when the project data fails to refresh after the ledger was updated", async () => {
+    refresh.mockRestore();
+    vi.spyOn(API, "getProject").mockRejectedValue(new Error("offline"));
+    vi.spyOn(API, "acceptExternalSourceChange").mockResolvedValue({ status: "applied", impact: NO_IMPACT });
+    render(<ExternalChangeNotice projectName="demo" changes={[CHANGED]} onLocate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "更新分集账本" }));
+
+    await waitFor(() =>
+      expect(useAppStore.getState().toast).toMatchObject({
+        text: "操作已完成，但页面数据刷新失败，请手动刷新查看最新状态",
+        tone: "warning",
+      }),
+    );
   });
 
   it("sends one update while the first request is still in flight", async () => {
@@ -65,9 +81,7 @@ describe("ExternalChangeNotice", () => {
     expect(accept).toHaveBeenCalledTimes(1);
 
     await act(async () => finish({ status: "applied", impact: NO_IMPACT }));
-    await waitFor(() =>
-      expect(useAppStore.getState().toast?.text).toBe("已按「上卷.txt」的改动更新分集账本"),
-    );
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith("demo", undefined));
     expect(button).toBeEnabled();
   });
 

@@ -9,8 +9,8 @@ ArcReel 假定贡献者用 coding Agent 开发。仓库根的 `AGENTS.md`（`CLA
 ## 本地开发环境
 
 ```bash
-# 前置要求：Python 3.12+, Node.js 20+, uv, pnpm（ffmpeg 随 Python 依赖 imageio-ffmpeg 安装）
-# 文档站 website/ 另需 Node 24（版本固定于 website/.node-version）
+# 前置要求：Python 3.12+, Node.js 24.12.0+, uv, pnpm（ffmpeg 随 Python 依赖 imageio-ffmpeg 安装）
+# 文档站 website/ 的 Node 版本固定于 website/.node-version
 # 操作系统：Linux / macOS / Windows WSL2；Windows 原生可运行项目创建与基础流程，
 # Agent 沙箱在 Windows 上降级为命令前缀白名单（见 docs/adr/0025），生产部署推荐 WSL2/Docker
 
@@ -64,6 +64,25 @@ pnpm check-consistency
 
 开发循环与 push 前的完整闸门见 [`AGENTS.md`](https://github.com/ArcReel/ArcReel/blob/main/AGENTS.md)「工具链与校验」和 [`docs/agents/testing.md`](https://github.com/ArcReel/ArcReel/blob/main/docs/agents/testing.md)；CI 跑同一套检查。
 
+### 前端页面级测试
+
+`frontend/e2e/` 是 Playwright 页面级套件。它在 1024×600 到 2560×1440 的五个视口上打开各页面区域，检查文档本身不滚动、没有被裁切又无法滚动到达的内容、纵向滚动区（含弹层正文）没有被撑出横向滚动，并用 axe 按 WCAG 2.2 AA 检查可访问性。CI 的 `frontend-e2e` job 在官方 Playwright 镜像里运行。本地用 run-server 远程模式在同一镜像里渲染，结果与 CI 一致：
+
+```bash
+cd frontend
+pnpm e2e:server   # 终端一：在 Docker 里启动 Playwright run-server，镜像版本取自 @playwright/test
+pnpm e2e:remote   # 终端二：构建前端，连接容器里的浏览器运行套件
+```
+
+没有 Docker 时，先运行 `pnpm exec playwright install chromium`，再运行 `pnpm e2e`。这种方式在本机渲染，字体与布局可能和 CI 不同，结果以容器内为准。
+
+同一台机器上并行运行多份套件时，用环境变量错开端口与产物目录，不设置时取括号内的默认值：`E2E_PORT` 是预览服务端口（4173），`E2E_OUTPUT_DIR` 是失败截图与 trace 的目录（`frontend/test-results`），`E2E_SERVER_PORT` 是 run-server 映射到本机的端口（3000），`pnpm e2e:server` 与 `pnpm e2e:remote` 读同一个变量。`CI=1` 时生成的 HTML 报告用 Playwright 自带的 `PLAYWRIGHT_HTML_OUTPUT_DIR` 改目录。截图基线按默认端口生成，换端口后页面上显示本机地址的截图不参与比对。
+
+- **新增场景**：在 `frontend/e2e/regions/` 下用 `defineRegionScenarios` 登记，写明打开的路由、就绪条件和要探测的状态。场景以会改变可用高度的状态为主，例如展开面板、打开弹层。
+- **豁免**：装饰性的裁切层用 `data-overflow-ok="原因"` 豁免，属性值必须写明原因。确需横向滚动的区域（时间线轨道、代码块、标签带）写 `overflow-x-auto`，探针按这个类名识别，不需要另加豁免。
+- **接口数据替身**：`frontend/e2e/fixtures/recorded/` 由 `pnpm e2e:record` 对真实后端录制。脚本需要 `uv`，会在临时数据目录里启动后端并创建演示项目。后端改动接口形状的 PR 同时重录，形状变化体现为替身文件的 diff。长文本、多条目等压力变体写在场景的 `api` 字段里。
+- **页面截图**：场景登记 `screenshot` 后，设置 `E2E_SCREENSHOTS=1` 运行才会比对，只在 1024×600、1440×900、2560×1440 三个视口拍。CI 的 `frontend-e2e` 设置了这个变量，截图出现差异或缺少基线时 job 失败。基线只能在容器里生成和比对：用 `pnpm e2e:server` 与 `pnpm e2e:remote` 运行，新增或有意改动的截图加 `--update-snapshots=changed` 重新生成，逐张核对后提交。本机渲染的字体与容器不同，不要用它生成基线。
+
 ## 代码质量
 
 代码规范的入口是 [`CODING_STANDARDS.md`](https://github.com/ArcReel/ArcReel/blob/main/CODING_STANDARDS.md)：按改动路径索引到 `docs/standards/` 下的领域规范，只收工具替代不了、需要判断的项目约定。本地审查和 PR 上的 AI reviewer 都以它为依据。
@@ -74,7 +93,7 @@ pnpm check-consistency
 
 ## 文档维护
 
-用户文档的唯一发布位置是 [docs.arc-reel.com](https://docs.arc-reel.com)，源文件在 `website/docs/`（本地构建与预览见上文「文档站」）。中文是唯一写作源，英文译文由 AI 生成，人工仅审校中文源。内部文档（ADR、`CONTEXT.md`、`AGENTS.md`、安全威胁模型、供应商 API 文档索引等）不上站，留在仓库 `docs/` 下；`SECURITY.md` 因 GitHub Security 选项卡依赖也留在仓库根。
+用户文档的唯一发布位置是 [docs.arc-reel.com](https://docs.arc-reel.com)，源文件在 `website/docs/`（本地构建与预览见上文「文档站」）。中文是唯一写作源，英文译文由 AI 生成，人工仅审校中文源。内部文档（ADR、`GLOSSARY.md`、`AGENTS.md`、安全威胁模型、供应商 API 文档索引等）不上站，留在仓库 `docs/` 下；`SECURITY.md` 因 GitHub Security 选项卡依赖也留在仓库根。
 
 本文件是贡献指南的真相源，构建时复制为站点的开发区页面（`website/scripts/sync-contributing.mjs`），中文副本不入库。
 

@@ -1,13 +1,24 @@
-import { useEffect, useId, useState, type CSSProperties } from "react";
+import { useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "wouter";
+import { cn } from "cn";
 import { Bot, CheckCircle2, Loader2, RotateCcw, Sparkles, X } from "lucide-react";
 import { ApiRequestError } from "@/api";
 import { enqueueAdScript, promptAuthoringResourceId } from "@/actions/generation";
 import { ScriptOverwriteConfirmDialog } from "@/components/shared/ScriptOverwriteConfirmDialog";
-import { GlassModal } from "@/components/ui/GlassModal";
-import { PrimaryButton } from "@/components/ui/PrimaryButton";
-import { SecondaryButton } from "@/components/ui/SecondaryButton";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isAdScriptTask, useAdScriptEntry } from "@/hooks/useAdScriptEntry";
 import { useEpisodeLedger } from "@/hooks/useEpisodeLedger";
 import { useAdScriptStore, type AdScriptOpenRequest } from "@/stores/ad-script-store";
@@ -18,13 +29,6 @@ import type { AdScriptTaskResult, ScriptOverwrite } from "@/types";
 import { errMsg } from "@/utils/async";
 import { episodeAgentRef } from "@/utils/episode-display";
 import { formatNameList } from "@/utils/list-format";
-
-const FIELD_STYLE: CSSProperties = {
-  background: "linear-gradient(180deg, color-mix(in oklab, var(--color-bg-grad-a) 60%, transparent), color-mix(in oklab, var(--color-bg-grad-b) 45%, transparent))",
-  border: "1px solid var(--color-hairline)",
-  color: "var(--color-text)",
-  boxShadow: "inset 0 1px 2px color-mix(in oklab, var(--sink) 20%, transparent)",
-};
 
 function readScriptOverwrite(err: unknown): ScriptOverwrite | null {
   if (!(err instanceof ApiRequestError) || err.status !== 409) return null;
@@ -60,8 +64,6 @@ interface DialogProps {
 export function AdScriptDialog({ request, onClose }: DialogProps) {
   const { t } = useTranslation(["dashboard", "workflow"]);
   const episodeLedger = useEpisodeLedger();
-  const titleId = useId();
-  const descId = useId();
   const fieldId = useId();
   const { projectName, episode, regenerate } = request;
   const [instructions, setInstructions] = useState("");
@@ -110,67 +112,42 @@ export function AdScriptDialog({ request, onClose }: DialogProps) {
 
   return (
     <>
-      <GlassModal
+      <Dialog
         open={overwrite === null}
-        onClose={() => {
-          if (!submitting) onClose();
+        onOpenChange={(next) => {
+          if (!next && !submitting) onClose();
         }}
-        labelledBy={titleId}
-        describedBy={descId}
-        widthClassName="w-full max-w-lg"
-        closeOnBackdrop={!submitting}
-        closeOnEscape={!submitting}
       >
-        <div className="p-5">
-          <h2
-            id={titleId}
-            className="display-serif text-[17px] font-semibold tracking-tight"
-            style={{ color: "var(--color-text)" }}
-          >
-            {actionLabel}
-          </h2>
-          <p id={descId} className="mt-1.5 text-[12.5px] leading-[1.55]" style={{ color: "var(--color-text-3)" }}>
-            {regenerate ? t("ad_script_regenerate_desc") : t("ad_script_desc")}
-          </p>
-
-          <label
-            htmlFor={fieldId}
-            className="mt-4 block text-[12px] font-medium"
-            style={{ color: "var(--color-text-2)" }}
-          >
-            {t("ad_script_instructions_label")}
-          </label>
-          <textarea
-            id={fieldId}
-            value={instructions}
-            onChange={(event) => setInstructions(event.target.value)}
-            rows={3}
-            maxLength={4000}
-            placeholder={t("ad_script_instructions_placeholder")}
-            className="focus-ring mt-1.5 w-full resize-none rounded-lg px-3 py-2 text-[13px] leading-[1.55] outline-none"
-            style={FIELD_STYLE}
-          />
-
-          <div className="mt-4 flex items-center justify-end gap-2">
-            <SecondaryButton
-              size="sm"
-              onClick={() => void submit(null)}
-              disabled={submitting}
-              leadingIcon={<Sparkles className="h-3.5 w-3.5" aria-hidden="true" />}
-            >
+        <DialogContent showCloseButton={!submitting}>
+          <DialogHeader>
+            <DialogTitle>{actionLabel}</DialogTitle>
+            <DialogDescription>{regenerate ? t("ad_script_regenerate_desc") : t("ad_script_desc")}</DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor={fieldId}>{t("ad_script_instructions_label")}</Label>
+              <Textarea
+                id={fieldId}
+                value={instructions}
+                onChange={(event) => setInstructions(event.target.value)}
+                maxLength={4000}
+                placeholder={t("ad_script_instructions_placeholder")}
+                disabled={submitting}
+              />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => void submit(null)} disabled={submitting}>
+              <Sparkles aria-hidden data-icon="inline-start" />
               {actionLabel}
-            </SecondaryButton>
-            <PrimaryButton
-              size="sm"
-              onClick={handOff}
-              disabled={submitting}
-              leadingIcon={<Bot className="h-3.5 w-3.5" aria-hidden="true" />}
-            >
+            </Button>
+            <Button onClick={handOff} disabled={submitting}>
+              <Bot aria-hidden data-icon="inline-start" />
               {t("script_plan_hand_to_agent")}
-            </PrimaryButton>
-          </div>
-        </div>
-      </GlassModal>
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {overwrite && (
         <ScriptOverwriteConfirmDialog
@@ -192,30 +169,45 @@ interface ButtonProps {
   projectName: string;
   episode: number;
   regenerate: boolean;
-  className?: string;
+  /** 页头动作用描边小按钮；空状态里的主操作用实心按钮。 */
+  prominent?: boolean;
 }
 
 /**
  * 打开广告/短片「AI 生成脚本」弹窗的入口；`regenerate` 时为「重新生成脚本」。
  * 任务在跑或缺创作灵感与商品时照常显示、置灰，悬停说明原因。
  */
-export function AdScriptButton({ projectName, episode, regenerate, className = "" }: ButtonProps) {
+export function AdScriptButton({ projectName, episode, regenerate, prominent = false }: ButtonProps) {
   const { t } = useTranslation("dashboard");
   const open = useAdScriptStore((s) => s.open);
   const { busy, refusedReason } = useAdScriptEntry(projectName, episode);
+  const reasonId = useId();
   const reason = busy ? t("ad_script_busy") : refusedReason;
   const Icon = busy ? Loader2 : regenerate ? RotateCcw : Sparkles;
-  return (
-    <button
-      type="button"
-      className={`inline-flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${className}`.trim()}
+  const button = (
+    <Button
+      variant={prominent ? "default" : "outline"}
+      size={prominent ? "default" : "sm"}
       disabled={reason !== null}
-      title={reason ?? undefined}
+      aria-describedby={reason !== null ? reasonId : undefined}
       onClick={() => open({ projectName, episode, regenerate })}
     >
-      <Icon className={`h-3.5 w-3.5${busy ? " motion-safe:animate-spin" : ""}`} aria-hidden="true" />
-      <span>{regenerate ? t("ad_script_regenerate") : t("ad_script_generate")}</span>
-    </button>
+      <Icon className={busy ? "animate-spin" : undefined} aria-hidden data-icon="inline-start" />
+      {regenerate ? t("ad_script_regenerate") : t("ad_script_generate")}
+    </Button>
+  );
+  if (reason === null) return button;
+  // 置灰的按钮收不到悬停：提示挂在外层 span 上，原因另以 sr-only 文本作按钮的描述
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        {button}
+        <span id={reasonId} className="sr-only">
+          {reason}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{reason}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -229,6 +221,8 @@ interface ProgressProps {
   noScript: boolean;
   className?: string;
 }
+
+const STATUS_CLS = "flex gap-2.5 rounded-xl border border-primary/20 bg-primary/10 px-4 py-3 text-sm text-subtle-foreground";
 
 /**
  * 广告/短片整份生成的任务进度：排队 / 生成中，或本次登记的待生成资产。
@@ -245,28 +239,27 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
     return (
       <div
         role="status"
-        className={`flex items-center gap-2.5 rounded-xl px-4 py-3 text-[12.5px] ${className}`.trim()}
-        style={{ background: "var(--color-accent-dim)", border: "1px solid var(--color-accent-soft)", color: "var(--color-text-2)" }}
+        className={cn(STATUS_CLS, "items-center", className)}
       >
-        <Loader2 className="h-4 w-4 shrink-0 motion-safe:animate-spin" style={{ color: "var(--color-accent-2)" }} aria-hidden />
+        <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden />
         <span>
           {latestTask.status === "running" ? t("ad_script_progress_running") : t("ad_script_progress_queued")}{" "}
-          <span style={{ color: "var(--color-text-4)" }}>{t("ad_script_progress_hint")}</span>
+          <span className="text-muted-foreground">{t("ad_script_progress_hint")}</span>
         </span>
       </div>
     );
   }
 
   const dismiss = (
-    <button
-      type="button"
+    <Button
+      variant="ghost"
+      size="icon-xs"
       onClick={() => setDismissed(latestTask.task_id)}
       aria-label={t("ad_script_dismiss")}
-      title={t("ad_script_dismiss")}
-      className="focus-ring ml-auto shrink-0 rounded p-0.5 opacity-70 transition-opacity hover:opacity-100"
+      className="ml-auto"
     >
-      <X className="h-3.5 w-3.5" aria-hidden="true" />
-    </button>
+      <X aria-hidden="true" />
+    </Button>
   );
 
   const registered = (latestTask.result as AdScriptTaskResult | null)?.new_assets ?? [];
@@ -274,10 +267,9 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
   return (
     <div
       role="status"
-      className={`flex items-start gap-2.5 rounded-xl px-4 py-3 text-[12.5px] ${className}`.trim()}
-      style={{ background: "var(--color-accent-dim)", border: "1px solid var(--color-accent-soft)", color: "var(--color-text-2)" }}
+      className={cn(STATUS_CLS, "items-start", className)}
     >
-      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" style={{ color: "var(--color-accent-2)" }} aria-hidden />
+      <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
       <span>
         {t("ad_script_new_assets", {
           count: registered.length,
@@ -296,7 +288,7 @@ export function AdScriptProgress({ projectName, episode, noScript, className = "
 export function AdScriptInputsLink({ className = "" }: { className?: string }) {
   const { t } = useTranslation("dashboard");
   return (
-    <Link href="/" className={`focus-ring underline underline-offset-2 ${className}`.trim()}>
+    <Link href="/" className={cn("rounded-sm underline underline-offset-2 focus-ring", className)}>
       {t("ad_script_edit_inputs")}
     </Link>
   );
