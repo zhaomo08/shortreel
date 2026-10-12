@@ -40,8 +40,18 @@ export function AgentCopilot() {
 
   const { currentProjectName } = useProjectsStore();
   const toggleAssistantPanel = useAppStore((s) => s.toggleAssistantPanel);
-  const { sendMessage, rewriteMessage, answerQuestion, interrupt, createNewSession, switchSession, deleteSession } =
-    useAssistantSession(currentProjectName);
+  const {
+    sendMessage,
+    rewriteMessage,
+    answerQuestion,
+    interrupt,
+    createNewSession,
+    switchSession,
+    deleteSession,
+    withdrawQueuedMessage,
+    resendQueuedMessage,
+    sendQueuedMessageNow,
+  } = useAssistantSession(currentProjectName);
 
   const flowRef = useRef<MessageFlowHandle>(null);
   const composerRef = useRef<AgentComposerHandle>(null);
@@ -67,6 +77,18 @@ export function AgentCopilot() {
     },
     [sendMessage],
   );
+
+  const handleResendQueued = useCallback((id: string) => {
+    setHistoryOpen(false);
+    flowRef.current?.scrollToEnd();
+    return resendQueuedMessage(id);
+  }, [resendQueuedMessage]);
+
+  const handleSendQueuedNow = useCallback((id: string) => {
+    setHistoryOpen(false);
+    flowRef.current?.scrollToEnd();
+    return sendQueuedMessageNow(id);
+  }, [sendQueuedMessageNow]);
 
   // 改写成功后由会话切换重建时间线（编辑态随 resetTimeline 清空）；失败保留编辑态，
   // 用户可以改完再试，错误经消息区下方的错误条呈现
@@ -170,6 +192,9 @@ export function AgentCopilot() {
         placeholder={isRunning ? t("dashboard:generating_queue_hint") : t("dashboard:input_placeholder")}
         onSend={handleSend}
         onInterrupt={() => voidCall(interrupt())}
+        onWithdrawQueued={withdrawQueuedMessage}
+        onResendQueued={handleResendQueued}
+        onSendQueuedNow={handleSendQueuedNow}
       />
     </div>
   );

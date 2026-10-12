@@ -34,8 +34,12 @@ class Heartbeat:
     """
 
 
-QueuedMessageState = Literal["queued"]
-"""排队消息的状态。``queued``：已交给 CLI，在 CLI 的队列里等待被并入一轮。"""
+QueuedMessageState = Literal["queued", "unsent"]
+"""排队消息的状态。``queued``：已交给 CLI，在 CLI 的队列里等待被并入一轮。``unsent``：CLI 退出时
+仍在排队，没有被处理；只有用户点发送才重新交给 CLI，从不自动重发。"""
+
+WithdrawalIntent = Literal["edit", "delete"]
+"""用户撤回排队消息的意图：``edit`` 把内容退回输入框，``delete`` 直接丢弃。"""
 
 
 @dataclass(slots=True)
@@ -49,8 +53,17 @@ class QueuedMessage:
     entry: dict[str, Any]
     """被接纳时写入会话事件日志的用户条目。"""
     cli_uuid: str
+    content: str | list[dict[str, Any]] = ""
+    """送入 CLI 的消息内容。「未发送」消息重发、立即发送或被 CLI 丢弃后重排时，原样再送一次。"""
     client_key: str | None = None
     state: QueuedMessageState = "queued"
+    withdrawal: WithdrawalIntent | Literal["send_now"] | None = None
+    """用户要求撤回时的意图，``send_now`` 是立即发送：撤回后以 ``now`` 优先级重新送入。CLI 答复撤回失败后
+    仍保留：CLI 随后若报 cancelled，按这个意图收尾。"""
+    withdrawing: bool = False
+    """撤回请求正在等待 CLI 答复。"""
+    withdrawn: bool = False
+    """已按用户撤回离开排队。"""
     id: str = field(init=False)
 
     def __post_init__(self) -> None:

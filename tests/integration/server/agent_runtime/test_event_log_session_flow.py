@@ -14,7 +14,7 @@ import pytest
 from lib.infra.data_root_layout import DataRootLayout
 from lib.project.project_manager import ProjectManager
 from server.agent_runtime.event_log import EventLogService, EventLogStore, build_user_entry
-from server.agent_runtime.models import LiveMessage
+from server.agent_runtime.models import LiveMessage, WithdrawalIntent
 from server.agent_runtime.service import AssistantService
 from server.agent_runtime.session_manager import AgentStartupError, SessionManager, UnrecordedMessageError
 from server.agent_runtime.session_store import SessionMetaStore
@@ -315,10 +315,9 @@ class TestNewSessionEventLogFlow:
         )
         assistant_error["error"] = "invalid_request"
         assistant_error["message"]["stop_reason"] = "stop_sequence"
-        # CLI 的 result 帧在 result 字段带回最后一条 assistant 文本
+        # result 帧不带 result 文本：摘要必须取自经真实解析路径序列化的 assistant 文本块
         result_error = result_frame(
             is_error=True,
-            result=upstream_message,
             api_error_status=404,
             errors=["upstream request failed"],
             session_id=SDK_ID,
@@ -1244,7 +1243,10 @@ class TestQueuedMessages:
                     await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID)
                 inbox_released.set()
 
-            await _wait_for_status(manager, SDK_ID, "completed")
+                # 内存状态先于 meta 落库切换，终态广播在落库之后：等广播再读 meta
+                while (await _next_broadcast(stream, "runtime_status"))["status"] != "completed":
+                    pass
+
             assert (await service.meta_store.get(SDK_ID)).status == "completed"
         finally:
             inbox_released.set()
@@ -1326,4 +1328,548 @@ class TestQueuedMessages:
             ]
         finally:
             await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+
+def _cancel_queued(client: FakeSDKClient) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """CLI 撤回仍在队列里的消息：先发 cancelled 帧，再应答 ``{cancelled: true}``。"""
+
+    def _respond(request: dict[str, Any]) -> dict[str, Any]:
+        client.push_frame(command_lifecycle_frame(request["message_uuid"], "cancelled", session_id=SDK_ID))
+        return {"cancelled": True}
+
+    return _respond
+
+
+class TestQueuedMessageWithdrawal:
+    """托盘里的排队消息可以编辑或删除：先向 CLI 撤回，撤回成功才退回输入框或丢弃。"""
+
+    @staticmethod
+    def _client() -> FakeSDKClient:
+        client = TestQueuedMessages._running_turn_client()
+        client.respond_control("cancel_async_message", _cancel_queued(client))
+        return client
+
+    async def _queue(self, service: AssistantService, client: FakeSDKClient, **kwargs: Any) -> dict[str, Any]:
+        await TestQueuedMessages()._start_running_turn(service, client)
+        return (await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID, **kwargs))["queued_message"]
+
+    async def test_editing_a_queued_message_the_cli_cancels_returns_its_content(self, service: AssistantService):
+        client = self._client()
+        image = {"data": "aGVsbG8=", "media_type": "image/png"}
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            queued = (
+                await service.send_or_create(
+                    "demo", "加一段旁白", session_id=SDK_ID, images=[SimpleNamespace(**image)], client_key="ck-1"
+                )
+            )["queued_message"]
+
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="edit")
+
+            assert result["outcome"] == "withdrawn"
+            assert result["message"]["content"] == [
+                {"type": "image", "source": {"type": "base64", **image}},
+                {"type": "text", "text": "加一段旁白"},
+            ]
+            assert client.control_requests == [
+                {"subtype": "cancel_async_message", "message_uuid": client.sent_messages[-1]["uuid"]}
+            ]
+            removed = await stream.next("queue_remove")
+            assert removed["id"] == queued["id"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+            # 撤回的消息不进时间线；幂等键随之释放，重新发送同一内容会再次送入 CLI
+            retry = await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID, client_key="ck-1")
+            assert retry["queued_message"]["id"] != queued["id"]
+            assert [entry["type"] for entry in await service.event_log_store.list_after(SDK_ID)] == [
+                "user",
+                "assistant",
+            ]
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_deleting_a_queued_message_the_cli_cancels_discards_it(self, service: AssistantService):
+        client = self._client()
+        queued = await self._queue(service, client)
+        try:
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="delete")
+
+            assert result["outcome"] == "withdrawn"
+            assert result["message"] is None
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+            assert len(await service.event_log_store.list_after(SDK_ID)) == 2
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_withdrawal_the_agent_already_took_leaves_the_message_on_its_way(self, service: AssistantService):
+        client = self._client()
+        client.respond_control("cancel_async_message", {"cancelled": False})
+        queued = await self._queue(service, client)
+        try:
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="edit")
+
+            assert result == {"session_id": SDK_ID, "id": queued["id"], "outcome": "accepted", "message": None}
+            client.push_frame(started_frame(session_id=SDK_ID))
+            entries = await _wait_for_entries(service.event_log_store, SDK_ID, 3)
+            assert entries[2]["uuid"] == queued["id"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_message_already_in_the_conversation_reports_accepted(self, service: AssistantService):
+        client = self._client()
+        queued = await self._queue(service, client)
+        try:
+            client.push_frame(started_frame(session_id=SDK_ID))
+            await _wait_for_entries(service.event_log_store, SDK_ID, 3)
+
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="delete")
+
+            assert result["outcome"] == "accepted"
+            assert client.control_requests == []
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    @pytest.mark.parametrize("intent", ["edit", "delete"])
+    async def test_a_cancel_after_a_failed_withdrawal_follows_the_withdrawal(
+        self, service: AssistantService, intent: WithdrawalIntent
+    ):
+        client = self._client()
+        client.respond_control("cancel_async_message", {"cancelled": False})
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            await stream.next("queue")
+            queued = (await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID))["queued_message"]
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent=intent)
+            assert result["outcome"] == "accepted"
+
+            # CLI 已从队列取走它，却没把它并入轮次
+            client.push_frame(
+                lambda c: command_lifecycle_frame(c.sent_messages[-1]["uuid"], "cancelled", session_id=SDK_ID)
+            )
+            removed = await stream.next("queue_remove")
+
+            assert removed["id"] == queued["id"]
+            assert removed["withdrawn"] == intent
+            if intent == "edit":
+                assert removed["message"]["content"] == queued["content"]
+            else:
+                assert "message" not in removed
+            assert len(await service.event_log_store.list_after(SDK_ID)) == 2
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_cancel_the_user_did_not_ask_for_is_not_reported_as_a_withdrawal(self, service: AssistantService):
+        client = self._client()
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            await stream.next("queue")
+            queued = (await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID))["queued_message"]
+            client.push_frame(
+                lambda c: command_lifecycle_frame(c.sent_messages[-1]["uuid"], "cancelled", session_id=SDK_ID)
+            )
+            removed = await stream.next("queue_remove")
+            assert removed == {"session_id": SDK_ID, "id": queued["id"]}
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_cancel_request_error_keeps_the_message_queued_and_the_session_usable(
+        self, service: AssistantService
+    ):
+        client = self._client()
+        client.respond_control("cancel_async_message", RuntimeError("control request timed out"))
+        queued = await self._queue(service, client)
+        try:
+            with pytest.raises(RuntimeError):
+                await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="delete")
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [queued]
+
+            client.respond_control("cancel_async_message", _cancel_queued(client))
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent="delete")
+
+            assert result["outcome"] == "withdrawn"
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+
+class TestUnsentQueuedMessages:
+    """CLI 退出时仍在排队的消息转为「未发送」，留给用户发送、编辑或删除，从不自动重发。"""
+
+    async def _queue_then_exit(self, service: AssistantService, client: FakeSDKClient, **kwargs: Any) -> dict[str, Any]:
+        await TestQueuedMessages()._start_running_turn(service, client)
+        queued = (await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID, **kwargs))["queued_message"]
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            await stream.next("queue")
+            client.close_stream()
+            await stream.next("queue_upsert")
+        finally:
+            await stream.close()
+        return queued
+
+    async def test_queued_messages_turn_unsent_when_the_cli_exits_and_are_not_resent(self, service: AssistantService):
+        client = TestQueuedMessages._running_turn_client()
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            queued = (await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID, client_key="ck-1"))[
+                "queued_message"
+            ]
+            await stream.next("queue_upsert")
+            client.close_stream()
+
+            upsert = await stream.next("queue_upsert")
+            assert upsert["message"] == {**queued, "state": "unsent"}
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [upsert["message"]]
+            # 同键重试拿到同一条未发送消息，不再送入 CLI
+            retry = await service.send_or_create("demo", "加一段旁白", session_id=SDK_ID, client_key="ck-1")
+            assert retry["queued_message"] == upsert["message"]
+            assert len(client.sent_messages) == 2
+            assert [entry["type"] for entry in await service.event_log_store.list_after(SDK_ID)] == [
+                "user",
+                "assistant",
+            ]
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_sending_an_unsent_message_reconnects_and_hands_it_to_the_cli_again(self, service: AssistantService):
+        client = TestQueuedMessages._running_turn_client()
+        queued = await self._queue_then_exit(service, client)
+        revived = FakeSDKClient(frames=[_session_state_frame("running")])
+        try:
+            with _scripted_client(service.session_manager, revived):
+                result = await service.resend_queued_message("demo", SDK_ID, queued["id"])
+
+            assert result["queued_message"] == queued
+            assert len(revived.sent_messages) == 1
+            resent = revived.sent_messages[0]
+            assert resent["message"]["content"] == "加一段旁白"
+            assert resent["uuid"] != client.sent_messages[-1]["uuid"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [queued]
+            # 重复点击不会再送一次
+            await service.resend_queued_message("demo", SDK_ID, queued["id"])
+            assert len(revived.sent_messages) == 1
+
+            revived.push_frame(started_frame(session_id=SDK_ID))
+            entries = await _wait_for_entries(service.event_log_store, SDK_ID, 3)
+            assert entries[2]["uuid"] == queued["id"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_new_message_after_the_cli_exits_reconnects_and_leaves_unsent_ones_in_the_tray(
+        self, service: AssistantService
+    ):
+        client = TestQueuedMessages._running_turn_client()
+        unsent = await self._queue_then_exit(service, client)
+        stale = service.session_manager.sessions[SDK_ID]
+        revived = FakeSDKClient(frames=[_session_state_frame("running")])
+        try:
+            with _scripted_client(service.session_manager, revived):
+                result = await service.send_or_create("demo", "换个结局", session_id=SDK_ID)
+
+            assert service.session_manager.sessions[SDK_ID] is not stale
+            # 只送入新消息，「未发送」的那条不自动重发，仍在托盘里排在前面
+            assert [sent["message"]["content"] for sent in revived.sent_messages] == ["换个结局"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [
+                {**unsent, "state": "unsent"},
+                result["queued_message"],
+            ]
+
+            revived.push_frame(started_frame(session_id=SDK_ID))
+            entries = await _wait_for_entries(service.event_log_store, SDK_ID, 3)
+            assert entries[2]["uuid"] == result["queued_message"]["id"]
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [{**unsent, "state": "unsent"}]
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_concurrent_sends_after_the_cli_exits_share_one_new_connection(self, service: AssistantService):
+        client = TestQueuedMessages._running_turn_client()
+        unsent = await self._queue_then_exit(service, client)
+        revived = FakeSDKClient(frames=[_session_state_frame("running")])
+        connections: list[object] = []
+
+        def _connect(options: object) -> FakeSDKClient:
+            connections.append(options)
+            return revived
+
+        try:
+            with (
+                patch.object(
+                    service.session_manager, "_build_options", new=AsyncMock(return_value=SimpleNamespace(env=None))
+                ),
+                patch("server.agent_runtime.session_manager.ClaudeSDKClient", _connect),
+            ):
+                first, second = await asyncio.gather(
+                    service.send_or_create("demo", "换个结局", session_id=SDK_ID),
+                    service.resend_queued_message("demo", SDK_ID, unsent["id"]),
+                )
+
+            assert len(connections) == 1
+            assert sorted(sent["message"]["content"] for sent in revived.sent_messages) == ["加一段旁白", "换个结局"]
+            assert second["queued_message"] == unsent
+            assert {message["id"] for message in service.session_manager.get_queued_messages_snapshot(SDK_ID)} == {
+                unsent["id"],
+                first["queued_message"]["id"],
+            }
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_send_during_eviction_waits_for_it_and_connects_once(self, service: AssistantService):
+        client = TestQueuedMessages._running_turn_client()
+        await self._queue_then_exit(service, client)
+        manager = service.session_manager
+        stale = manager.sessions[SDK_ID]
+        revived = FakeSDKClient(frames=[_session_state_frame("running")])
+        release = asyncio.Event()
+        disconnect_entered = asyncio.Event()
+        disconnect = stale.send_disconnect
+
+        async def _slow_disconnect() -> None:
+            disconnect_entered.set()
+            await release.wait()
+            await disconnect()
+
+        try:
+            with _scripted_client(manager, revived), patch.object(stale, "send_disconnect", _slow_disconnect):
+                # 驱逐先开始、迟迟不结束：发送等驱逐完成后按冷会话重建，不被驱逐收尾时一并移出
+                eviction = asyncio.create_task(manager.close_session(SDK_ID))
+                await asyncio.wait_for(disconnect_entered.wait(), timeout=5.0)
+                eviction_event = manager._disconnecting[SDK_ID]
+                wait = eviction_event.wait
+                waiting_for_eviction = asyncio.Event()
+
+                async def _wait() -> None:
+                    waiting_for_eviction.set()
+                    await wait()
+
+                with patch.object(eviction_event, "wait", _wait):
+                    sending = asyncio.create_task(service.send_or_create("demo", "换个结局", session_id=SDK_ID))
+                    await asyncio.wait_for(waiting_for_eviction.wait(), timeout=5.0)
+                    assert not sending.done()
+                    release.set()
+                    await eviction
+                    result = await sending
+
+            managed = manager.sessions[SDK_ID]
+            assert managed is not stale
+            assert managed.actor_exited is False
+            # 驱逐照旧丢弃「未发送」消息
+            assert manager.get_queued_messages_snapshot(SDK_ID) == [result["queued_message"]]
+            assert [sent["message"]["content"] for sent in revived.sent_messages] == ["换个结局"]
+        finally:
+            await manager.close_session(SDK_ID)
+
+    @pytest.mark.parametrize("intent", ["edit", "delete"])
+    async def test_withdrawing_an_unsent_message_removes_it_without_asking_the_cli(
+        self, service: AssistantService, intent: WithdrawalIntent
+    ):
+        client = TestQueuedMessages._running_turn_client()
+        queued = await self._queue_then_exit(service, client)
+        try:
+            result = await service.withdraw_queued_message("demo", SDK_ID, queued["id"], intent=intent)
+
+            assert result["outcome"] == "withdrawn"
+            assert result["message"] == ({**queued, "state": "unsent"} if intent == "edit" else None)
+            assert client.control_requests == []
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == []
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    @pytest.mark.parametrize("action", ["edit", "delete", "send_now"])
+    async def test_acting_on_an_unsent_message_while_the_session_reconnects_waits_for_it(
+        self, service: AssistantService, action: str
+    ):
+        client = TestQueuedMessages._running_turn_client()
+        unsent = await self._queue_then_exit(service, client)
+        revived = FakeSDKClient(frames=[_session_state_frame("running")])
+        building = asyncio.Event()
+        proceed = asyncio.Event()
+
+        async def _build_options(*args: Any, **kwargs: Any) -> SimpleNamespace:
+            building.set()
+            await proceed.wait()
+            return SimpleNamespace(env=None)
+
+        try:
+            with (
+                patch.object(service.session_manager, "_build_options", _build_options),
+                patch("server.agent_runtime.session_manager.ClaudeSDKClient", lambda options: revived),
+            ):
+                # 新消息触发重建连接：连接建立前「未发送」消息已离开旧会话，还没转入新连接
+                sending = asyncio.create_task(service.send_or_create("demo", "换个结局", session_id=SDK_ID))
+                await asyncio.wait_for(building.wait(), timeout=5.0)
+                get_meta = service.meta_store.get
+                checked = asyncio.Event()
+
+                async def _get_meta(session_id: str) -> Any:
+                    meta = await get_meta(session_id)
+                    if asyncio.current_task() is acting:
+                        # 读完 meta 后操作同步走到撤回或停在等待处，测试随后才恢复
+                        checked.set()
+                    return meta
+
+                with patch.object(service.meta_store, "get", _get_meta):
+                    if action == "send_now":
+                        acting = asyncio.create_task(service.send_queued_message_now("demo", SDK_ID, unsent["id"]))
+                    else:
+                        acting = asyncio.create_task(
+                            service.withdraw_queued_message("demo", SDK_ID, unsent["id"], intent=action)
+                        )
+                    await asyncio.wait_for(checked.wait(), timeout=5.0)
+                proceed.set()
+                sent = (await sending)["queued_message"]
+                outcome = (await acting)["outcome"]
+
+            snapshot = service.session_manager.get_queued_messages_snapshot(SDK_ID)
+            if action == "send_now":
+                assert outcome == "sent"
+                assert [message["message"]["content"] for message in revived.sent_messages] == [
+                    "换个结局",
+                    "加一段旁白",
+                ]
+                assert snapshot == [unsent, sent]
+            else:
+                assert outcome == "withdrawn"
+                assert snapshot == [sent]
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+
+class TestSendQueuedMessageNow:
+    """立即发送：先撤回，撤回成功以 ``now`` 优先级重发同一条排队消息，打断当前轮先处理它。"""
+
+    async def test_a_withdrawn_message_is_sent_again_with_now_priority(self, service: AssistantService):
+        client = TestQueuedMessageWithdrawal._client()
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            await stream.next("queue")
+            queued = (await service.send_or_create("demo", "先停下改结局", session_id=SDK_ID, client_key="ck-1"))[
+                "queued_message"
+            ]
+            first_uuid = client.sent_messages[-1]["uuid"]
+
+            result = await service.send_queued_message_now("demo", SDK_ID, queued["id"])
+
+            assert result == {"session_id": SDK_ID, "id": queued["id"], "outcome": "sent"}
+            assert client.control_requests == [{"subtype": "cancel_async_message", "message_uuid": first_uuid}]
+            resent = client.sent_messages[-1]
+            assert resent["priority"] == "now"
+            assert resent["message"]["content"] == "先停下改结局"
+            assert resent["uuid"] != first_uuid
+            # 前端看到的仍是同一条排队消息：不移出托盘，幂等键照旧指向它
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [queued]
+            retry = await service.send_or_create("demo", "先停下改结局", session_id=SDK_ID, client_key="ck-1")
+            assert retry["queued_message"] == queued
+            assert len(client.sent_messages) == 3
+
+            # CLI 以新的 uuid 接纳它：写入日志并离开托盘
+            client.push_frame(started_frame(session_id=SDK_ID))
+            entries = await _wait_for_entries(service.event_log_store, SDK_ID, 3)
+            assert entries[2]["uuid"] == queued["id"]
+            assert (await stream.next("queue_remove")) == {"session_id": SDK_ID, "id": queued["id"]}
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_message_the_agent_already_took_is_not_sent_again(self, service: AssistantService):
+        client = TestQueuedMessageWithdrawal._client()
+        client.respond_control("cancel_async_message", {"cancelled": False})
+        queued = await TestQueuedMessageWithdrawal()._queue(service, client)
+        try:
+            result = await service.send_queued_message_now("demo", SDK_ID, queued["id"])
+
+            assert result == {"session_id": SDK_ID, "id": queued["id"], "outcome": "accepted"}
+            assert len(client.sent_messages) == 2
+            assert all("priority" not in sent for sent in client.sent_messages)
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [queued]
+        finally:
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_the_turn_it_preempts_is_interrupted_and_a_dropped_message_runs_after_it(
+        self, service: AssistantService
+    ):
+        client = TestQueuedMessageWithdrawal._client()
+        await TestQueuedMessages()._start_running_turn(service, client)
+        stream = _EntryStream(service, SDK_ID)
+        try:
+            await stream.next("queue")
+            dropped = (await service.send_or_create("demo", "顺便配乐", session_id=SDK_ID))["queued_message"]
+            urgent = (await service.send_or_create("demo", "先停下改结局", session_id=SDK_ID))["queued_message"]
+            head_uuid, dropped_uuid = client.sent_messages[0]["uuid"], client.sent_messages[1]["uuid"]
+            assert (await service.send_queued_message_now("demo", SDK_ID, urgent["id"]))["outcome"] == "sent"
+            now_uuid = client.sent_messages[-1]["uuid"]
+
+            # CLI 打断当前轮：result 仍报 success，只能凭 terminal_reason 认出；这一轮的消息都收到 cancelled，
+            # 已进入对话的首条消息不受影响，从未进入对话的那条被丢掉
+            client.push_frame(result_frame(session_id=SDK_ID, terminal_reason="aborted_streaming", result=""))
+            client.push_frame(command_lifecycle_frame(head_uuid, "cancelled", session_id=SDK_ID))
+            client.push_frame(command_lifecycle_frame(dropped_uuid, "cancelled", session_id=SDK_ID))
+            client.push_frame(command_lifecycle_frame(now_uuid, "started", session_id=SDK_ID))
+
+            entries = await _wait_for_entries(service.event_log_store, SDK_ID, 4)
+            assert [(entry["type"], entry.get("subtype")) for entry in entries] == [
+                ("user", None),
+                ("assistant", None),
+                ("system", "interrupt"),
+                ("user", None),
+            ]
+            assert entries[3]["uuid"] == urgent["id"]
+
+            # 被丢掉的消息换一个 uuid、按普通优先级重新送入，排在插队消息之后，托盘里仍是同一条
+            assert len(client.sent_messages) == 5
+            requeued = client.sent_messages[4]
+            assert requeued["message"]["content"] == "顺便配乐"
+            assert requeued["uuid"] not in (dropped_uuid, now_uuid)
+            assert "priority" not in requeued
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [dropped]
+
+            # 插队消息这一轮正常结束，不被当成中断；重排的消息之后照常被接纳
+            client.push_frame(assistant_frame({"type": "text", "text": "结局改好了"}, uuid="a-2", session_id=SDK_ID))
+            client.push_frame(result_frame(session_id=SDK_ID, terminal_reason="completed"))
+            client.push_frame(command_lifecycle_frame(requeued["uuid"], "started", session_id=SDK_ID))
+            client.push_frame(result_frame(session_id=SDK_ID, terminal_reason="completed"))
+            client.push_frame(_idle_frame())
+            await _wait_for_status(service.session_manager, SDK_ID, "completed")
+            entries = await service.event_log_store.list_after(SDK_ID)
+            assert [entry["type"] for entry in entries[4:]] == ["assistant", "user"]
+            assert entries[5]["uuid"] == dropped["id"]
+            assert not any(entry.get("subtype") == "agent_turn_failure" for entry in entries)
+        finally:
+            await stream.close()
+            await service.session_manager.close_session(SDK_ID)
+
+    async def test_a_cancel_after_the_agent_took_it_still_sends_it_now(self, service: AssistantService):
+        client = TestQueuedMessageWithdrawal._client()
+        client.respond_control("cancel_async_message", {"cancelled": False})
+        queued = await TestQueuedMessageWithdrawal()._queue(service, client)
+        try:
+            assert (await service.send_queued_message_now("demo", SDK_ID, queued["id"]))["outcome"] == "accepted"
+
+            # CLI 已从队列取走它，却没把它并入轮次：按立即发送的意图重新送入
+            delivered = asyncio.Event()
+            query = client.query
+
+            async def _query(prompt, session_id: str = "default") -> None:
+                await query(prompt, session_id=session_id)
+                delivered.set()
+
+            with patch.object(client, "query", _query):
+                client.push_frame(
+                    lambda c: command_lifecycle_frame(c.sent_messages[-1]["uuid"], "cancelled", session_id=SDK_ID)
+                )
+                await asyncio.wait_for(delivered.wait(), timeout=5.0)
+
+            assert client.sent_messages[2]["priority"] == "now"
+            assert service.session_manager.get_queued_messages_snapshot(SDK_ID) == [queued]
+        finally:
             await service.session_manager.close_session(SDK_ID)

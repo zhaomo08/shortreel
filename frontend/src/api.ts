@@ -26,6 +26,10 @@ import type {
   ImagePayload,
   EntriesResponse,
   AcceptedMessageResponse,
+  QueuedMessageWithdrawal,
+  QueuedMessageResendResponse,
+  QueuedMessageWithdrawalResponse,
+  QueuedMessageSendNowResponse,
   SkillInfo,
   ProjectOverview,
   ProjectChangeBatchPayload,
@@ -2882,6 +2886,48 @@ class API {
           client_key: clientKey || undefined,
         }),
       }
+    );
+  }
+
+  /**
+   * 编辑或删除一条排队消息：服务端先向 Agent 撤回，撤回成功才移出排队。
+   * 编辑且撤回成功时响应带回消息内容；Agent 已接收时 `outcome` 为 `accepted`。
+   */
+  static async withdrawQueuedMessage(
+    projectName: string,
+    sessionId: string,
+    messageId: string,
+    intent: QueuedMessageWithdrawal
+  ): Promise<QueuedMessageWithdrawalResponse> {
+    const path = `${this.assistantBase(projectName)}/sessions/${encodeURIComponent(sessionId)}/queued-messages/${encodeURIComponent(messageId)}`;
+    return intent === "edit"
+      ? this.request(`${path}/edit`, { method: "POST" })
+      : this.request(path, { method: "DELETE" });
+  }
+
+  static async resendQueuedMessage(
+    projectName: string,
+    sessionId: string,
+    messageId: string
+  ): Promise<QueuedMessageResendResponse> {
+    return this.request(
+      `${this.assistantBase(projectName)}/sessions/${encodeURIComponent(sessionId)}/queued-messages/${encodeURIComponent(messageId)}/resend`,
+      { method: "POST" }
+    );
+  }
+
+  /**
+   * 立即发送一条排队消息：服务端先向 Agent 撤回，撤回成功以 now 优先级重新送入，Agent 打断当前轮先处理它。
+   * Agent 已接收时 `outcome` 为 `accepted`，不再重发。
+   */
+  static async sendQueuedMessageNow(
+    projectName: string,
+    sessionId: string,
+    messageId: string
+  ): Promise<QueuedMessageSendNowResponse> {
+    return this.request(
+      `${this.assistantBase(projectName)}/sessions/${encodeURIComponent(sessionId)}/queued-messages/${encodeURIComponent(messageId)}/send-now`,
+      { method: "POST" }
     );
   }
 
