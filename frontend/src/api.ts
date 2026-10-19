@@ -750,6 +750,20 @@ class API {
     return { blob: await response.blob(), filename };
   }
 
+  /** 一集的 Google Flow 任务包：每个镜头的视频提示词与首尾帧 / 参考图，供在 Flow 网页里出片。 */
+  static async downloadFlowPackage(projectName: string, episode: number): Promise<{ blob: Blob; filename: string }> {
+    const endpoint = `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/flow-package`;
+    const response = await fetch(`${API_BASE}${endpoint}`, withAuth(endpoint));
+    await throwIfNotOk(response, `HTTP ${response.status}`);
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    // 项目名常是中文：Starlette 此时只给 RFC 5987 的 filename*=utf-8''…
+    const encoded = disposition.match(/filename\*=utf-8''([^;]+)/i)?.[1];
+    const filename = encoded
+      ? decodeURIComponent(encoded)
+      : (disposition.match(/filename="?([^";]+)"?/)?.[1] ?? `ep${episode}_flow.zip`);
+    return { blob: await response.blob(), filename };
+  }
+
   /** 一集的剪辑时间线列表，按创建顺序排列。 */
   static async listEditTimelines(
     projectName: string,

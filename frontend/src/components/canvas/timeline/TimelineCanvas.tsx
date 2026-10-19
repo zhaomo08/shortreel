@@ -11,6 +11,8 @@ import { AdScriptButton, AdScriptProgress } from "@/components/canvas/shared/AdS
 import { NoScriptBlankState } from "@/components/canvas/shared/StartBlankScriptButton";
 import { BatchFillButton, useBatchGap } from "@/components/canvas/episode-page/BatchFillButton";
 import { EpisodeHeaderActions } from "@/components/canvas/episode-page/EpisodeHeaderActions";
+import { FlowExchange } from "@/components/canvas/episode-page/FlowExchange";
+import { API } from "@/api";
 import type { EpisodeCanvasContext } from "@/components/canvas/episode-page/EpisodePage";
 import { useActiveResourceIds } from "@/stores/tasks-store";
 import { getScriptItemId } from "@/utils/script-shape";
@@ -230,6 +232,16 @@ export function TimelineCanvas(props: TimelineCanvasProps) {
               count={narrationGap}
               disabled={narrationBatchBusy}
               onClick={() => onGenerateEpisodeNarration(scriptFile)}
+            />
+          )}
+          {scriptFile && !demoReadOnly && (
+            <FlowExchange
+              projectName={projectName}
+              episode={episode}
+              ids={[...currentSegmentIds]}
+              busyIds={videoBusyIds}
+              upload={(id, file) => API.uploadShotMedia(projectName, scriptFile, id, "video", file)}
+              onImported={() => onRestoreVideo?.()}
             />
           )}
         </EpisodeHeaderActions>

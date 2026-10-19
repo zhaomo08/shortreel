@@ -73,6 +73,7 @@ from server.routers import (
     episode_planning,
     episodes_view,
     files,
+    flow_packages,
     generate,
     grids,
     market,
@@ -697,6 +698,12 @@ app.include_router(
     prefix="/api/v1",
     dependencies=[Depends(get_current_user), Depends(require_project_migration_ok)],
     tags=["分镜尾帧"],
+)
+app.include_router(
+    flow_packages.router,
+    prefix="/api/v1",
+    dependencies=[Depends(get_current_user), Depends(require_project_migration_ok)],
+    tags=["Flow 任务包"],
 )
 app.include_router(
     project_migration.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["项目数据升级"]
