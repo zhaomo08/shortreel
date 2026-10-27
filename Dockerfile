@@ -55,6 +55,8 @@ ENV TZ=Asia/Shanghai
 # 先复制依赖和包元数据文件，利用缓存；workspace 子包作为依赖随这一步安装，源码须先就位
 COPY pyproject.toml uv.lock README.md ./
 COPY packages/ packages/
+# fork：PyPI 连不上时构建可传 --build-arg UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple，不传时行为不变
+ARG UV_DEFAULT_INDEX
 RUN uv sync --no-dev --no-install-project
 
 # 复制应用代码
@@ -80,4 +82,6 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:1241/health || exit 1
 
 # 启动命令
+# fork：运行时不再同步依赖。否则每次启动都会联网安装项目与开发依赖，PyPI 连不上时容器起不来；依赖已在构建期装好
+ENV UV_NO_SYNC=1
 CMD ["uv", "run", "uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "1241"]
