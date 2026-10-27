@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -16,6 +17,7 @@ from arcreel_market_core.video_backend_contract import (
     ResumeExpiredError,
     VideoAudioMode,
     VideoCapabilities,
+    VideoCapabilityError,
     VideoGenerationRequest,
     VideoGenerationResult,
     normalize_provider_status,
@@ -28,12 +30,19 @@ from lib.backends.backend_runtime import (
 )
 from lib.backends.openai_shared import OPENAI_RETRYABLE_ERRORS, create_openai_client
 from lib.backends.providers import PROVIDER_OPENAI
+from lib.backends.transport_layer import TransportLayer
+from lib.backends.video_backends.metering import video_usage
+from lib.backends.video_backends.name_family import UNRECOGNIZED_MODEL_CAPABILITIES, capabilities_by_names
+from lib.billing.metering import Usage
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.logging_utils import format_kwargs_for_log
 from lib.infra.retry import with_retry_async
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "sora-2"
+# Sora 的 input_reference 只收单个文件，首帧与参考图共用这一槽位；能力声明与提交前检查都读它。
+_INPUT_REFERENCE_SLOTS = 1
+
 
 # sora 合法 size 按 model 能力 + 分辨率档分级（OpenAI 官方 changelog / 模型页）：
 # - sora-2（base）：仅 720p —— 9:16 720x1280 / 16:9 1280x720。
@@ -133,9 +142,18 @@ def _resolve_size(model: str, resolution: str | None, aspect_ratio: str) -> str:
 class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
     """OpenAI Sora 视频生成后端。"""
 
-    def __init__(self, *, api_key: str | None = None, model: str | None = None, base_url: str | None = None):
-        self._client = create_openai_client(api_key=api_key, base_url=base_url)
-        self._model = model or DEFAULT_MODEL
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        transport_layer: TransportLayer | None = None,
+    ):
+        self._client = create_openai_client(api_key=api_key, base_url=base_url, transport_layer=transport_layer)
+        if not model:
+            raise ValueError("OpenAIVideoBackend 需要指定模型")
+        self._model = model
 
     @property
     def name(self) -> str:
@@ -150,13 +168,21 @@ class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
         """按 model_id 纯计算 caps —— 不构造 SDK client（无需 api_key）。
 
         Sora input_reference 为单张首帧图，参考图上限为 1；首帧与参考共享该单槽位。
-        当前全系模型能力一致，不按 model_id 分支；instance property 委托至此，
-        保持 backend 为单一真相源。
+        Sora 2 系列能力一致，按名字族认定；其余名字取 name_family 的统一回落。instance property
+        委托至此，保持 backend 为单一真相源。
 
         音轨恒有声：Sora 成片自带音轨，``generate`` 组装的 kwargs 里没有音轨开关字段，用户的
         关闭意图无处可下发。
         """
-        return VideoCapabilities(max_reference_images=1, audio_track=VideoAudioMode.ALWAYS_ON)
+        return capabilities_by_names(
+            model,
+            lambda name: (
+                VideoCapabilities(max_reference_images=_INPUT_REFERENCE_SLOTS, audio_track=VideoAudioMode.ALWAYS_ON)
+                if name.startswith("sora-2")
+                else None
+            ),
+            fallback=replace(UNRECOGNIZED_MODEL_CAPABILITIES, audio_track=VideoAudioMode.ALWAYS_ON),
+        )
 
     @property
     def video_capabilities(self) -> VideoCapabilities:
@@ -179,7 +205,39 @@ class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
             return self._client
         return self._client.with_options(base_url=submitted)
 
+    @staticmethod
+    def metered_usage(
+        model: str, request: VideoGenerationRequest, result: VideoGenerationResult | None = None
+    ) -> Usage:
+        """这次请求的计量（见 :mod:`lib.backends.video_backends.metering`）。
+
+        分辨率取下发的 ``size`` 的短边档（如 ``1024x1792`` 记为 1024p）。请求没有音轨开关，不上报是否有声。
+        """
+        width, _, height = _resolve_size(model, request.resolution, request.aspect_ratio).partition("x")
+        return video_usage(
+            request,
+            result,
+            seconds=request.duration_seconds,
+            resolution=f"{min(int(width), int(height))}p",
+            audio=None,
+        )
+
     async def generate(self, request: VideoGenerationRequest) -> VideoGenerationResult:
+        # Sora 请求体没有尾帧与参考音频字段；能力被用户覆盖放宽时也发不出，付费前拒绝而不是静默丢弃。
+        if request.end_image:
+            raise VideoCapabilityError("video_last_frame_unsupported", provider=self.name, model=self._model)
+        if request.reference_audio_files:
+            raise VideoCapabilityError("video_reference_audio_unsupported", provider=self.name, model=self._model)
+        # 首帧与参考图合计超过槽位时，超出部分会被丢弃或被上游拒绝，付费前拒绝。
+        input_count = bool(request.start_image) + len(request.reference_images or [])
+        if input_count > _INPUT_REFERENCE_SLOTS:
+            raise VideoCapabilityError(
+                "video_reference_images_exceeded",
+                provider=self.name,
+                model=self._model,
+                limit=_INPUT_REFERENCE_SLOTS,
+                count=input_count,
+            )
         kwargs: dict = {
             "prompt": request.prompt,
             "model": self._model,
@@ -188,17 +246,10 @@ class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
         # 始终下传合法 size 以锁定比例（sora 固定档，不传则上游用自家默认比例）
         kwargs["size"] = _resolve_size(self._model, request.resolution, request.aspect_ratio)
 
-        # 收集所有参考图：start_image + reference_images
-        ref_paths: list[Path] = []
-        if request.start_image and Path(request.start_image).exists():  # noqa: ASYNC240 -- 首帧存在性检查，本地元数据
-            ref_paths.append(Path(request.start_image))
-        if request.reference_images:
-            ref_paths.extend(p for p in request.reference_images if p.exists())
-        # 读整张图取上传字节是阻塞 I/O，逐张卸载到线程后并发等待，避免堵住事件循环
-        refs = list(await asyncio.gather(*[asyncio.to_thread(_encode_start_image, p) for p in ref_paths]))
+        # 收集所有参考图（start_image + reference_images）：存在性检查与读图都是阻塞 I/O，整体卸载到线程
+        refs = await asyncio.to_thread(_encode_input_references, request, self._model)
         if refs:
-            # 单张图时保持 tuple 格式（API 兼容），多张时用 list
-            kwargs["input_reference"] = refs[0] if len(refs) == 1 else refs
+            (kwargs["input_reference"],) = refs
 
         logger.info("OpenAI 视频生成开始: model=%s, seconds=%s", self._model, kwargs["seconds"])
         logger.info("调用 %s 视频 SDK kwargs=%s", self.name, format_kwargs_for_log(kwargs))
@@ -249,7 +300,7 @@ class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
             request.output_path.parent.mkdir(parents=True, exist_ok=True)
             request.output_path.write_bytes(content.content)
 
-        await asyncio.to_thread(_write)
+        await run_sync_transaction(_write)
         await faststart_video_artifact(request.output_path)
 
         logger.info("OpenAI 视频下载完成: %s", request.output_path)
@@ -314,6 +365,21 @@ class OpenAIVideoBackend(ProviderJobIdPersistenceMixin):
 def _encode_start_image(image_path: Path) -> tuple[str, bytes, str]:
     mime = IMAGE_MIME_TYPES.get(image_path.suffix.lower(), "image/png")
     return (image_path.name, image_path.read_bytes(), mime)
+
+
+def _encode_input_references(request: VideoGenerationRequest, model: str) -> list[tuple[str, bytes, str]]:
+    """缺失的首帧 / 参考图不静默跳过：跳过后照常出片计费，却没用上用户给的图。"""
+    ref_paths: list[Path] = []
+    if request.start_image:
+        start_path = Path(request.start_image)
+        if not start_path.is_file():
+            raise VideoCapabilityError("video_start_image_unreadable", model=model, name=start_path.name)
+        ref_paths.append(start_path)
+    missing = [p.name for p in request.reference_images or [] if not p.is_file()]
+    if missing:
+        raise VideoCapabilityError("video_reference_images_unreadable", model=model, names=", ".join(missing))
+    ref_paths.extend(request.reference_images or [])
+    return [_encode_start_image(p) for p in ref_paths]
 
 
 def _is_openai_not_found(exc: BaseException) -> bool:

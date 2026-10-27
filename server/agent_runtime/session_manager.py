@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from lib.agent.agent_memory_paths import project_memory_dir
+from lib.agent.credential_tiers import AgentPricing
 from lib.db.base import DEFAULT_USER_ID
 from lib.i18n import DEFAULT_LOCALE
 from lib.infra.data_root_layout import DataRootLayout
@@ -48,17 +49,12 @@ from server.agent_runtime.models import (
     SubscriptionReady,
     WithdrawalIntent,
 )
-from server.agent_runtime.options_assembler import OptionsAssembler
+from server.agent_runtime.options_assembler import OptionsAssembler, agent_pricing_of
 from server.agent_runtime.result_status import resolve_result_status
 from server.agent_runtime.sdk_frames import CommandLifecycle
 from server.agent_runtime.session_actor import SessionActor, SessionCommand
 from server.agent_runtime.session_store import SessionMetaStore
-from server.agent_runtime.usage_extraction import (
-    extract_assistant_cost,
-    extract_text_token_usage,
-    resolve_assistant_model,
-    resolve_configured_assistant_model,
-)
+from server.agent_runtime.usage_extraction import ModelTurnUsage, TurnUsageMeter
 from server.sse_channel import IDLE, EvictNonCriticalAndSignal, SseChannel
 
 logger = logging.getLogger(__name__)
@@ -70,10 +66,13 @@ from claude_agent_sdk.types import (
     SettingSource,
 )
 
-from lib.backends.providers import PROVIDER_ANTHROPIC, CallPurpose, CallStatus
+from lib.backends.providers import PROVIDER_ANTHROPIC, CallStatus
 from lib.billing.ledger import Ledger
+from lib.billing.metering import Usage, token_usage
 from lib.config.service import ConfigService
 from lib.db import async_session_factory
+from lib.db.repositories.usage_repo import AgentModelCall
+from lib.i18n.display_names import agent_provider_id
 
 SDK_AVAILABLE = True
 
@@ -241,6 +240,31 @@ def _user_message_frame(
     return frame
 
 
+def _agent_model_call(usage: ModelTurnUsage) -> AgentModelCall:
+    """一个模型一轮的用量转成记账输入：各次请求按用量契约各出一份计量，token 列记各次之和。"""
+    total = usage.total
+    return AgentModelCall(
+        model=usage.model,
+        requests=tuple(
+            Usage(
+                quantities=token_usage(
+                    input_tokens=request.total_input,
+                    output_tokens=request.output,
+                    cache_read_tokens=request.cache_read,
+                    cache_write_5m_tokens=request.cache_write_5m,
+                    cache_write_1h_tokens=request.cache_write_1h,
+                )
+            )
+            for request in usage.requests
+        ),
+        input_tokens=total.total_input,
+        output_tokens=total.output,
+        cache_read_tokens=total.cache_read,
+        cache_write_5m_tokens=total.cache_write_5m,
+        cache_write_1h_tokens=total.cache_write_1h,
+    )
+
+
 def _content_text(content: str | list[dict[str, Any]]) -> str:
     if isinstance(content, str):
         return content
@@ -304,7 +328,11 @@ class ManagedSession:
     # 用量记账的 prompt：本轮 result 之前被接纳的消息并入同一轮，依次追加；result 之后被接纳的消息开新一轮。
     last_user_prompt: str = ""
     turn_usage_recorded: bool = True
-    assistant_model: str = ""
+    # 会话连接时注入环境变量的 Agent 凭证及其当时的倍率与档位绑定：本连接的轮次按它计价（docs/adr/0017、0102）。
+    # 回退到系统设置时为默认值（无凭证、倍率 1、没有绑定）。
+    agent_pricing: AgentPricing = field(default_factory=AgentPricing)
+    # 本连接的用量计量：流内请求与 model_usage 的差分基线（docs/adr/0102）。
+    usage_meter: TurnUsageMeter = field(default_factory=lambda: TurnUsageMeter(resumed=False))
     interrupt_requested: bool = False
     last_activity: float | None = None  # updated on every send/receive
     # 最近一轮的结局：一轮的 result 收尾时记下，会话离开 running 时取用；开启新一轮时清空。
@@ -399,6 +427,20 @@ class ManagedSession:
             return
         self.queued_messages.remove(queued)
         self.channel.broadcast({"type": "queued_message", "op": "remove", "id": queued.id, **broadcast_fields})
+
+    def move_queued_message_first(self, queued: QueuedMessage) -> None:
+        """把一条排队消息移到最前并重播整份快照：立即发送后托盘顺序跟随 CLI 的处理顺序。已不在列表中时什么也不做。"""
+        if queued not in self.queued_messages or self.queued_messages[0] is queued:
+            return
+        self.queued_messages.remove(queued)
+        self.queued_messages.insert(0, queued)
+        self.channel.broadcast(
+            {
+                "type": "queued_message",
+                "op": "reorder",
+                "messages": [item.to_payload() for item in self.queued_messages],
+            }
+        )
 
     def discard_queued_message(self, queued: QueuedMessage, **broadcast_fields: Any) -> None:
         """排队消息未被接纳就离开：移出并释放幂等键，同键重试会重新送入。"""
@@ -854,8 +896,6 @@ class SessionManager:
                 session_id=None,
                 sdk_stderr=sdk_stderr,
             ) from exc
-        assistant_model = resolve_configured_assistant_model(getattr(options, "env", None))
-
         actor = SessionActor(
             client_factory=lambda: ClaudeSDKClient(options=options),
             on_message=self._make_actor_message_callback(managed_ref),
@@ -867,7 +907,7 @@ class SessionManager:
             actor=actor,
             status="running",
             project_name=project_name,
-            assistant_model=assistant_model,
+            agent_pricing=agent_pricing_of(options),
         )
         if user_entry is not None:
             managed.pending_initial_user_entry = {"entry": user_entry, "client_key": client_key}
@@ -1098,6 +1138,7 @@ class SessionManager:
                 # handle_message 内部吞异常，不会打断会话消费。
                 if managed.entry_pipeline is not None and managed.resolved_sdk_id is not None:
                     await managed.entry_pipeline.handle_message(msg_dict)
+                managed.usage_meter.observe(msg_dict)
                 if msg_dict.get("type") == "result":
                     if managed.initial_user_entry_error is not None:
                         # 首条用户消息落库已失败，send_new_session 的错误清理路径
@@ -1252,8 +1293,6 @@ class SessionManager:
                 session_id=session_id,
                 sdk_stderr=sdk_stderr,
             ) from exc
-        assistant_model = resolve_configured_assistant_model(getattr(options, "env", None))
-
         actor = SessionActor(
             client_factory=lambda: ClaudeSDKClient(options=options),
             on_message=self._make_actor_message_callback(managed_ref),
@@ -1268,7 +1307,9 @@ class SessionManager:
             actor=actor,
             status=resumed_status,
             project_name=meta.project_name,
-            assistant_model=assistant_model,
+            agent_pricing=agent_pricing_of(options),
+            # 恢复会话的 CLI 带着此前的累计用量，差分以恢复后第一条结果为起点
+            usage_meter=TurnUsageMeter(resumed=resumable),
             resolved_sdk_id=meta.id,  # 标记为已注册，防止重复创建 DB 记录
             channel=self._session_channel(meta.id),
         )
@@ -1382,6 +1423,12 @@ class SessionManager:
         delivering = False
         try:
             await self.meta_store.update_status(session_id, "running")
+            live = self.sessions.get(session_id)
+            if live is not managed:
+                # 落库期间会话已被驱逐完：这次 running 落在驱逐写的终态之后，按当前真相补写——同一 id 已有
+                # 新会话就写新会话的状态，否则写回驱逐的终态；之后按失败收尾
+                await self.meta_store.update_status(session_id, managed.status if live is None else live.status)
+                raise RuntimeError("session evicted while the message was being delivered")
             delivering = True
             await managed.send_query(
                 _user_message_frame(queued.content, cli_uuid, priority=priority), sdk_session_id=session_id
@@ -1394,6 +1441,9 @@ class SessionManager:
                 # 写入 CLI 失败说明管道已断，actor 随之退出，由 send_query 与 actor 退出路径落 error
                 if not delivering:
                     managed.abandon_running(epoch)
+                raise
+            if session_id in self._disconnecting or self.sessions.get(session_id) is not managed:
+                # 会话正在被驱逐，或等 meta 写库期间已被驱逐完：终态由驱逐收尾写入，这里不抢写 error
                 raise
             managed.status = "error"
             try:
@@ -1597,6 +1647,8 @@ class SessionManager:
             # 确定送入才登记：等锁期间它可能已离开排队，登记残留会让之后的 aborted_* 轮次都被当成插队打断
             if priority == "now":
                 managed.now_messages_in_flight.add(queued.cli_uuid)
+                # CLI 先处理它：托盘也把它排到最前
+                managed.move_queued_message_first(queued)
             await self._deliver_queued_message(managed, queued, on_failure=_not_delivered, priority=priority)
 
     async def resend_queued_message(
@@ -1818,13 +1870,13 @@ class SessionManager:
         result_msg: dict[str, Any],
         final_status: SessionStatus,
     ) -> None:
-        input_tokens, output_tokens, usage_tokens = extract_text_token_usage(result_msg)
-        total_cost_usd = extract_assistant_cost(result_msg)
-        if input_tokens is None and output_tokens is None and total_cost_usd is None:
+        """一轮的用量：每个有用量的模型写一条供应商调用记录，按会话连接时注入的 Agent 凭证及其当时的倍率与绑定计价。"""
+        usages = managed.usage_meter.close_turn(result_msg.get("model_usage"))
+        if not usages:
             return
 
-        # 用户中断的一轮记 cancelled 而非 failed，不污染失败率；费用按 SDK 实报保留——
-        # 中断前已消耗的 token 是真实花费，与记账括号里「结果未到、费用未知」的零费用取消不同。
+        # 用户中断的一轮记 cancelled 而非 failed，不污染失败率；费用照常计入——
+        # 中断前已完成的请求是真实花费，与记账括号里「结果未到、费用未知」的零费用取消不同。
         if final_status == "completed":
             status = CallStatus.SUCCESS
         elif final_status == "interrupted":
@@ -1832,22 +1884,17 @@ class SessionManager:
         else:
             status = CallStatus.FAILED
 
-        # 事后补录：一次调用写入终态行（省掉调用方管理的 pending 中间态）。
-        await self.ledger.backfill(
+        pricing = managed.agent_pricing
+        credential_id = pricing.credential_id
+        await self.ledger.record_agent_turn(
             project_name=managed.project_name,
-            call_type="text",
-            model=resolve_assistant_model(result_msg, managed.assistant_model),
-            prompt=managed.last_user_prompt,
-            provider=PROVIDER_ANTHROPIC,
-            user_id=getattr(self, "_user_id", DEFAULT_USER_ID),
-            status=status,
-            purpose=CallPurpose.ASSISTANT_SESSION,
             session_id=managed.session_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            usage_tokens=usage_tokens,
-            cost_amount=total_cost_usd,
-            currency="USD" if total_cost_usd is not None else None,
+            prompt=managed.last_user_prompt,
+            user_id=getattr(self, "_user_id", DEFAULT_USER_ID),
+            provider=agent_provider_id(credential_id) if credential_id is not None else PROVIDER_ANTHROPIC,
+            pricing=pricing,
+            status=status,
+            calls=[_agent_model_call(usage) for usage in usages],
         )
 
     async def _mark_session_terminal(self, managed: ManagedSession, status: SessionStatus, reason: str) -> None:

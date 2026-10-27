@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -14,6 +14,17 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
+    <script>
+      // 首屏渲染前落下配色主题，避免先闪一下默认主题；取值与规则同 src/stores/theme-store.ts，改时一起改
+      (function () {
+        var themes = { darkroom: true, fixer: true, baryta: false, silver: false };
+        var theme;
+        try { theme = localStorage.getItem("arcreel.theme"); } catch (e) {}
+        if (!(theme in themes)) theme = "darkroom";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.classList.toggle("dark", themes[theme]);
+      })();
+    </script>
 
 </head>
 <body>

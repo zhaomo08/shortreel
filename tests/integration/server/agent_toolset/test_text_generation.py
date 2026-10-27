@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from pathlib import Path
@@ -27,7 +28,7 @@ from server.tool_runtime import (
     generate_script_plan,
 )
 from tests.factories import make_video_request_facts, seed_endpoint_fixed_video_model
-from tests.fakes import FakeTextGenerator
+from tests.fakes import FakeTextGenerator, use_text_generator
 from tests.integration.server.agent_tool_support import (
     ToolHarness,
     nr_source,
@@ -861,7 +862,6 @@ async def test_normalize_drama_script_rejects_empty_scenes(
     fake_ctx: ToolHarness, monkeypatch, video_request_facts
 ) -> None:
     """normalize 产出空 scenes → 工具报错，不把空 script_plan 当成功产物写盘（与 _load_drama_script_plan_content 同口径）。"""
-    from server import text_generation as mod
 
     project_path = fake_ctx.project_path
     src = project_path / "source"
@@ -878,7 +878,7 @@ async def test_normalize_drama_script_rejects_empty_scenes(
     async def fake_create(task_type, project_name=None, **kwargs):
         return _EmptyGenerator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1})
     assert out.problem is not None
@@ -978,7 +978,7 @@ async def test_normalize_drama_script_passes_project_name_to_backend(
         captured["purpose"] = kwargs.get("purpose")
         return _FakeGenerator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     out = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1})
 
@@ -1000,7 +1000,6 @@ async def test_normalize_drama_script_registers_the_frozen_explicit_source_basis
 ) -> None:
     from lib.artifacts.artifact_manifest import ArtifactKey, ProjectArtifactManifestAdapter
     from lib.artifacts.artifact_provenance import build_script_plan_basis
-    from server import text_generation as mod
 
     project = {
         **fake_ctx.pm.project_payload,
@@ -1021,10 +1020,11 @@ async def test_normalize_drama_script_registers_the_frozen_explicit_source_basis
 
     class _Generator:
         async def generate(self, _request, project_name=None):
-            source_path.write_text("等待供应商期间改过的原文", encoding="utf-8")
+            # 等待供应商期间的改写来自别的写方，不在被测调用的事件循环上。
+            await asyncio.to_thread(source_path.write_text, "等待供应商期间改过的原文", encoding="utf-8")
             latest = {**project, "source_language": "English"}
             fake_ctx.pm.project_payload = latest
-            project_file.write_text(json.dumps(latest, ensure_ascii=False), encoding="utf-8")
+            await asyncio.to_thread(project_file.write_text, json.dumps(latest, ensure_ascii=False), encoding="utf-8")
             return type(
                 "_Result",
                 (),
@@ -1054,7 +1054,7 @@ async def test_normalize_drama_script_registers_the_frozen_explicit_source_basis
     async def fake_create(_task_type, project_name=None, **_kwargs):
         return _Generator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     result = await run_declared_tool(
         "generate_script_plan",
@@ -1073,7 +1073,6 @@ async def test_normalize_drama_script_preserves_legacy_request_basis_when_manife
 ) -> None:
     from lib.artifacts.artifact_manifest import ArtifactKey, ProjectArtifactManifestAdapter
     from lib.artifacts.artifact_provenance import build_script_plan_basis
-    from server import text_generation as mod
 
     project = {
         **fake_ctx.pm.project_payload,
@@ -1100,7 +1099,9 @@ async def test_normalize_drama_script_preserves_legacy_request_basis_when_manife
         async def generate(self, _request, project_name=None):
             activated = {**project, "schema_version": 8}
             fake_ctx.pm.project_payload = activated
-            project_file.write_text(json.dumps(activated, ensure_ascii=False), encoding="utf-8")
+            await asyncio.to_thread(
+                project_file.write_text, json.dumps(activated, ensure_ascii=False), encoding="utf-8"
+            )
             return type(
                 "_Result",
                 (),
@@ -1130,7 +1131,7 @@ async def test_normalize_drama_script_preserves_legacy_request_basis_when_manife
     async def fake_create(_task_type, project_name=None, **_kwargs):
         return _Generator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     # 升级前的旧项目：工具入口按迁移裁决拒绝，这里直接调 handler 观察生成本身保留的请求依据。
     result = await generate_script_plan(
@@ -1149,7 +1150,6 @@ async def test_normalize_drama_script_preserves_legacy_request_basis_when_manife
 async def test_normalize_drama_script_marks_mixed_machine_candidate_before_review(
     fake_ctx: ToolHarness, monkeypatch, video_request_facts
 ) -> None:
-    from server import text_generation as mod
 
     project_path = fake_ctx.project_path
     fake_ctx.pm.project_payload["characters"]["阿离"] = {"description": "少女，青衣"}
@@ -1190,7 +1190,7 @@ async def test_normalize_drama_script_marks_mixed_machine_candidate_before_revie
     async def fake_create(_task_type, project_name=None, **_kwargs):
         return _FakeGenerator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     result = await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1})
 
@@ -1404,7 +1404,6 @@ async def test_generate_script_plan_truncation_offers_the_way_out(
     fake_ctx: ToolHarness, monkeypatch, video_request_facts, prepare
 ) -> None:
     """脚本规划的输出被截断：问题码、出路与分集规划相同，带供应商、模型与是否为自定义模型。"""
-    from server import text_generation as mod
 
     prepare(fake_ctx)
 
@@ -1415,7 +1414,7 @@ async def test_generate_script_plan_truncation_offers_the_way_out(
     async def fake_create(_task_type, project_name=None, **_kwargs):
         return _TruncatingGenerator()
 
-    monkeypatch.setattr(mod.TextGenerator, "create", fake_create)
+    use_text_generator(monkeypatch, fake_create)
 
     problem = problem_of(await run_declared_tool("generate_script_plan", fake_ctx, {"episode_id": 1}))
 
@@ -1428,7 +1427,6 @@ async def test_generate_script_plan_truncation_offers_the_way_out(
 
 
 async def test_generate_episode_script_truncation_offers_the_way_out(fake_ctx: ToolHarness, monkeypatch) -> None:
-    from server import text_generation as mod
 
     project_path = fake_ctx.project_path
     _write_formal_script(project_path)
@@ -1436,7 +1434,7 @@ async def test_generate_episode_script_truncation_offers_the_way_out(fake_ctx: T
         json.dumps({"schema_version": CURRENT_PROJECT_SCHEMA_VERSION, "content_mode": "narration"}), encoding="utf-8"
     )
 
-    monkeypatch.setattr(mod.TextGenerator, "create", FakeTextGenerator(_truncated()).create)
+    use_text_generator(monkeypatch, FakeTextGenerator(_truncated()).create)
     _prepare_script_admission(project_path)
 
     problem = problem_of(await run_declared_tool("generate_episode_script", fake_ctx, {"episode_id": 1}))

@@ -27,6 +27,7 @@ from lib.generation.video_request_facts import (
     VideoRequestFactsFailure,
     reference_migration_durations,
 )
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.json_io import load_json_or_none
 from lib.project.project_manager import ProjectManager, ScriptWriteConflict
 from lib.script import script_review
@@ -49,7 +50,7 @@ from server.services.tasks.video_caps import (
     reference_request_facts_lookup,
     reference_unit_capabilities,
 )
-from server.text_generation import _fetch_reference_split_caps, reference_soft_violations, soft_violation_entries
+from server.text_generation import fetch_reference_split_caps, reference_soft_violations, soft_violation_entries
 
 logger = logging.getLogger(__name__)
 
@@ -217,12 +218,12 @@ class ScriptReviewService:
         """
         project = await asyncio.to_thread(self.pm.load_project, project_name)
         supported_durations = await self._resolve_supported_durations(project)
-        state = await asyncio.to_thread(self._get_state_sync, project_name, project, episode, supported_durations)
+        state = await run_sync_transaction(self._get_state_sync, project_name, project, episode, supported_durations)
         state["soft_violations"] = []
         content = state["content"]
         if script_review.script_plan_kind(project) == "reference_video" and isinstance(content, dict):
             try:
-                caps = await _fetch_reference_split_caps(project, config_resolver=self.config_resolver)
+                caps = await fetch_reference_split_caps(project, config_resolver=self.config_resolver)
             except VideoRequestFactsError:
                 return state
             units = content.get("units") or []
@@ -303,11 +304,18 @@ class ScriptReviewService:
         quarantine_kind = script_review.script_plan_quarantine_kind(project)
         if quarantine_kind is None:
             return None
-        project_path = self.pm.get_project_path(project_name)
-        quarantine_path = script_review.script_plan_quarantine_path(project_path, project, episode)
-        if quarantine_path is None or not quarantine_path.exists():
+
+        def _locate() -> tuple[Path, Path | None, bool]:
+            project_path = self.pm.get_project_path(project_name)
+            quarantine_path = script_review.script_plan_quarantine_path(project_path, project, episode)
+            if quarantine_path is None or not quarantine_path.exists():
+                return project_path, None, False
+            formal_path = script_review.script_plan_path(project_path, project, episode)
+            return project_path, quarantine_path, formal_path is not None and formal_path.exists()
+
+        project_path, quarantine_path, formal_exists = await asyncio.to_thread(_locate)
+        if quarantine_path is None:
             return None
-        formal_path = script_review.script_plan_path(project_path, project, episode)
         view: dict[str, Any] = {
             "doc_type": QUARANTINE_KIND_TO_DOC_TYPE[quarantine_kind],
             "revision": None,
@@ -315,11 +323,11 @@ class ScriptReviewService:
             "content": None,
             "violations": [],
             "soft_violations": [],
-            "formal_exists": formal_path is not None and await asyncio.to_thread(formal_path.exists),
+            "formal_exists": formal_exists,
         }
         draft = await asyncio.to_thread(read_quarantine, project_path, episode, quarantine_kind)
         if draft is None:
-            if not quarantine_path.exists():
+            if not await asyncio.to_thread(quarantine_path.exists):
                 # 存在性检查与读取之间的窗口内，Agent 的晋升/重拆分工具把文件清掉了（正式内容
                 # 已写入、待处置草稿已清除）：不是信封损坏，是这次读跨越了「清除」那一刻，按「无
                 # 草稿」处理，不误报损坏。
@@ -384,9 +392,10 @@ class ScriptReviewService:
         with_ref_facts = await request_facts("r2v")
         if isinstance(with_ref_facts, VideoRequestFactsFailure):
             return None
+        project_path = await asyncio.to_thread(self.pm.get_project_path, project_name)
         unit_capabilities = await reference_unit_capabilities(
             project,
-            self.pm.get_project_path(project_name),
+            project_path,
             units,
             request_facts=request_facts,
         )
@@ -411,7 +420,7 @@ class ScriptReviewService:
         落盘本身全同步（不做时长收编，无需档位表），整段卸到线程；随后的 ``get_state`` 自行
         解析档位表，保存的响应与 GET 首次加载因此同源。
         """
-        await asyncio.to_thread(self._save_content_sync, project_name, episode, content, base_fingerprint)
+        await run_sync_transaction(self._save_content_sync, project_name, episode, content, base_fingerprint)
         return await self.get_state(project_name, episode)
 
     def _save_content_sync(
@@ -488,9 +497,15 @@ class ScriptReviewService:
         """
         project = await asyncio.to_thread(self.pm.load_project, project_name)
         supported_durations = await self._resolve_supported_durations(project)
-        project_path = self.pm.get_project_path(project_name)
-        overwrite = await asyncio.to_thread(script_review.formal_script_overwrite, project_path, project, episode)
-        fingerprint = await asyncio.to_thread(self._confirm_sync, project_name, project, episode, supported_durations)
+
+        def _locate_overwrite() -> tuple[Path, script_review.FormalScriptOverwrite | None]:
+            project_path = self.pm.get_project_path(project_name)
+            return project_path, script_review.formal_script_overwrite(project_path, project, episode)
+
+        project_path, overwrite = await asyncio.to_thread(_locate_overwrite)
+        fingerprint = await run_sync_transaction(
+            self._confirm_sync, project_name, project, episode, supported_durations
+        )
         if overwrite is not None and overwrite_revision != overwrite.fingerprint:
             raise ScriptReviewError("overwrite_required", overwrite=overwrite.to_dict())
         await self._materialize(

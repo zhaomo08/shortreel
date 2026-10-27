@@ -162,8 +162,13 @@ _TASK_FAILURE_ACTIONS: dict[str, GenerationAction] = {
     "image_endpoint_mismatch_no_i2i": GenerationAction.CONFIGURE_PROVIDER,
     "image_endpoint_mismatch_no_t2i": GenerationAction.CONFIGURE_PROVIDER,
     "provider_unsupported_media": GenerationAction.CONFIGURE_PROVIDER,
+    "model_not_in_provider_catalog": GenerationAction.CONFIGURE_PROVIDER,
     # 上游按确定性 4xx 拒了这个请求：原样重发只会被同样拒绝，还要再付一次。
     "provider_rejected": GenerationAction.FIX_INPUT,
+    # 多为内容安全过滤命中：调整提示词或参考图后再生成。
+    "image_output_missing": GenerationAction.FIX_INPUT,
+    # 模型只出矢量等非位图格式：换一个模型。
+    "image_output_format_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     "declarative_template_render_failed": GenerationAction.CONFIGURE_PROVIDER,
     "declarative_response_extract_failed": GenerationAction.CONFIGURE_PROVIDER,
     # 图片已出但没取回：图片不续跑，「重试下载」接不回原任务，重新生成是唯一的一步。
@@ -196,10 +201,12 @@ _TASK_FAILURE_ACTIONS: dict[str, GenerationAction] = {
     "video_supported_durations_incompatible": GenerationAction.CONFIGURE_PROVIDER,
     "video_capability_unavailable": GenerationAction.CONFIGURE_PROVIDER,
     "video_last_frame_requires_pro": GenerationAction.CONFIGURE_PROVIDER,
+    "video_first_frame_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     "video_last_frame_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     "video_reference_images_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     "video_reference_images_with_frames_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     "video_reference_audio_unsupported": GenerationAction.CONFIGURE_PROVIDER,
+    "video_reference_route_audio_unsupported": GenerationAction.CONFIGURE_PROVIDER,
     # 请求本身不合法（超限、缺配套字段、档位不匹配）：改请求。
     "ref_payload_floor_exceeded": GenerationAction.FIX_INPUT,
     "video_duration_invalid": GenerationAction.FIX_INPUT,
@@ -207,10 +214,10 @@ _TASK_FAILURE_ACTIONS: dict[str, GenerationAction] = {
     "video_end_image_requires_start_image": GenerationAction.FIX_INPUT,
     "video_prompt_too_long": GenerationAction.FIX_INPUT,
     "video_aspect_ratio_not_supported": GenerationAction.FIX_INPUT,
-    "video_resolution_duration_unsupported": GenerationAction.FIX_INPUT,
     "video_resolution_not_supported": GenerationAction.FIX_INPUT,
     "video_reference_resolution_unsupported": GenerationAction.FIX_INPUT,
-    "video_reference_images_duration_unsupported": GenerationAction.FIX_INPUT,
+    # 提交前才发现参考图多于模型上限（两次读到的模型目录不一致）：重新生成会按最新上限重新裁剪编号。
+    "image_reference_images_exceeded": GenerationAction.RETRY,
     "video_reference_images_exceeded": GenerationAction.FIX_INPUT,
     "video_reference_audio_duration_exceeded": GenerationAction.FIX_INPUT,
     "video_reference_audio_exceeded": GenerationAction.FIX_INPUT,

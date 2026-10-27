@@ -1,5 +1,6 @@
 """instructor_support 模块测试。"""
 
+import json
 from collections.abc import Generator
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -14,7 +15,11 @@ from instructor.core import IncompleteOutputException, InstructorRetryException,
 from openai import BadRequestError
 from pydantic import BaseModel, ValidationError
 
-from lib.backends.text_backends.base import StructuredOutputExhaustedError, TextOutputTruncatedError
+from lib.backends.text_backends.base import (
+    StructuredOutputExhaustedError,
+    TextGenerationResult,
+    TextOutputTruncatedError,
+)
 from lib.backends.text_backends.instructor_support import (
     _PARSE_FAILURE_TYPES,
     generate_structured_via_instructor,
@@ -23,11 +28,23 @@ from lib.backends.text_backends.instructor_support import (
     instructor_fallback_sync,
 )
 from tests.fakes import instructor_api_call_exhausted
+from tests.http_capture import capture_http, only_request, request_json
+from tests.unit.lib.backends.text_backends.response_schema_support import (
+    leaked_class_docstrings,
+    response_schema_params,
+)
 
 
 class SampleModel(BaseModel):
     name: str
     age: int
+
+
+def _structured(json_text: str, input_tokens: int, output_tokens: int) -> TextGenerationResult:
+    """一档 Instructor 调用成功时的结果：JSON 文本与这次调用的计量。"""
+    return TextGenerationResult(
+        text=json_text, provider="", model="", input_tokens=input_tokens, output_tokens=output_tokens
+    )
 
 
 def _completion(content: str, *, tool_calls=None, function_call=None) -> SimpleNamespace:
@@ -182,16 +199,16 @@ class TestGenerateStructuredViaInstructor:
                 mock_completion,
             )
 
-            json_text, input_tokens, output_tokens = generate_structured_via_instructor(
+            result = generate_structured_via_instructor(
                 client=mock_client,
                 model="doubao-seed-2-0-lite-260215",
                 messages=[{"role": "user", "content": "test"}],
                 response_model=SampleModel,
             )
 
-        assert json_text == sample.model_dump_json()
-        assert input_tokens == 50
-        assert output_tokens == 20
+        assert result.text == sample.model_dump_json()
+        assert result.input_tokens == 50
+        assert result.output_tokens == 20
 
     def test_passes_mode_and_retries(self):
         """mode 交给 from_openai，其余参数原样上线。"""
@@ -212,11 +229,12 @@ class TestGenerateStructuredViaInstructor:
             )
 
         assert patched_with == [{"client": mock_client, "mode": Mode.MD_JSON}]
+        # response_model 换成不带类 docstring 的子类（见 TestModelFacingSchemaOnWire），字段与校验不变
+        assert issubclass(calls[0].pop("response_model"), SampleModel)
         assert calls == [
             {
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "test"}],
-                "response_model": SampleModel,
                 "max_retries": 3,
             }
         ]
@@ -235,16 +253,16 @@ class TestGenerateStructuredViaInstructor:
                 mock_completion,
             )
 
-            json_text, input_tokens, output_tokens = generate_structured_via_instructor(
+            result = generate_structured_via_instructor(
                 client=mock_client,
                 model="test-model",
                 messages=[{"role": "user", "content": "test"}],
                 response_model=SampleModel,
             )
 
-        assert json_text == sample.model_dump_json()
-        assert input_tokens is None
-        assert output_tokens is None
+        assert result.text == sample.model_dump_json()
+        assert result.input_tokens is None
+        assert result.output_tokens is None
 
     def test_max_tokens_uses_default_param_name(self):
         """默认 token_param 下 max_tokens 值以 max_tokens 为参数名上线。"""
@@ -323,7 +341,7 @@ class TestGenerateStructuredViaInstructorAsync:
             mock_instructor.from_openai.return_value = mock_patched
             mock_patched.chat.completions.create_with_completion = AsyncMock(return_value=(sample, mock_completion))
 
-            _json_text, input_tokens, output_tokens = await generate_structured_via_instructor_async(
+            result = await generate_structured_via_instructor_async(
                 client=AsyncMock(),
                 model="test-model",
                 messages=[{"role": "user", "content": "test"}],
@@ -335,8 +353,8 @@ class TestGenerateStructuredViaInstructorAsync:
             call_kwargs = mock_patched.chat.completions.create_with_completion.call_args[1]
             assert call_kwargs["max_completion_tokens"] == 2345
             assert "max_tokens" not in call_kwargs
-        assert input_tokens is None
-        assert output_tokens is None
+        assert result.input_tokens is None
+        assert result.output_tokens is None
 
     async def test_incomplete_output_maps_to_truncated_error(self):
         """异步版 IncompleteOutputException 同样归一为 TextOutputTruncatedError。"""
@@ -367,7 +385,7 @@ class TestInstructorFallbackSync:
 
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            return_value=(sample.model_dump_json(), 50, 20),
+            return_value=_structured(sample.model_dump_json(), 50, 20),
         ):
             result = instructor_fallback_sync(
                 client=MagicMock(),
@@ -430,11 +448,11 @@ class TestInstructorFallbackSync:
                 token_param="max_completion_tokens",
             )
 
+        assert issubclass(calls[0].pop("response_model"), SampleModel)
         assert calls == [
             {
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "test"}],
-                "response_model": SampleModel,
                 "max_retries": 2,
                 "max_completion_tokens": 500,
             }
@@ -677,7 +695,7 @@ class TestStructuredModeChainSync:
         sample = SampleModel(name="Alice", age=30)
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            return_value=(sample.model_dump_json(), 50, 20),
+            return_value=_structured(sample.model_dump_json(), 50, 20),
         ) as mock_gen:
             result = self._call()
 
@@ -690,7 +708,7 @@ class TestStructuredModeChainSync:
         sample = SampleModel(name="Bob", age=25)
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            side_effect=[_tools_rejected_error(), (sample.model_dump_json(), 10, 5)],
+            side_effect=[_tools_rejected_error(), _structured(sample.model_dump_json(), 10, 5)],
         ) as mock_gen:
             result = self._call()
 
@@ -702,7 +720,7 @@ class TestStructuredModeChainSync:
         sample = SampleModel(name="Carol", age=28)
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            side_effect=[_retry_exhausted(_no_tool_call_error()), (sample.model_dump_json(), 10, 5)],
+            side_effect=[_retry_exhausted(_no_tool_call_error()), _structured(sample.model_dump_json(), 10, 5)],
         ) as mock_gen:
             result = self._call()
 
@@ -754,7 +772,7 @@ class TestStructuredModeChainSync:
                 "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
                 side_effect=[
                     _retry_exhausted(_function_call_args_missing_error()),
-                    (sample.model_dump_json(), 10, 5),
+                    _structured(sample.model_dump_json(), 10, 5),
                 ],
             ) as mock_gen,
             pytest.raises(StructuredOutputExhaustedError) as exc_info,
@@ -831,7 +849,7 @@ class TestStructuredModeChainSync:
                 "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
                 side_effect=[
                     _retry_exhausted(_no_tool_call_error(), content=raw),
-                    (sample.model_dump_json(), 10, 5),
+                    _structured(sample.model_dump_json(), 10, 5),
                 ],
             ),
             caplog.at_level("WARNING", logger="lib.backends.text_backends.instructor_support"),
@@ -842,7 +860,7 @@ class TestStructuredModeChainSync:
 
     def test_transient_error_keeps_its_type_after_unwrapping(self):
         """瞬态错误剥掉 Instructor 包装后冒泡，保住类型供调用方的重试装饰器判定。"""
-        from lib.infra.retry import BASE_RETRYABLE_ERRORS, _should_retry
+        from lib.infra.retry import BASE_RETRYABLE_ERRORS, should_retry
 
         with (
             patch(
@@ -854,7 +872,7 @@ class TestStructuredModeChainSync:
             self._call()
 
         # 消息文本不含任何瞬态状态码模式，只有异常类型能证明它可重试。
-        assert _should_retry(exc_info.value, BASE_RETRYABLE_ERRORS)
+        assert should_retry(exc_info.value, BASE_RETRYABLE_ERRORS)
 
     def test_invalid_tool_call_arguments_are_terminal(self):
         """上游回了 tool call 但 arguments 不可用：属校验类，不降到约束更弱的 MD_JSON。"""
@@ -908,7 +926,7 @@ class TestStructuredModeChainSync:
         rejection = _bad_request("Tools Are Not Supported By This Endpoint")
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            side_effect=[instructor_api_call_exhausted(rejection), (sample.model_dump_json(), 10, 5)],
+            side_effect=[instructor_api_call_exhausted(rejection), _structured(sample.model_dump_json(), 10, 5)],
         ) as mock_gen:
             result = self._call()
 
@@ -922,7 +940,7 @@ class TestStructuredModeChainSync:
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
             side_effect=[
                 _retry_exhausted(_no_tool_call_error(), prompt_tokens=70, completion_tokens=30),
-                (sample.model_dump_json(), 10, 5),
+                _structured(sample.model_dump_json(), 10, 5),
             ],
         ):
             result = self._call()
@@ -935,7 +953,10 @@ class TestStructuredModeChainSync:
         sample = SampleModel(name="Ivan", age=26)
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            side_effect=[_retry_exhausted(_no_tool_call_error()), (sample.model_dump_json(), None, None)],
+            side_effect=[
+                _retry_exhausted(_no_tool_call_error()),
+                TextGenerationResult(text=sample.model_dump_json(), provider="", model=""),
+            ],
         ):
             result = self._call()
 
@@ -977,7 +998,7 @@ class TestStructuredModeChainAsync:
         sample = SampleModel(name="Eve", age=45)
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor_async",
-            side_effect=[_tools_rejected_error(), (sample.model_dump_json(), 10, 5)],
+            side_effect=[_tools_rejected_error(), _structured(sample.model_dump_json(), 10, 5)],
         ) as mock_gen:
             result = await self._call()
 
@@ -1015,7 +1036,7 @@ class TestStructuredModeChainAsync:
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor_async",
             side_effect=[
                 _retry_exhausted(_no_tool_call_error(), prompt_tokens=70, completion_tokens=30),
-                (sample.model_dump_json(), 10, 5),
+                _structured(sample.model_dump_json(), 10, 5),
             ],
         ):
             result = await self._call()
@@ -1104,6 +1125,64 @@ class TestStructuredModeChainThroughInstructor:
         assert result.output_tokens == 22
 
 
+class TestModelFacingSchemaOnWire:
+    """经真实 Instructor 与 OpenAI SDK 发出的请求体里不带类 docstring：TOOLS 档的工具说明与参数、MD_JSON 档注入的
+    schema 都一样。
+
+    respx 在 transport 层截获首个请求后回 400 让调用结束，只看序列化后的请求体。
+    """
+
+    _ENDPOINT = "https://proxy.invalid/v1/chat/completions"
+    _REJECT = httpx.Response(400, json={"error": {"message": "stop", "type": "invalid_request_error"}})
+
+    @staticmethod
+    def _wire_json(request: httpx.Request, mode: Mode) -> str:
+        body = request_json(request)
+        if mode is Mode.TOOLS:
+            return json.dumps(body["tools"], ensure_ascii=False)
+        system_content = body["messages"][0]["content"]
+        assert '"properties"' in system_content  # schema 确已注入，下面的断言才有意义
+        return system_content
+
+    @pytest.mark.parametrize("mode", [Mode.TOOLS, Mode.MD_JSON])
+    @pytest.mark.parametrize("model", response_schema_params())
+    def test_sync_request_has_no_class_docstrings(self, model: type[BaseModel], mode: Mode):
+        from openai import OpenAI
+
+        client = OpenAI(api_key="sk-test", base_url="https://proxy.invalid/v1", max_retries=0)
+        with capture_http() as router:
+            route = router.post(self._ENDPOINT).mock(return_value=self._REJECT)
+            with pytest.raises(InstructorRetryException):
+                generate_structured_via_instructor(
+                    client=client,
+                    model="test-model",
+                    messages=[{"role": "user", "content": "test"}],
+                    response_model=model,
+                    mode=mode,
+                )
+
+        assert leaked_class_docstrings(model, self._wire_json(only_request(route), mode)) == []
+
+    @pytest.mark.parametrize("mode", [Mode.TOOLS, Mode.MD_JSON])
+    @pytest.mark.parametrize("model", response_schema_params())
+    async def test_async_request_has_no_class_docstrings(self, model: type[BaseModel], mode: Mode):
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key="sk-test", base_url="https://proxy.invalid/v1", max_retries=0)
+        with capture_http() as router:
+            route = router.post(self._ENDPOINT).mock(return_value=self._REJECT)
+            with pytest.raises(InstructorRetryException):
+                await generate_structured_via_instructor_async(
+                    client=client,
+                    model="test-model",
+                    messages=[{"role": "user", "content": "test"}],
+                    response_model=model,
+                    mode=mode,
+                )
+
+        assert leaked_class_docstrings(model, self._wire_json(only_request(route), mode)) == []
+
+
 class TestInstructorFallbackAsync:
     """instructor_fallback_async 高层函数测试。"""
 
@@ -1113,7 +1192,7 @@ class TestInstructorFallbackAsync:
 
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor_async",
-            return_value=(sample.model_dump_json(), 40, 18),
+            return_value=_structured(sample.model_dump_json(), 40, 18),
         ):
             result = await instructor_fallback_async(
                 client=AsyncMock(),
@@ -1175,11 +1254,11 @@ class TestInstructorFallbackAsync:
                 token_param="max_completion_tokens",
             )
 
+        assert issubclass(calls[0].pop("response_model"), SampleModel)
         assert calls == [
             {
                 "model": "async-model",
                 "messages": [{"role": "user", "content": "test"}],
-                "response_model": SampleModel,
                 "max_retries": 2,
                 "max_completion_tokens": 600,
             }

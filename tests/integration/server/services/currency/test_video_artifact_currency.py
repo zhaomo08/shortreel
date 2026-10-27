@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from contextlib import asynccontextmanager, contextmanager, suppress
 from copy import deepcopy
 from pathlib import Path
@@ -307,6 +308,8 @@ def test_selected_video_compensation_restores_media_manifest_and_only_video_asse
         artifact_path="videos/scene_E1S01.mp4",
         basis=old_basis,
     )
+    old_content = adapter.get_entry(ArtifactKey.episode_video(1, "E1S01")).content
+    assert old_content is not None
     script = {
         "episode": 1,
         "content_mode": "narration",
@@ -384,6 +387,7 @@ def test_selected_video_compensation_restores_media_manifest_and_only_video_asse
     manifest_entry = adapter.get_entry(ArtifactKey.episode_video(1, "E1S01"))
     assert manifest_entry is not None
     assert manifest_entry.basis_digest == old_basis.digest
+    assert manifest_entry.content == old_content
     assert thumbnail.read_bytes() == b"old-thumbnail"
     if script_change in {"none", "legacy"}:
         assert assets == {
@@ -503,6 +507,44 @@ async def test_selected_video_finalize_failure_is_compensated_before_reraising()
 
     assert caught.value is failure
     committer.compensate_selection.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_the_completion_callback_keeps_the_finalized_selection() -> None:
+    """完成回调在线程里发事件时到达的取消不打断它：回调结算后照常返回，不补偿已定型的选中。"""
+    committer = MagicMock()
+    committer.outcome = PaidVersionCommit(version=2, selected=True)
+    committer.release_admission_guard = AsyncMock()
+    notifying = threading.Event()
+    release = threading.Event()
+
+    def _on_completed() -> None:
+        notifying.set()
+        release.wait(5)
+
+    async def _finalize() -> dict[str, object]:
+        return {"version": 2, "selected_current": True}
+
+    task = asyncio.create_task(
+        complete_video_artifact_commit(
+            committer=committer,
+            versions=MagicMock(),
+            resource_type="videos",
+            resource_id="E1S01",
+            version=2,
+            video_uri=None,
+            finalize=_finalize,
+            on_completed=_on_completed,
+        )
+    )
+    await asyncio.to_thread(notifying.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await task == {"version": 2, "selected_current": True}
+    committer.compensate_selection.assert_not_called()
+    committer.release_admission_guard.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

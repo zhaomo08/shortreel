@@ -15,6 +15,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -60,7 +61,9 @@ from lib.artifacts.artifact_planner import (
     SharedVersionMetadata,
     TargetStatePlanner,
     episode_scope_for_key,
+    gap_backfill_entries,
     plan_artifact_target_state,
+    plan_artifact_target_state_by_gap_rule,
 )
 from lib.artifacts.artifact_registration import (
     artifact_key_for_resource,
@@ -80,6 +83,7 @@ from lib.artifacts.visual_artifact_provenance import (
 )
 from lib.infra.content_digest import TextModeDigest
 from lib.infra.json_io import atomic_write_bytes, atomic_write_json
+from lib.project.project_migration_report import MigrationSkippedArtifact, skipped_artifact_identity
 from lib.project.project_schema import project_schema_is_current
 
 _EPISODE_RESOURCE_KINDS = frozenset(
@@ -159,7 +163,7 @@ def ensure_imported_artifact_target_state(
     project_dir: Path,
     *,
     preserved_manifest: ArtifactManifestArchiveSnapshot | None = None,
-) -> bool:
+) -> tuple[MigrationSkippedArtifact, ...]:
     """Eagerly materialize the v8 sidecar at the archive staging boundary.
 
     Official exports carry the complete source Manifest in their visible archive
@@ -170,7 +174,14 @@ def ensure_imported_artifact_target_state(
     the frozen claim; a digest that only matches the text-mode view (CRLF folded,
     cut at ``0x1A``) cannot prove the whole artifact, so that key is re-registered
     from the current self-proving projection instead; any other digest rejects the
-    import.  Legacy archives without the envelope retain the self-proving path.
+    import.  Formal artifacts the envelope carries no claim for because generation-input
+    gaps once blocked their projection are backfilled from the self-proving projection
+    (``docs/adr/0098``, the same rule as the v17→v18 backfill); other unclaimed
+    artifacts stay unregistered.  Legacy archives without the envelope retain the
+    self-proving path.
+
+    返回规划器看见、但最终没有登记的产物及原因：导入不分 schema 版本都把它们列进迁移报告的
+    「未能带入」（ADR 0098）。
     """
 
     raw = (project_dir / "project.json").read_bytes()
@@ -187,6 +198,8 @@ def ensure_imported_artifact_target_state(
             raise ValueError("archive Artifact Manifest content evidence does not cover every formal claim")
         with project_metadata_lock(project_dir):
             plan = _plan_preserved_artifact_target_state(project_dir)
+            gaps_refused = plan_artifact_target_state_by_gap_rule(project_dir, project, record_gaps=False)
+            gaps_recorded = plan_artifact_target_state_by_gap_rule(project_dir, project, record_gaps=True)
             rebased = _rebase_preserved_artifact_entries(plan, preserved_entries)
             invalid = [key.encode() for key, archived in preserved_entries.items() if rebased[key] != archived]
             if invalid:
@@ -198,7 +211,15 @@ def ensure_imported_artifact_target_state(
             for key, entry in preserved_entries.items():
                 evidence = _archived_content_evidence(adapter, entry.artifact_path, preserved_content_digests[key])
                 if evidence == "exact":
-                    restored[key] = entry
+                    # 视频与音频只在激活证明「正式文件 = 选中快照」成立、且证明的就是这份字节时带上内容事实；
+                    # 证明不成立的条目不带事实，导入后照常判 stale，与源项目一致。
+                    projected = plan.entries.get(key)
+                    content = projected.content if projected is not None else None
+                    restored[key] = (
+                        replace(entry, content=content)
+                        if content is not None and content.digest == preserved_content_digests[key]
+                        else entry
+                    )
                 elif evidence == "text_mode":
                     # 文本模式摘要丢了字节，绑不住整份产物：这条 claim 按无信封归档的口径，
                     # 用当前投影自证补录；投影不出条目的目标不登记。
@@ -211,9 +232,15 @@ def ensure_imported_artifact_target_state(
                 raise ValueError(
                     f"archive Artifact Manifest formal artifact content does not match its claims: {sorted(replaced)}"
                 )
-            assert_artifact_target_state_plan_unchanged(project_dir, plan)
-            return adapter.replace_entries_atomically(restored)
-    return activate_artifact_target_state(project_dir, bump_schema=False)
+            restored.update(gap_backfill_entries(preserved_entries, gaps_refused.entries, gaps_recorded.entries))
+            for checked in (plan, gaps_refused, gaps_recorded):
+                assert_artifact_target_state_plan_unchanged(project_dir, checked, expected_project_bytes=raw)
+            adapter.replace_entries_atomically(restored)
+            registered = {skipped_artifact_identity(key) for key in restored}
+            return tuple(item for item in plan.skipped if item.identity not in registered)
+    plan = plan_artifact_target_state(project_dir)
+    activate_artifact_target_state(project_dir, bump_schema=False, plan=plan)
+    return plan.skipped
 
 
 def snapshot_preserved_artifact_manifest(

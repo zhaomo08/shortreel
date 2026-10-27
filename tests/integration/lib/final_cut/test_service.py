@@ -229,8 +229,9 @@ async def test_rendering_reads_the_snapshotted_video_version_when_the_formal_fil
 
     async def spawn_after_replacing(*args: Any, **kwargs: Any) -> Any:
         if not replaced.is_set():
-            os.replace(replacement, formal)
+            # 模拟另一个写入方替换正式文件：在工作线程里替换，不占事件循环。
             replaced.set()
+            await asyncio.to_thread(os.replace, replacement, formal)
         return await asyncio.create_subprocess_exec(*args, **kwargs)
 
     result = await FinalCutService(render_project, spawn=spawn_after_replacing).render("demo", timeline_id, **PLAIN)
@@ -294,6 +295,23 @@ async def test_a_unit_without_usable_video_blocks_rendering(render_project: Proj
     assert caught.value.code == "final_cut_blocked"
     assert [issue["unit_id"] for issue in caught.value.params["issues"]] == ["E1U2"]
     assert not (render_project.get_project_path("demo") / "renders").exists()
+
+
+@pytest.mark.usefixtures("media")
+async def test_a_corrupted_video_snapshot_blocks_rendering_and_names_the_version(
+    render_project: ProjectManager,
+) -> None:
+    project_dir = render_project.get_project_path("demo")
+    record = VersionManager(project_dir).get_versions("reference_videos", "E1U2")["versions"][-1]
+    (project_dir / record["file"]).write_bytes(b"corrupted")
+    timeline_id = await _create_timeline(render_project)
+
+    with pytest.raises(FinalCutError) as caught:
+        await FinalCutService(render_project).render("demo", timeline_id, **PLAIN)
+
+    assert caught.value.code == "final_cut_video_version_corrupted"
+    assert caught.value.params == {"unit_id": "E1U2", "resource_type": "reference_videos", "version": record["version"]}
+    assert not (project_dir / "renders").exists()
 
 
 @pytest.mark.usefixtures("media")

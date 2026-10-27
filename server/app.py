@@ -46,6 +46,7 @@ from lib.infra.logging_config import (
     setup_logging,
     warn_if_log_dir_env_set,
 )
+from lib.infra.loop_stall_probe import start_loop_stall_probe, stop_loop_stall_probe
 from lib.infra.path_safety import try_safe_join
 from lib.project.project_migrations import cleanup_stale_backups, run_project_migrations
 from lib.script.source_loader.migration import migrate_project_source_encoding
@@ -62,6 +63,7 @@ from server.routers import (
     asset_sheets,
     assets,
     assistant,
+    catalog,
     characters,
     cost_estimation,
     custom_endpoints,
@@ -88,6 +90,7 @@ from server.routers import (
     prompt_authoring,
     prompt_templates,
     props,
+    provider_models,
     providers,
     reference_videos,
     scenes,
@@ -461,6 +464,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("text tier settings migration failed (non-fatal): %s", exc)
 
+    # 设置里已改名的模型改写为后继模型（退役模型映射）。放在档位迁移之后：旧任务级键收编进档位键后一并改写
+    try:
+        from lib.config.migration import migrate_retired_model_settings
+
+        async with async_session_factory() as session:
+            await migrate_retired_model_settings(session)
+    except Exception as exc:
+        logger.warning("retired model settings migration failed (non-fatal): %s", exc)
+
     # 官方市场源 seed：不存在则插入，地址常量变了就同步；不抓取
     try:
         from lib.market.sources import seed_official_source
@@ -469,6 +481,33 @@ async def lifespan(app: FastAPI):
             await seed_official_source(session)
     except Exception as exc:
         logger.warning("official market source seed failed (non-fatal): %s", exc)
+
+    # 官方同步取回的目录数据装入目录查询；读不到时暂用出厂快照，等下一轮同步
+    try:
+        from lib.catalog.official_sync import load_synced_data
+
+        async with async_session_factory() as session:
+            await load_synced_data(session)
+    except Exception:
+        logger.exception("loading synced catalog data failed (non-fatal)")
+
+    # 用户修改的模型条目副本并进目录查询；读不到时这些条目暂按官方数据，其余照常
+    try:
+        from lib.catalog.user_entries import reload_user_entries
+
+        async with async_session_factory() as session:
+            await reload_user_entries(session)
+    except Exception:
+        logger.exception("loading user-modified catalog entries failed (non-fatal)")
+
+    # 内置供应商下用户添加的模型并进目录查询；读不到时这些模型暂不可用，其余模型照常
+    try:
+        from server.routers.provider_models import reload_user_added_models
+
+        async with async_session_factory() as session:
+            await reload_user_added_models(session)
+    except Exception:
+        logger.exception("loading user-added built-in provider models failed (non-fatal)")
 
     # 把 agent_runtime_profile 物化到存量项目（文件 I/O → worker 线程）
     from lib.project.project_manager import get_project_manager
@@ -499,8 +538,19 @@ async def lifespan(app: FastAPI):
         project_event_service.publish_assistant_session_resumed
     )
 
-    async with remote_mcp_host.run():
-        yield
+    # 卡顿探针放在启动步骤之后：迁移等启动期同步工作不算线上卡顿，避免误报。
+    stall_probe = start_loop_stall_probe()
+    # 模型目录的官方同步：启动时检查一次，之后每天一次；随应用关停取消
+    from lib.catalog.official_sync import start_official_sync, stop_official_sync
+
+    catalog_sync = start_official_sync(async_session_factory)
+    try:
+        async with remote_mcp_host.run():
+            yield
+    finally:
+        await stop_official_sync(catalog_sync)
+        # 运行期异常或关停被取消时同样撤销延时转储，免得收尾阶段误写调用栈。
+        await stop_loop_stall_probe(stall_probe)
 
     # Shutdown
     assistant.assistant_service.session_manager.set_autonomous_turn_listener(None)
@@ -722,6 +772,10 @@ app.include_router(
 )
 app.include_router(tasks.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["任务队列"])
 app.include_router(providers.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["供应商管理"])
+app.include_router(
+    provider_models.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["供应商管理"]
+)
+app.include_router(catalog.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["模型目录"])
 app.include_router(system_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["系统配置"])
 app.include_router(system.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["系统"])
 app.include_router(api_keys.router, prefix="/api/v1", dependencies=[Depends(get_current_user)], tags=["API Key 管理"])
@@ -921,18 +975,22 @@ frontend_dist_dir = PROJECT_ROOT / "frontend" / "dist"
 
 if (frontend_dist_dir / "index.html").is_file():
 
-    @app.get("/app/{_rest:path}", include_in_schema=False)
-    async def spa_deep_link(_rest: str) -> FileResponse:
+    def _spa_deep_link_response(rest: str) -> FileResponse:
         # SPA 深链末段可能带扩展名（如 /app/projects/x/source/chapter1.txt），
         # app.frontend 的 fallback 会将其判为静态资源请求返回 404，此处显式兜底回 SPA 外壳。
         # 本路由注册在 app.frontend 之前，/app/ 下任何请求都会先到这里——若构建产物中
         # 恰好存在 dist/app/... 下的真实静态文件（URL 路径与 app.frontend 的映射规则一致，
         # 即相对 dist 根目录同路径），须优先返回该文件，避免被无条件遮蔽。
-        # _rest 是用户可控的 URL 段：越界一律降级回 SPA 外壳，不暴露 dist 之外的文件
-        candidate = try_safe_join(frontend_dist_dir / "app", _rest, require_file=True)
+        # rest 是用户可控的 URL 段：越界一律降级回 SPA 外壳，不暴露 dist 之外的文件
+        candidate = try_safe_join(frontend_dist_dir / "app", rest, require_file=True)
         if candidate is not None:
             return FileResponse(candidate)
         return FileResponse(frontend_dist_dir / "index.html")
+
+    @app.get("/app/{_rest:path}", include_in_schema=False)
+    async def spa_deep_link(_rest: str) -> FileResponse:
+        # 探测静态文件与 FileResponse 构造（首次 guess_type 会加载系统 mime 表）都触盘，整体卸到线程。
+        return await asyncio.to_thread(_spa_deep_link_response, _rest)
 
     app.frontend("/", directory=frontend_dist_dir, fallback="index.html")
 else:

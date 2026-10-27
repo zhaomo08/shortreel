@@ -6,6 +6,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from arcreel_market_core.video_backend_contract import (
     IMAGE_MIME_TYPES,
@@ -19,6 +20,9 @@ from lib.backends.backend_runtime import download_video
 from lib.backends.data_uri import image_to_data_uri
 from lib.backends.grok_shared import create_grok_client
 from lib.backends.providers import PROVIDER_GROK
+from lib.backends.video_backends.metering import video_usage
+from lib.backends.video_backends.name_family import capabilities_by_names
+from lib.billing.metering import Usage
 from lib.db.repositories.usage_repo import MAX_BILLED_DURATION_SECONDS
 from lib.infra.logging_utils import format_kwargs_for_log
 
@@ -26,6 +30,16 @@ logger = logging.getLogger(__name__)
 
 _MODEL_CLASSIC = "grok-imagine-video"
 _MODEL_1_5 = "grok-imagine-video-1.5"
+
+
+def _match_video_capabilities(name: str) -> VideoCapabilities | None:
+    """按名字族认定的能力；不属于 ``grok-imagine-video`` 系列时为 ``None``。"""
+    if not name.startswith(_MODEL_CLASSIC):
+        return None
+    return VideoCapabilities(
+        last_frame=name == _MODEL_1_5, max_reference_images=7, audio_track=VideoAudioMode.CONTROLLABLE
+    )
+
 
 # 全系参考生视频（带参考图，或带尾帧）的分辨率上限：「Reference-to-video is capped at 720p」，且首帧与
 # last_frame 组合即参考生视频（https://docs.x.ai/developers/model-capabilities/video/generation）。
@@ -73,14 +87,28 @@ class GrokVideoBackend:
 
         音轨可开关：请求把音轨意图下发为 SDK 的 ``generate_audio``（缺省有声，``False`` 出无声
         视频），``generate`` 结算按同一下发值记录。
+
+        ``grok-imagine-video`` 系列之外的名字取 name_family 的统一回落。
         """
-        return VideoCapabilities(
-            last_frame=model == _MODEL_1_5, max_reference_images=7, audio_track=VideoAudioMode.CONTROLLABLE
-        )
+        return capabilities_by_names(model, _match_video_capabilities)
 
     @property
     def video_capabilities(self) -> VideoCapabilities:
         return self.video_capabilities_for_model(self._model)
+
+    @staticmethod
+    def metered_usage(
+        model: str, request: VideoGenerationRequest, result: VideoGenerationResult | None = None
+    ) -> Usage:
+        """这次请求的计量（见 :mod:`lib.backends.video_backends.metering`）；结算的输出秒数取 xAI 回报的时长。"""
+        del model
+        return video_usage(
+            request,
+            result,
+            seconds=request.duration_seconds,
+            resolution=request.resolution,
+            audio=request.generate_audio,
+        )
 
     async def resume_video(self, job_id: str, request: VideoGenerationRequest) -> VideoGenerationResult:
         # Grok 同步型 API，无 job_id 可接续；orphan handler 据 NotImplementedError 标 [resume_unsupported]
@@ -88,6 +116,9 @@ class GrokVideoBackend:
 
     async def generate(self, request: VideoGenerationRequest) -> VideoGenerationResult:
         """生成视频；黑盒生成不重试，只有已取得 URL 后的下载可以独立重试。"""
+        # 请求体没有参考音频字段；能力被用户覆盖放宽时也发不出，付费前拒绝而不是静默丢弃。
+        if request.reference_audio_files:
+            raise VideoCapabilityError("video_reference_audio_unsupported", provider=self.name, model=self._model)
         self._check_reference_route_resolution(request)
         self._check_classic_first_frame_with_references(request)
         # The SDK combines submit and provider-side waiting in one opaque call. Once it starts, an exception
@@ -163,29 +194,38 @@ class GrokVideoBackend:
         if request.resolution is not None:
             generate_kwargs["resolution"] = request.resolution
 
-        if request.start_image and Path(request.start_image).exists():  # noqa: ASYNC240 -- 首帧存在性检查，本地元数据；读图转 data URI 已 to_thread 卸载
-            image_path = Path(request.start_image)
-            generate_kwargs["image_url"] = await asyncio.to_thread(image_to_data_uri, image_path, IMAGE_MIME_TYPES)
-
-        if request.end_image:
-            # 能否带尾帧由 gate_video_request 按 video_capabilities.last_frame 前置判定，到这里只剩 1.5。
-            end_path = Path(request.end_image)
-            if not end_path.is_file():  # noqa: ASYNC240 -- 尾帧存在性检查，本地元数据；读图转 data URI 已 to_thread 卸载
-                # 尾帧缺失不静默跳过：跳过后照常出片计费，成片却落不到分镜要求的结尾画面。
-                raise VideoCapabilityError(
-                    "video_end_image_unreadable", model=self._model, name=end_path.name or str(end_path)
-                )
-            generate_kwargs["last_frame_url"] = await asyncio.to_thread(image_to_data_uri, end_path, IMAGE_MIME_TYPES)
-
-        if request.reference_images:
-            ref_paths = list(request.reference_images)
-            existing_paths = [p for p in ref_paths if p.exists()]
-            if existing_paths:
-                ref_urls = await asyncio.gather(
-                    *[asyncio.to_thread(image_to_data_uri, p, IMAGE_MIME_TYPES) for p in existing_paths]
-                )
-                generate_kwargs["reference_image_urls"] = list(ref_urls)
+        # 存在性检查与读图转 data URI 都是阻塞 I/O，整体卸载到线程
+        generate_kwargs.update(await asyncio.to_thread(self._encode_image_inputs, request))
 
         logger.info("Grok 视频生成开始: model=%s, duration=%ds", self._model, request.duration_seconds)
         logger.info("调用 %s 视频 SDK kwargs=%s", self.name, format_kwargs_for_log(generate_kwargs))
         return await self._client.video.generate(**generate_kwargs)
+
+    def _encode_image_inputs(self, request: VideoGenerationRequest) -> dict[str, Any]:
+        """首帧 / 尾帧 / 参考图 → SDK 的 data URI 参数（同步：读本地图片，调用方放线程里跑）。"""
+        kwargs: dict[str, Any] = {}
+        if request.start_image:
+            image_path = Path(request.start_image)
+            # 首帧缺失不静默跳过：跳过后照常出片计费，成片却没用上首帧。
+            if not image_path.is_file():
+                raise VideoCapabilityError("video_start_image_unreadable", model=self._model, name=image_path.name)
+            kwargs["image_url"] = image_to_data_uri(image_path, IMAGE_MIME_TYPES)
+
+        if request.end_image:
+            # 能否带尾帧由 gate_video_request 按 video_capabilities.last_frame 前置判定，到这里只剩 1.5。
+            end_path = Path(request.end_image)
+            if not end_path.is_file():
+                # 尾帧缺失不静默跳过：跳过后照常出片计费，成片却落不到分镜要求的结尾画面。
+                raise VideoCapabilityError(
+                    "video_end_image_unreadable", model=self._model, name=end_path.name or str(end_path)
+                )
+            kwargs["last_frame_url"] = image_to_data_uri(end_path, IMAGE_MIME_TYPES)
+
+        if request.reference_images:
+            missing = [p.name for p in request.reference_images if not p.is_file()]
+            if missing:
+                raise VideoCapabilityError(
+                    "video_reference_images_unreadable", model=self._model, names=", ".join(missing)
+                )
+            kwargs["reference_image_urls"] = [image_to_data_uri(p, IMAGE_MIME_TYPES) for p in request.reference_images]
+        return kwargs

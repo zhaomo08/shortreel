@@ -15,13 +15,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
 from lib.artifacts.artifact_currency import active_artifact_currency_resolver, read_artifact_content_digest
 from lib.artifacts.artifact_manifest import ArtifactStatus, ProjectArtifactManifestAdapter
 from lib.artifacts.rendered_artifact import commit_rendered_artifact, read_render_record
-from lib.artifacts.version_manager import VersionManager
+from lib.artifacts.version_manager import VersionManager, VersionSnapshotCorruptedError
 from lib.bgm.library import resolve_bgm_sources
 from lib.edit_timeline.bgm import bgm_ids, place_bgm
 from lib.edit_timeline.errors import EditTimelineError
@@ -127,6 +128,23 @@ class FinalCutStatus(BaseModel):
     rendered_at: str | None
 
 
+def _verify_snapshots(versions: VersionManager, resource_type: str, snapshot_paths: set[str]) -> None:
+    """渲染直接读取的版本快照先对照版本记录里的内容指纹校验，快照损坏就阻断渲染并指明是哪个单元的哪个版本。"""
+    try:
+        versions.verify_snapshots(resource_type, snapshot_paths)
+    except VersionSnapshotCorruptedError as exc:
+        unit_id, version = exc.params["resource_id"], exc.params["version"]
+        raise FinalCutError(
+            "final_cut_narration_version_corrupted"
+            if resource_type == "audio"
+            else "final_cut_video_version_corrupted",
+            f"视频单元 {unit_id} 的 {resource_type} 版本 {version} 快照已损坏：内容与该版本入库时记录的指纹不一致",
+            unit_id=unit_id,
+            resource_type=resource_type,
+            version=version,
+        ) from exc
+
+
 def _applies(issue: TimelineIssue, variant: FinalCutVariant) -> bool:
     return issue.applies_to is IssueScope.ALL or variant.with_narration
 
@@ -160,6 +178,10 @@ class FinalCutService:
             raise EditTimelineError("project_not_found", f"项目「{project_name}」不存在", project=project_name)
         return self._projects.get_project_path(project_name)
 
+    def _load_project(self, project_name: str) -> dict[str, Any]:
+        self._project_dir(project_name)
+        return self._projects.load_project(project_name)
+
     async def _checked(
         self,
         project_name: str,
@@ -168,8 +190,7 @@ class FinalCutService:
         narration: DraftNarration | None,
         subtitles: SubtitleMode | None,
     ) -> _Checked:
-        self._project_dir(project_name)
-        project = await asyncio.to_thread(self._projects.load_project, project_name)
+        project = await asyncio.to_thread(self._load_project, project_name)
         variant = resolve_final_cut_variant(project, narration=narration, subtitles=subtitles)
         if variant.with_narration and project_narration_delivery(project) != USE_TTS:
             raise FinalCutError(
@@ -271,6 +292,9 @@ class FinalCutService:
                 "视频单元还没有可用视频：" + "、".join(inputs.missing_video_units),
                 issues=[{"code": "video_missing", "unit_id": unit_id} for unit_id in inputs.missing_video_units],
             )
+        _verify_snapshots(
+            versions, resource_type, {item.video.snapshot.relative_to(project_dir).as_posix() for item in inputs.clips}
+        )
         return inputs
 
     async def _render_media(self, inputs: FinalCutInputs) -> dict[str, RenderMedia]:
@@ -310,11 +334,20 @@ class FinalCutService:
                 narration=checked.check.variant.narration,
             )
         except UnitMaterialUnavailableError as exc:
+            if checked.check.variant.with_narration:
+                # 选中的旁白配音快照损坏时，取材料就已失败；先认出损坏，报出是哪一版。
+                await asyncio.to_thread(self._verify_selected_narration, project_name, exc.unit_id)
             raise FinalCutError(
                 "final_cut_presentation_unavailable",
                 f"视频单元 {exc.unit_id} 的旁白配音或字幕取不出：{exc}",
                 unit_id=exc.unit_id,
             ) from exc
+
+    def _verify_selected_narration(self, project_name: str, unit_id: str) -> None:
+        versions = VersionManager(self._project_dir(project_name))
+        history = versions.get_versions("audio", unit_id)
+        selected = {item["file"] for item in history["versions"] if item["version"] == history["current_version"]}
+        _verify_snapshots(versions, "audio", selected)
 
     def _placement(self, checked: _Checked, materials: UnitMaterials, media: dict[str, RenderMedia]) -> DraftPlacement:
         """按渲染实测的视频时长摆放旁白与字幕，片段起点因此与渲染规划的片段边界一致。"""
@@ -339,6 +372,7 @@ class FinalCutService:
                     clip_id=narration.clip_id,
                 ) from exc
             narrations.append(NarrationInput(path=path, start_us=narration.start_us))
+        _verify_snapshots(VersionManager(project_dir), "audio", {item.audio_path for item in placement.narrations})
         return tuple(narrations)
 
     @staticmethod
@@ -385,23 +419,26 @@ class FinalCutService:
         if materials is not None:
             inputs = replace(inputs, units=materials.bases)
         basis = final_cut_basis(inputs)
-        project_dir = self._project_dir(project_name)
+        project_dir = await asyncio.to_thread(self._project_dir, project_name)
         media = await self._render_media(inputs)
         plan = plan_render(render_clips([item.clip for item in inputs.clips], media), inputs.profile)
         if not plan.segments:
             raise FinalCutError("final_cut_empty", "剪辑时间线没有可渲染的剪辑片段", timeline_id=inputs.timeline_id)
-        narrations: tuple[NarrationInput, ...] = ()
+        placement = self._placement(checked, materials, media) if materials is not None else None
         burned: tuple[BurnedSubtitle, ...] | None = None
-        if materials is not None:
-            placement = self._placement(checked, materials, media)
-            if variant.with_narration:
+        if placement is not None and variant.burns_subtitles:
+            burned = tuple(
+                BurnedSubtitle(start_us=item.start_us, end_us=item.end_us, text=item.text)
+                for item in placement.subtitles
+            )
+
+        def audio_inputs() -> tuple[tuple[NarrationInput, ...], tuple[BgmInput, ...]]:
+            narrations: tuple[NarrationInput, ...] = ()
+            if placement is not None and variant.with_narration:
                 narrations = self._narrations(project_dir, placement)
-            if variant.burns_subtitles:
-                burned = tuple(
-                    BurnedSubtitle(start_us=item.start_us, end_us=item.end_us, text=item.text)
-                    for item in placement.subtitles
-                )
-        bgm = self._bgm(project_dir, inputs, plan.total_frames * 1_000_000 // plan.profile.fps)
+            return narrations, self._bgm(project_dir, inputs, plan.total_frames * 1_000_000 // plan.profile.fps)
+
+        narrations, bgm = await asyncio.to_thread(audio_inputs)
         ffmpeg = ffmpeg_executable()
 
         async def render_step(output: Path, workspace: Path) -> None:

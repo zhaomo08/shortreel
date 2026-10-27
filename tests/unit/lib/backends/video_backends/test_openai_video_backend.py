@@ -12,7 +12,7 @@ import pytest
 from openai import InternalServerError
 from openai.types.video_create_error import VideoCreateError
 
-from arcreel_market_core.video_backend_contract import VideoGenerationRequest
+from arcreel_market_core.video_backend_contract import VideoCapabilityError, VideoGenerationRequest
 from lib.backends.providers import PROVIDER_OPENAI
 from tests.fakes import (
     blocking_file_read_gate,
@@ -54,7 +54,7 @@ class TestOpenAIVideoBackend:
         with captured_openai_clients():
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             assert backend.name == PROVIDER_OPENAI
             assert backend.model == "sora-2"
 
@@ -69,8 +69,63 @@ class TestOpenAIVideoBackend:
         with captured_openai_clients():
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             assert backend.video_capabilities.max_reference_images == 1
+
+    @pytest.mark.parametrize(
+        ("field", "code"),
+        [("end_image", "video_last_frame_unsupported"), ("reference_audio_files", "video_reference_audio_unsupported")],
+    )
+    async def test_unsendable_input_rejected_before_submit(self, tmp_path: Path, field: str, code: str):
+        """Sora 请求体没有尾帧与参考音频字段，拒绝而不是丢弃后照常提交。"""
+        mock_client = AsyncMock()
+        _stub_client_completed(mock_client)
+        source = tmp_path / "input.bin"
+        source.write_bytes(b"x")
+        value = [source] if field == "reference_audio_files" else source
+
+        with captured_openai_clients(mock_client):
+            from lib.backends.video_backends.openai import OpenAIVideoBackend
+
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
+            with pytest.raises(VideoCapabilityError) as exc:
+                await backend.generate(
+                    VideoGenerationRequest(prompt="p", output_path=tmp_path / "o.mp4", **{field: value})
+                )
+        assert exc.value.code == code
+        mock_client.videos.create.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("kind", "code"),
+        [
+            ("missing_start", "video_start_image_unreadable"),
+            ("missing_ref", "video_reference_images_unreadable"),
+            ("two_inputs", "video_reference_images_exceeded"),
+        ],
+    )
+    async def test_unusable_image_inputs_rejected_before_submit(self, tmp_path: Path, kind: str, code: str):
+        """缺失的图与超出单槽位的图不静默跳过 / 丢弃：照常提交会出片计费却没用上用户给的图。"""
+        mock_client = AsyncMock()
+        _stub_client_completed(mock_client)
+        real = tmp_path / "real.png"
+        real.write_bytes(b"\x89PNG")
+        extra = tmp_path / "extra.png"
+        extra.write_bytes(b"\x89PNG")
+        missing = tmp_path / "missing.png"
+        inputs = {
+            "missing_start": {"start_image": missing},
+            "missing_ref": {"reference_images": [missing]},
+            "two_inputs": {"start_image": real, "reference_images": [extra]},
+        }[kind]
+
+        with captured_openai_clients(mock_client):
+            from lib.backends.video_backends.openai import OpenAIVideoBackend
+
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
+            with pytest.raises(VideoCapabilityError) as exc:
+                await backend.generate(VideoGenerationRequest(prompt="p", output_path=tmp_path / "o.mp4", **inputs))
+        assert exc.value.code == code
+        mock_client.videos.create.assert_not_awaited()
 
     async def test_text_to_video(self, tmp_path: Path):
         video_data = b"mp4-video-content"
@@ -83,7 +138,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="A cat walking in the park",
@@ -121,7 +176,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="Animate this",
@@ -153,7 +208,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             request = VideoGenerationRequest(
                 prompt="Animate this",
                 output_path=tmp_path / "output.mp4",
@@ -188,7 +243,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="Bad content",
@@ -211,7 +266,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
 
             for seconds in [3, 4, 5, 6, 7, 8, 10, 12, 15, 20]:
                 output_path = tmp_path / f"output_{seconds}.mp4"
@@ -235,7 +290,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -257,7 +312,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
 
             for aspect, expected_size in [("9:16", "720x1280"), ("16:9", "1280x720")]:
                 output_path = tmp_path / f"output_{aspect.replace(':', '_')}.mp4"
@@ -289,7 +344,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -323,7 +378,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -357,7 +412,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -396,7 +451,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -434,7 +489,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="test",
@@ -465,7 +520,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="bad",
@@ -502,7 +557,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "output.mp4"
             request = VideoGenerationRequest(
                 prompt="bad",
@@ -529,7 +584,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "out.mp4"
             request = VideoGenerationRequest(
                 prompt="resumed", output_path=output_path, aspect_ratio="9:16", duration_seconds=8
@@ -555,7 +610,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             request = VideoGenerationRequest(
                 prompt="x", output_path=tmp_path / "out.mp4", aspect_ratio="9:16", duration_seconds=8
             )
@@ -593,7 +648,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             request = VideoGenerationRequest(
                 prompt="x", output_path=tmp_path / "out.mp4", aspect_ratio="9:16", duration_seconds=8
             )
@@ -619,7 +674,7 @@ class TestOpenAIVideoBackend:
         ):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             request = VideoGenerationRequest(
                 prompt="x", output_path=tmp_path / "out.mp4", aspect_ratio="9:16", duration_seconds=8
             )
@@ -646,7 +701,7 @@ class TestProxyStatusSynonyms:
         with bounded_poll_clock(), captured_openai_clients(mock_client):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             output_path = tmp_path / "out.mp4"
             result = await backend.generate(
                 VideoGenerationRequest(prompt="p", output_path=output_path, duration_seconds=8)
@@ -672,7 +727,7 @@ class TestProxyStatusSynonyms:
         with bounded_poll_clock(), captured_openai_clients(mock_client):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             with pytest.raises(RuntimeError, match="Sora 视频生成失败"):
                 await backend.generate(
                     VideoGenerationRequest(prompt="p", output_path=tmp_path / "out.mp4", duration_seconds=8)
@@ -692,7 +747,7 @@ class TestProxyStatusSynonyms:
         with bounded_poll_clock(), captured_openai_clients(mock_client):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             request = VideoGenerationRequest(prompt="p", output_path=tmp_path / "out.mp4", duration_seconds=8)
 
             with pytest.raises(RuntimeError) as ei:
@@ -737,7 +792,7 @@ class TestFailureMessage:
         with bounded_poll_clock(), captured_openai_clients(mock_client):
             from lib.backends.video_backends.openai import OpenAIVideoBackend
 
-            backend = OpenAIVideoBackend(api_key="test-key")
+            backend = OpenAIVideoBackend(api_key="test-key", model="sora-2")
             with pytest.raises(RuntimeError) as ei:
                 await backend.generate(
                     VideoGenerationRequest(prompt="p", output_path=tmp_path / "out.mp4", duration_seconds=8)
@@ -782,7 +837,7 @@ class TestSubmittedBaseUrlReplay:
             )
             router.get(f"{_RELAY_A}/videos/vid-a/content").mock(return_value=httpx.Response(200, content=b"mp4"))
 
-            await OpenAIVideoBackend(api_key="k", base_url=f"{_RELAY_A}/").generate(
+            await OpenAIVideoBackend(api_key="k", model="sora-2", base_url=f"{_RELAY_A}/").generate(
                 VideoGenerationRequest(
                     prompt="p", output_path=tmp_path / "out.mp4", duration_seconds=8, task_id="db-task-a"
                 )
@@ -805,7 +860,7 @@ class TestSubmittedBaseUrlReplay:
                 return_value=httpx.Response(404, json={"error": {"message": "not found"}})
             )
 
-            result = await OpenAIVideoBackend(api_key="k", base_url=_RELAY_B).resume_video(
+            result = await OpenAIVideoBackend(api_key="k", model="sora-2", base_url=_RELAY_B).resume_video(
                 "vid-a",
                 VideoGenerationRequest(
                     prompt="p", output_path=tmp_path / "out.mp4", duration_seconds=8, submitted_base_url=_RELAY_A

@@ -24,6 +24,7 @@ from pydantic.json_schema import SkipJsonSchema
 from lib.agent.profile_manifest import ContentMode
 from lib.artifacts.artifact_activation import ArtifactCurrencyResolver, active_artifact_currency_resolver
 from lib.backends.text_backends.base import TextOutputTruncatedError
+from lib.catalog.errors import ModelNotInCatalogError
 from lib.config.resolver import ConfigResolver, caps_generation_mode, video_bucket_for_generation_mode
 from lib.db import async_session_factory
 from lib.db.base import DEFAULT_USER_ID
@@ -122,6 +123,7 @@ from lib.generation.generation_result import (
 )
 from lib.generation.video_request_facts import VideoRequestFactsError, VideoRequestFactsFailure
 from lib.i18n import _ as i18n_message
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.async_thread import run_sync_transaction as _run_sync_transaction
 from lib.infra.content_digest import prefixed, prefixed_canonical_json_digest
 from lib.infra.data_root_layout import DataRootLayout
@@ -406,6 +408,14 @@ async def submit_media_generation(
         raise
 
 
+def _batch_currency_resolver(projects: ProjectManager, project_name: str) -> ArtifactCurrencyResolver | None:
+    try:
+        project = projects.load_project(project_name)
+        return active_artifact_currency_resolver(projects.get_project_path(project_name), project)
+    except ProjectMigrationError:
+        return None
+
+
 async def get_generation_batch(
     request: ToolRequest[GenerationBatchToolRequest],
     scope: ProjectScope,
@@ -413,15 +423,7 @@ async def get_generation_batch(
     services: Services,
 ) -> ToolOutcome[Any]:
     try:
-        resolver: ArtifactCurrencyResolver | None = None
-        try:
-            project = await asyncio.to_thread(services.projects.load_project, scope.project_name)
-            resolver = active_artifact_currency_resolver(
-                services.projects.get_project_path(scope.project_name),
-                project,
-            )
-        except ProjectMigrationError:
-            pass
+        resolver = await asyncio.to_thread(_batch_currency_resolver, services.projects, scope.project_name)
         result = await services.queue.get_generation_batch(
             project_name=scope.project_name,
             batch_id=request.value.batch_id,
@@ -620,6 +622,16 @@ def truncation_problem(exc: TextOutputTruncatedError) -> ToolProblem:
     )
 
 
+def model_not_in_catalog_problem(exc: ModelNotInCatalogError) -> ToolProblem:
+    """引用的内置模型已不在供应商清单中：沿用任务失败的稳定码与参数，出路是重新选择模型（去配置供应商）。"""
+    return ToolProblem(
+        exc.code,
+        str(exc),
+        action=GenerationAction.CONFIGURE_PROVIDER,
+        params=dict(exc.params),
+    )
+
+
 def video_facts_problem(failure: VideoRequestFactsFailure, detail: str) -> ToolProblem:
     """视频请求事实解析不出：问题码与参数原样透出，修复指引与批量准入同一映射（多为配置供应商）。"""
     return ToolProblem(
@@ -671,6 +683,8 @@ async def _run_text_generation(
         return ToolOutcome(problem=video_facts_problem(exc.failure, str(exc)))
     except TextGenerationError as exc:
         return ToolOutcome(problem=ToolProblem("generation_refused", str(exc)))
+    except ModelNotInCatalogError as exc:
+        return ToolOutcome(problem=model_not_in_catalog_problem(exc))
     except Exception as exc:
         return ToolOutcome(problem=ToolProblem("internal_error", f"{operation} 失败: {exc}"))
 
@@ -918,8 +932,7 @@ async def generate_episode_script(
         )
     try:
         await asyncio.to_thread(
-            functools.partial(
-                prompt_authoring_preflight,
+            lambda: prompt_authoring_preflight(
                 services.projects.get_project_path(scope.project_name),
                 text_request.episode,
                 entry_ids=text_request.entry_ids,
@@ -962,11 +975,12 @@ async def generate_script_plan(
         if content_mode not in {"narration", "drama", "ad"}:
             raise TextGenerationError(f"不支持的创作类型: {content_mode}")
         await asyncio.to_thread(
-            script_plan_preflight,
-            services.projects.get_project_path(scope.project_name),
-            project,
-            text_request.episode,
-            text_request.source,
+            lambda: script_plan_preflight(
+                services.projects.get_project_path(scope.project_name),
+                project,
+                text_request.episode,
+                text_request.source,
+            )
         )
         if is_reference_video_project(project):
             handler, task_type = generate_reference_script_plan, _TEXT_REFERENCE_SCRIPT_PLAN
@@ -1171,14 +1185,14 @@ def _read_business_file(project_dir: Path, relative: str) -> tuple[bytes, Path]:
                 raise ValueError("path 在安全校验后发生变化")
             raw = handle.read(BUSINESS_FILE_MAX_BYTES + 1)
     else:
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW  # noqa: TID251 -- 仅在支持 dir_fd 的 POSIX 分支执行，常量必然存在
         directory_fd = os.open(project_dir, directory_flags)
         try:
             for part in parts[:-1]:
                 child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
                 os.close(directory_fd)
                 directory_fd = child_fd
-            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)  # noqa: TID251 -- 仅在支持 dir_fd 的 POSIX 分支执行，常量必然存在
             try:
                 if not stat.S_ISREG(os.fstat(file_fd).st_mode):
                     raise ValueError("path 必须指向普通文件")
@@ -1343,11 +1357,8 @@ async def list_source_files(
     services: Services,
 ) -> ToolOutcome[SourceFilesContent]:
     try:
-        project_dir = services.projects.get_project_path(scope.project_name)
         files = await asyncio.to_thread(
-            _business_file_entries,
-            project_dir,
-            source_only=True,
+            lambda: _business_file_entries(services.projects.get_project_path(scope.project_name), source_only=True)
         )
         revision = prefixed_canonical_json_digest([entry.model_dump() for entry in files])
         return ToolOutcome(value=SourceFilesContent(revision=revision, files=files))
@@ -1363,7 +1374,7 @@ async def get_source_text(
 ) -> ToolOutcome[SourceTextContent]:
     path = request.value.path
     try:
-        project_dir = services.projects.get_project_path(scope.project_name)
+        project_dir = await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
         if not path.startswith("source/"):
             raise ValueError("path 必须指向 source/ 下的文本文件")
         content, revision, etag, _size = await asyncio.to_thread(_decode_business_file, project_dir, path)
@@ -1421,8 +1432,7 @@ async def list_project_files(
 ) -> ToolOutcome[ProjectFilesContent]:
     try:
         files = await asyncio.to_thread(
-            _business_file_entries,
-            services.projects.get_project_path(scope.project_name),
+            lambda: _business_file_entries(services.projects.get_project_path(scope.project_name))
         )
         revision = prefixed_canonical_json_digest([entry.model_dump() for entry in files])
         return ToolOutcome(value=ProjectFilesContent(revision=revision, files=files))
@@ -1438,8 +1448,9 @@ async def read_project_file(
 ) -> ToolOutcome[ProjectFileContent]:
     path = request.value.path
     try:
-        project_dir = services.projects.get_project_path(scope.project_name)
-        content, revision, etag, _size = await asyncio.to_thread(_decode_business_file, project_dir, path)
+        content, revision, etag, _size = await asyncio.to_thread(
+            lambda: _decode_business_file(services.projects.get_project_path(scope.project_name), path)
+        )
         return ToolOutcome(value=ProjectFileContent(revision=revision, etag=etag, path=path, content=content))
     except Exception as exc:
         return ToolOutcome(problem=_file_problem("read_project_file", exc))
@@ -1465,6 +1476,8 @@ async def _run_draft(call: Awaitable[dict[str, Any]]) -> ToolOutcome[dict[str, A
         return ToolOutcome(problem=ToolProblem(exc.code, exc.detail))
     except TextOutputTruncatedError as exc:
         return ToolOutcome(problem=truncation_problem(exc))
+    except ModelNotInCatalogError as exc:
+        return ToolOutcome(problem=model_not_in_catalog_problem(exc))
     except Exception as exc:
         return ToolOutcome(problem=ToolProblem("internal_error", str(exc)))
 
@@ -1862,7 +1875,7 @@ async def _run_source_file_change(
     """跑一个整本源文文件改动命令（``command(dry_run)``）。带着确认过的 ``revision`` 执行前，要移除或退下的集
     还有排队或执行中的任务时不写入。"""
     if revision is not None:
-        preview = await asyncio.to_thread(command, True)
+        preview = await run_sync_transaction(command, True)
         if preview.revision == revision:
             for episode in (*preview.impact.retired, *preview.impact.removed):
                 if await episode_has_active_tasks(services.queue, scope.project_name, episode):
@@ -2044,7 +2057,7 @@ async def edit_source_text(
     if problem := await migration_gate(scope, services):
         return ToolOutcome(problem=problem)
     value = request.value
-    project_dir = services.projects.get_project_path(scope.project_name)
+    project_dir = await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
 
     def _new_text(path: Path) -> str:
         if value.text is not None:
@@ -2154,6 +2167,8 @@ async def get_video_capabilities(
                 params=failure.parameters(),
             )
         )
+    except ModelNotInCatalogError as exc:
+        return ToolOutcome(problem=model_not_in_catalog_problem(exc))
     except ValueError as exc:
         return ToolOutcome(problem=ToolProblem("capabilities_unresolved", f"无法解析视频模型能力: {exc}"))
     except Exception as exc:
@@ -2828,7 +2843,9 @@ async def _execute_plan_episodes(
     if problem := await migration_gate(scope, services):
         return ToolOutcome(problem=problem)
     try:
-        planner = await planner_cls.create(services.projects.get_project_path(scope.project_name))
+        planner = await planner_cls.create(
+            await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
+        )
         if chain is None:
             result = await planner.plan(instructions=request.value.instructions, gap=gap)
         else:
@@ -2837,6 +2854,8 @@ async def _execute_plan_episodes(
             )
     except TextOutputTruncatedError as exc:
         return ToolOutcome(problem=truncation_problem(exc))
+    except ModelNotInCatalogError as exc:
+        return ToolOutcome(problem=model_not_in_catalog_problem(exc))
     except NoCutPointError as exc:
         return ToolOutcome(
             problem=ToolProblem(
@@ -2852,7 +2871,7 @@ async def _execute_plan_episodes(
     finally:
         if chain is not None:
             _STOPPED_PLANNING_WINDOWS.discard(str(chain.task["task_id"]))
-    project = services.projects.load_project(scope.project_name)
+    project = await asyncio.to_thread(services.projects.load_project, scope.project_name)
     value = PlanEpisodesResult(
         message=_format_plan(result, project, gap=gap is not None),
         episodes=[
@@ -3001,10 +3020,10 @@ async def start_episode_replan(
     """
     if problem := await _plan_episodes_gate(scope, services):
         return ToolOutcome(problem=problem)
-    project_path = services.projects.get_project_path(scope.project_name)
+    project_path = await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
     try:
         replan = await asyncio.to_thread(
-            replan_scope, project_path, services.projects.load_project(scope.project_name), episode
+            lambda: replan_scope(project_path, services.projects.load_project(scope.project_name), episode)
         )
     except ReplanError as exc:
         return ToolOutcome(problem=_replan_refused(exc))
@@ -3051,7 +3070,7 @@ async def continue_episode_replan(
                 params={"task_id": active[0]["task_id"], "status": active[0]["status"]},
             )
         )
-    project_path = services.projects.get_project_path(scope.project_name)
+    project_path = await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
     try:
         instructions = await _run_sync_transaction(resume_replan_candidate, project_path, candidate_id)
     except ReplanError as exc:
@@ -3099,8 +3118,11 @@ async def _execute_replan_window(
     )
     if outcome.problem is not None:
         reason = "no_cut_point" if outcome.problem.code == "episode_planning_no_cut_point" else "failed"
-        project_path = services.projects.get_project_path(scope.project_name)
-        await _run_sync_transaction(record_replan_interruption, project_path, candidate_id, reason)
+        await _run_sync_transaction(
+            lambda: record_replan_interruption(
+                services.projects.get_project_path(scope.project_name), candidate_id, reason
+            )
+        )
     return outcome
 
 
@@ -3115,12 +3137,16 @@ async def _draft_replan_window(
 ) -> ToolOutcome[Any]:
     planning_instructions = instructions if isinstance(instructions, str) else None
     try:
-        planner = await planner_cls.create(services.projects.get_project_path(scope.project_name))
+        planner = await planner_cls.create(
+            await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
+        )
         result: CandidatePlanResult = await planner.plan_candidate(
             candidate_id, planning_instructions, on_more_to_plan=chain.queue_next_window
         )
     except TextOutputTruncatedError as exc:
         return ToolOutcome(problem=truncation_problem(exc))
+    except ModelNotInCatalogError as exc:
+        return ToolOutcome(problem=model_not_in_catalog_problem(exc))
     except NoCutPointError as exc:
         return ToolOutcome(
             problem=ToolProblem(
@@ -3217,7 +3243,7 @@ async def execute_queued_text_task(
         scope, services = registered
     else:
         scope = ProjectScope(project_name=str(task["project_name"]), data_root=DataRootLayout.current().root)
-        services = services or Services.defaults(ProjectManager(scope.data_root))
+        services = services or Services.defaults(await asyncio.to_thread(ProjectManager, scope.data_root))
     task_type = task["task_type"]
     if task_type == TEXT_DRAFT_REPAIR_TASK_TYPE:
         outcome = await _execute_draft_repair(RepairDraftRequest.model_validate(payload), scope, services)
@@ -3284,13 +3310,14 @@ async def reset_episode_planning(
     if problem := await migration_gate(scope, services):
         return ToolOutcome(problem=problem)
     value = request.value
-    project_before = services.projects.load_project(scope.project_name)
+    project_before = await asyncio.to_thread(services.projects.load_project, scope.project_name)
     try:
         result = await _run_sync_transaction(
-            resetter,
-            services.projects.get_project_path(scope.project_name),
-            episode_id=value.episode_id,
-            confirm_consumed=value.confirm_consumed,
+            lambda: resetter(
+                services.projects.get_project_path(scope.project_name),
+                episode_id=value.episode_id,
+                confirm_consumed=value.confirm_consumed,
+            )
         )
     except (EpisodeResetError, FileNotFoundError) as exc:
         return ToolOutcome(problem=ToolProblem("episode_reset_failed", f"❌ 分集规划重置失败：{exc}"))
@@ -3735,7 +3762,7 @@ async def retry_project_migration(
     _caller: CallerContext,
     services: Services,
 ) -> ToolOutcome[RetryProjectMigrationResult]:
-    project_dir = services.projects.get_project_path(scope.project_name)
+    project_dir = await asyncio.to_thread(services.projects.get_project_path, scope.project_name)
     try:
         failure = await _run_sync_transaction(
             migrate_project_with_verdict,
@@ -3753,7 +3780,7 @@ async def retry_project_migration(
         )
     except Exception as exc:
         try:
-            residual = load_migration_failure(project_dir)
+            residual = await asyncio.to_thread(load_migration_failure, project_dir)
         except (FileNotFoundError, ValueError, OSError):
             residual = None
         return ToolOutcome(

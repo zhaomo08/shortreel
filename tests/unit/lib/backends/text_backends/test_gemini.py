@@ -3,7 +3,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from google.genai.types import GenerateContentResponseUsageMetadata
 from pydantic import BaseModel
 
 from lib.backends.text_backends.base import (
@@ -14,6 +16,11 @@ from lib.backends.text_backends.base import (
 )
 from lib.backends.text_backends.gemini import GeminiTextBackend
 from tests.fakes import bounded_poll_clock
+from tests.http_capture import capture_http, request_json
+from tests.unit.lib.backends.text_backends.response_schema_support import (
+    response_schema_models,
+    response_schema_params,
+)
 
 
 @pytest.fixture
@@ -62,7 +69,7 @@ class TestGenerate:
     async def test_plain_text(self, backend):
         mock_resp = SimpleNamespace(
             text="  generated text  ",
-            usage_metadata=SimpleNamespace(prompt_token_count=10, candidates_token_count=5),
+            usage_metadata=GenerateContentResponseUsageMetadata(prompt_token_count=10, candidates_token_count=5),
         )
         backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
 
@@ -74,10 +81,27 @@ class TestGenerate:
         assert result.input_tokens == 10
         assert result.output_tokens == 5
 
+    async def test_cache_hits_and_thinking_tokens_are_reported(self, backend):
+        """prompt_token_count 含缓存命中，命中量另报；思考 token 按输出计入。"""
+        mock_resp = SimpleNamespace(
+            text="ok",
+            usage_metadata=GenerateContentResponseUsageMetadata(
+                prompt_token_count=1000,
+                cached_content_token_count=700,
+                candidates_token_count=50,
+                thoughts_token_count=30,
+            ),
+        )
+        backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
+
+        result = await backend.generate(TextGenerationRequest(prompt="hello"))
+
+        assert (result.input_tokens, result.cache_read_tokens, result.output_tokens) == (1000, 700, 80)
+
     async def test_structured_output_passes_schema(self, backend):
         mock_resp = SimpleNamespace(
             text='{"key": "value"}',
-            usage_metadata=SimpleNamespace(prompt_token_count=20, candidates_token_count=10),
+            usage_metadata=GenerateContentResponseUsageMetadata(prompt_token_count=20, candidates_token_count=10),
         )
         backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
 
@@ -97,7 +121,7 @@ class TestGenerate:
 
         mock_resp = SimpleNamespace(
             text='{"key": "value"}',
-            usage_metadata=SimpleNamespace(prompt_token_count=20, candidates_token_count=10),
+            usage_metadata=GenerateContentResponseUsageMetadata(prompt_token_count=20, candidates_token_count=10),
             candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
         )
         backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
@@ -114,7 +138,7 @@ class TestGenerate:
 
         mock_resp = SimpleNamespace(
             text="partial",
-            usage_metadata=SimpleNamespace(prompt_token_count=20, candidates_token_count=10),
+            usage_metadata=GenerateContentResponseUsageMetadata(prompt_token_count=20, candidates_token_count=10),
             candidates=[SimpleNamespace(finish_reason="MAX_TOKENS")],
         )
         backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
@@ -140,7 +164,7 @@ class TestGenerate:
 
         mock_resp = SimpleNamespace(
             text='{"name": "test"}',
-            usage_metadata=SimpleNamespace(prompt_token_count=20, candidates_token_count=10),
+            usage_metadata=GenerateContentResponseUsageMetadata(prompt_token_count=20, candidates_token_count=10),
         )
         backend._test_client.aio.models.generate_content = AsyncMock(return_value=mock_resp)
 
@@ -297,7 +321,7 @@ class _OverviewModel(BaseModel):
 
 def _resp(text: str, input_tokens: int | None = None, output_tokens: int | None = None) -> SimpleNamespace:
     usage = (
-        SimpleNamespace(prompt_token_count=input_tokens, candidates_token_count=output_tokens)
+        GenerateContentResponseUsageMetadata(prompt_token_count=input_tokens, candidates_token_count=output_tokens)
         if input_tokens is not None or output_tokens is not None
         else None
     )
@@ -432,3 +456,111 @@ class TestStructuredFallback:
 
         # 1 次原生成功 + 降级层自身 3 次重试穷尽；原生调用未被重放
         assert gc.call_count == 4
+
+
+def _keys_anywhere(node: object, names: set[str]) -> list[str]:
+    """递归收集 dict 中任何层级出现的指定 key（含属性名位置，用于断言「完全不含」）。"""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in names:
+                found.append(k)
+            found.extend(_keys_anywhere(v, names))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_keys_anywhere(item, names))
+    return found
+
+
+class TestAdditionalPropertiesStripped:
+    """Gemini Developer API 的 responseSchema 不认识 additionalProperties，下发即 400 INVALID_ARGUMENT。"""
+
+    @pytest.fixture
+    def backend(self, mock_genai):
+        mock_genai.Client.return_value = MagicMock()
+        return GeminiTextBackend(api_key="k")
+
+    def test_response_schema_models_carry_additional_properties_before_conversion(self):
+        """前提自检：原始 schema 确实带 additionalProperties，否则下面的参数化断言形同虚设。"""
+        assert any(_keys_anywhere(m.model_json_schema(), {"additionalProperties"}) for m in response_schema_models())
+
+    @pytest.mark.parametrize("model", response_schema_params())
+    def test_every_response_schema_model_has_no_additional_properties(self, backend, model):
+        config = backend._build_config(model, None)
+        assert _keys_anywhere(config["response_schema"], {"additionalProperties", "additional_properties"}) == []
+
+    def test_strips_at_every_nesting_level_including_array_items_and_union_members(self, backend):
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "object", "additionalProperties": False, "properties": {"a": {"type": "string"}}},
+                },
+                "either": {"anyOf": [{"type": "object", "additionalProperties": True}, {"type": "null"}]},
+            },
+        }
+        out = backend._build_config(schema, None)["response_schema"]
+        assert _keys_anywhere(out, {"additionalProperties"}) == []
+        assert out["properties"]["items"]["items"]["properties"] == {"a": {"type": "string"}}
+        assert out["properties"]["either"]["anyOf"][0] == {"type": "object"}
+
+    def test_keeps_property_named_additional_properties_and_instance_data(self, backend):
+        """只剥 schema 关键字：同名字段、enum/default/const 实例数据里的同名内容保持原样。"""
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "additionalProperties": {"type": "string", "description": "字段名恰好叫 additionalProperties"},
+                "nested": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"additionalProperties": {"type": "integer"}},
+                },
+                "with_default": {"type": "object", "default": {"additionalProperties": False}},
+                "with_enum": {"enum": ["additionalProperties", "other"]},
+                "with_const": {"const": {"additionalProperties": 1}},
+                "with_examples": {"type": "object", "examples": [{"additionalProperties": False}]},
+            },
+            "required": ["additionalProperties"],
+        }
+        out = backend._build_config(schema, None)["response_schema"]
+        props = out["properties"]
+        assert "additionalProperties" not in {k for k in out if k != "properties"}
+        assert props["additionalProperties"] == {"type": "string", "description": "字段名恰好叫 additionalProperties"}
+        assert props["nested"] == {"type": "object", "properties": {"additionalProperties": {"type": "integer"}}}
+        assert props["with_default"]["default"] == {"additionalProperties": False}
+        assert props["with_enum"]["enum"] == ["additionalProperties", "other"]
+        assert props["with_const"]["const"] == {"additionalProperties": 1}
+        assert props["with_examples"]["examples"] == [{"additionalProperties": False}]
+        assert out["required"] == ["additionalProperties"]
+
+    async def test_request_body_response_schema_has_no_additional_properties(self):
+        """请求体层面：真实 google-genai 序列化后的 generationConfig.responseSchema 不含该字段。
+
+        google-genai 装有 aiohttp 时默认走 aiohttp，respx 拦不到；注入 ``httpx_async_client`` 后 SDK
+        改走该 httpx 客户端（含降级链的后续请求），由 respx 在 transport 层截获，未声明的请求直接抛错。
+        """
+        from google import genai as real_genai
+
+        reply = {
+            "candidates": [{"content": {"parts": [{"text": "{}"}], "role": "model"}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+        }
+        backend = GeminiTextBackend(api_key="k")
+        with capture_http() as router:
+            route = router.post(url__regex=r":generateContent$").mock(return_value=httpx.Response(200, json=reply))
+            async with httpx.AsyncClient() as http_client:
+                backend._client = real_genai.Client(api_key="k", http_options={"httpx_async_client": http_client})
+                for model in response_schema_models():
+                    route.calls.reset()
+                    # 回包只是空对象，过不了各模型的校验，会走降级链；本用例只看首个原生结构化请求
+                    with pytest.raises(StructuredOutputExhaustedError):
+                        await backend.generate(TextGenerationRequest(prompt="x", response_schema=model))
+                    assert route.called, model.__name__
+                    response_schema = request_json(route.calls[0].request)["generationConfig"]["responseSchema"]
+                    assert response_schema["type"] == "OBJECT"
+                    assert _keys_anywhere(response_schema, {"additional_properties", "additionalProperties"}) == [], (
+                        model.__name__
+                    )

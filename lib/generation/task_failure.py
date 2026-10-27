@@ -34,6 +34,7 @@ CAPABILITY_FAILURE_CODES: frozenset[str] = frozenset(
         "image_dashscope_4k_t2i_only",
         "image_endpoint_mismatch_no_i2i",
         "image_endpoint_mismatch_no_t2i",
+        "image_reference_images_exceeded",
         "image_reference_images_unreadable",
         "ref_payload_floor_exceeded",
         "video_capability_missing_t2v",
@@ -41,10 +42,10 @@ CAPABILITY_FAILURE_CODES: frozenset[str] = frozenset(
         "video_duration_not_supported",
         "video_end_image_requires_start_image",
         "video_end_image_unreadable",
+        "video_first_frame_unsupported",
         "video_last_frame_requires_pro",
         "video_last_frame_unsupported",
         "video_prompt_too_long",
-        "video_reference_images_duration_unsupported",
         "video_reference_images_exceeded",
         "video_reference_images_required",
         "video_reference_images_unreadable",
@@ -57,8 +58,9 @@ CAPABILITY_FAILURE_CODES: frozenset[str] = frozenset(
         "video_reference_audio_slots_insufficient",
         "video_reference_audio_unreadable",
         "video_reference_audio_unsupported",
+        "video_reference_route_audio_unsupported",
         "video_aspect_ratio_not_supported",
-        "video_resolution_duration_unsupported",
+        "video_audio_switch_not_supported",
         "video_resolution_not_supported",
         "video_start_image_unreadable",
     }
@@ -119,6 +121,8 @@ FAILURE_CODE_KEYS: dict[str, str] = {
     **{code: code for code in GENERATION_INPUT_FAILURE_CODES},
     **{code: code for code in VIDEO_REQUEST_FACTS_FAILURE_CODES},
     "provider_unsupported_media": "task_fail_provider_unsupported_media",
+    # 内置供应商的模型引用不在模型清单中（已下架或改名）：引用原样保留，由用户重新选择。
+    "model_not_in_provider_catalog": "model_not_in_provider_catalog",
     # 上游确定性 4xx 拒绝。params 里的 provider_reason 是脱敏截断后的上游原文，刻意不进
     # 译文模板：它不该被翻译，读侧按独立字段原样展示。
     "provider_rejected": "task_fail_provider_rejected",
@@ -147,6 +151,10 @@ FAILURE_CODE_KEYS: dict[str, str] = {
     "comfyui_execution_error": "task_fail_comfyui_execution_error",
     "comfyui_interrupted": "task_fail_comfyui_interrupted",
     "comfyui_output_missing": "task_fail_comfyui_output_missing",
+    # 图片供应商成功响应却没带回图片（多为内容安全过滤）：见 ImageOutputMissingError。
+    "image_output_missing": "task_fail_image_output_missing",
+    # 返回的图片格式转不成位图（如矢量 SVG）：见 ImageOutputFormatError。
+    "image_output_format_unsupported": "task_fail_image_output_format_unsupported",
     "comfyui_output_type_mismatch": "task_fail_comfyui_output_type_mismatch",
     "comfyui_output_container_mismatch": "task_fail_comfyui_output_container_mismatch",
     "artifact_download_failed": "task_fail_artifact_download_failed",

@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 from lib.agent.profile_manifest import ContentMode
 from lib.backends.text_backends.base import TextOutputTruncatedError
+from lib.catalog.errors import ModelNotInCatalogError
 from lib.config.resolver import (
     ConfigResolver,
     VideoBucketCapabilityError,
@@ -54,10 +55,11 @@ from lib.episode.episode_target_duration import (
     is_valid_episode_target_duration,
 )
 from lib.episode.source_kinds import SourceKind
+from lib.generation.task_failure import FAILURE_CODE_KEYS
 from lib.generation.video_request_facts import ResolutionOverride, VideoRequestFactsError, planning_durations
 from lib.i18n import render_generation_input_error, render_message
 from lib.infra.api_errors import ApiError, BadRequestError, ConflictError, NotFoundError, UnprocessableError
-from lib.infra.async_thread import EventLoopBridge, run_sync_transaction
+from lib.infra.async_thread import EventLoopBridge, run_noninterruptible_sync, run_sync_transaction
 from lib.infra.json_io import domain_error_on_value_error
 from lib.output_language import LANGUAGE_FOLLOWS_SOURCE_FIELD
 from lib.project.asset_fingerprints import compute_asset_fingerprints
@@ -92,7 +94,8 @@ from lib.workflow.workflow_state import (
 )
 from server.auth import CurrentUser, create_download_token, verify_download_token
 from server.dependencies import require_project_migration_ok
-from server.i18n import DisplayNamesCatalog, Translator
+from server.i18n import DisplayNamesCatalog, Locale, Translator
+from server.routers._coalesce import RequestCoalescer
 from server.routers._episode_source_errors import episode_source_http_error
 from server.routers._script_edits import (
     execute_current_script_edit,
@@ -127,6 +130,12 @@ router = APIRouter()
 # 自带认证端点：浏览器原生下载导航带不了 Authorization header，
 # 端点内 verify_download_token 校验短时效下载 token，注册时不挂 Bearer 依赖。
 self_auth_router = APIRouter()
+
+_project_detail_coalescer = RequestCoalescer()
+
+
+def get_project_detail_coalescer() -> RequestCoalescer:
+    return _project_detail_coalescer
 
 
 def get_workflow_state_service() -> WorkflowStateService:
@@ -412,32 +421,39 @@ async def import_project_archive(
     archive_service: ArchiveServiceDep,
     file: UploadFile = File(...),
     conflict_policy: str = Form("prompt"),
+    confirm_report: bool = Form(False),
 ):
-    """从 ZIP 导入项目。"""
-    upload_path: str | None = None
-    try:
-        fd, upload_path = tempfile.mkstemp(prefix="arcreel-upload-", suffix=".zip")
-        os.close(fd)
+    """从 ZIP 导入项目。
 
-        # 使用底层 SpooledTemporaryFile 的同步句柄，整循环 offload 到线程，
+    导入包升级时有调整或没能带入的内容时，未带 ``confirm_report`` 的请求以 409 返回
+    ``confirmation_required`` 与 ``migration_report``，不留下任何项目数据；用户确认后带上它重新提交。
+    """
+    # 临时文件一建好就登记路径，取消或失败时 finally 仍能清理
+    upload_paths: list[str] = []
+    try:
+        # 使用底层 SpooledTemporaryFile 的同步句柄，建临时文件与整个写循环 offload 到线程，
         # 避免 async 读取 + 同步写入的混合模式阻塞事件循环
         raw_file = file.file
 
-        def _write_upload():
-            with open(upload_path, "wb") as target:
+        def _write_upload() -> str:
+            fd, path = tempfile.mkstemp(prefix="arcreel-upload-", suffix=".zip")
+            upload_paths.append(path)
+            with os.fdopen(fd, "wb") as target:
                 while True:
                     chunk = raw_file.read(1024 * 1024)
                     if not chunk:
                         break
                     target.write(chunk)
+            return path
 
-        await asyncio.to_thread(_write_upload)
+        upload_path = await run_sync_transaction(_write_upload)
 
         def _sync():
             return archive_service.import_project_archive(
                 Path(upload_path),
                 uploaded_filename=file.filename,
                 conflict_policy=conflict_policy,
+                confirm_report=confirm_report,
                 translate=_t,
             )
 
@@ -469,8 +485,8 @@ async def import_project_archive(
         )
     finally:
         await file.close()
-        if upload_path:
-            _cleanup_temp_file(upload_path)
+        for path in upload_paths:
+            await run_noninterruptible_sync(_cleanup_temp_file, path)
 
 
 @router.post("/projects/{name}/export/token")
@@ -530,14 +546,26 @@ async def export_project_archive(
     except pyjwt.InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail=_t("download_token_invalid")) from exc
 
+    # zip 一落盘就登记：打包进行中被取消时返回值随之丢弃，finally 按登记回收；
+    # 交给 FileResponse 之后由响应的后台任务回收。
+    archive_paths: list[Path] = []
+
+    def _export() -> tuple[Path, str]:
+        archive_path, download_name = archive_service.export_project(name, scope=scope)
+        archive_paths.append(archive_path)
+        return archive_path, download_name
+
+    handed_off = False
     try:
-        archive_path, download_name = await asyncio.to_thread(lambda: archive_service.export_project(name, scope=scope))
-        return FileResponse(
+        archive_path, download_name = await run_sync_transaction(_export)
+        response = FileResponse(
             archive_path,
             media_type="application/zip",
             filename=download_name,
             background=BackgroundTask(_cleanup_temp_file, str(archive_path)),
         )
+        handed_off = True
+        return response
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except (HTTPException, ApiError):
@@ -545,6 +573,10 @@ async def export_project_archive(
     except Exception as exc:
         logger.exception("请求处理失败")
         raise HTTPException(status_code=500, detail=_t("internal_server_error")) from exc
+    finally:
+        if not handed_off:
+            for path in archive_paths:
+                await run_noninterruptible_sync(_cleanup_temp_file, str(path))
 
 
 _NO_ACTIVITY = datetime.min.replace(tzinfo=UTC)
@@ -635,7 +667,7 @@ async def list_projects(summaries: WorkflowStateServiceDep, _t: Translator):
         projects.sort(key=lambda p: last_activity.get(p["name"], _NO_ACTIVITY), reverse=True)
         return {"projects": projects}
 
-    return await asyncio.to_thread(_sync)
+    return await run_sync_transaction(_sync)
 
 
 @router.post("/projects")
@@ -748,7 +780,7 @@ async def create_project(
                 )
             return {"success": True, "name": project_name, "project": project}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except ValueError as e:
         # 项目名 / duration / brief 等配置校验失败，str(e) 只进日志
         logger.warning("创建项目参数错误: name=%s (%s)", req.name or req.title, e)
@@ -790,7 +822,7 @@ async def get_video_capabilities(
     resolver = ConfigResolver(async_session_factory)
     resolution_override = None if resolution is None else ResolutionOverride(resolution or None)
     try:
-        project = get_project_manager().load_project(name)
+        project = await asyncio.to_thread(get_project_manager().load_project, name)
         generation_type = (
             ("r2v" if uses_reference_images else "i2v")
             if uses_reference_images is not None
@@ -826,6 +858,9 @@ async def get_video_capabilities(
     except VideoRequestFactsError as exc:
         # 视频请求事实的问题码即 errors 目录 key（ValueError 子类，须先于其捕获）
         raise UnprocessableError(exc.code, **exc.params) from exc
+    except ModelNotInCatalogError:
+        # 引用的模型不在供应商清单中：交 app 级 handler 返回要求重新选择模型的 400（ValueError 子类，须先于其捕获）
+        raise
     except ValueError as exc:
         # 异常原文只进日志：str(exc) 混英文技术细节，直接插进翻译文案会让 en/vi 界面混入未译原文
         logger.warning("项目 '%s' 视频模型能力解析失败: %s", name, exc)
@@ -899,9 +934,11 @@ async def get_workflow_plan(name: str, request: WorkflowPlanRequest, current_use
 async def get_project(
     name: str,
     _t: Translator,
+    locale: Locale,
     summaries: WorkflowStateServiceDep,
+    coalescer: Annotated[RequestCoalescer, Depends(get_project_detail_coalescer)],
 ):
-    """获取项目详情（含实时计算字段）"""
+    """获取项目详情（含实时计算字段）。同一项目、同一语言的并发请求合流计算。"""
     try:
 
         def _sync():
@@ -945,7 +982,7 @@ async def get_project(
                 "asset_fingerprints": fingerprints,
             }
 
-        return await asyncio.to_thread(_sync)
+        return await coalescer.run((name, locale), lambda: run_sync_transaction(_sync))
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except (HTTPException, ApiError):
@@ -994,7 +1031,7 @@ async def reset_agent_profile(name: str, _t: Translator):
         return {"customized": False, "customized_files": []}
 
     try:
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except ApiError:
@@ -1162,7 +1199,7 @@ async def update_project(name: str, req: UpdateProjectRequest, _t: Translator):
                 project = manager.update_project_reconciling_episode_bindings(name, _mutate)
                 return {"success": True, "project": project}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except (HTTPException, ApiError):
@@ -1180,7 +1217,7 @@ async def delete_project(name: str, _t: Translator):
         project_dir = await asyncio.to_thread(manager.get_project_path, name)
         # 先收尾记录再删目录：排队任务不会在删了一半的目录上开跑，执行中的任务照常跑完但放弃落盘。
         await retire_project(async_session_factory, project_dir.name)
-        await asyncio.to_thread(manager.delete_project_directory, name)
+        await run_sync_transaction(manager.delete_project_directory, name)
         return {"success": True, "message": _t("project_deleted", name=name)}
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
@@ -1195,7 +1232,7 @@ async def delete_project(name: str, _t: Translator):
 async def get_script(name: str, script_file: str, _t: Translator):
     """获取剧本内容"""
     try:
-        script = await asyncio.to_thread(get_project_manager().load_script, name, script_file)
+        script = await run_sync_transaction(get_project_manager().load_script, name, script_file)
         return {"script": script, "revision": script_revision(script)}
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=script_file) from exc
@@ -1223,17 +1260,17 @@ async def edit_script_batch(
     try:
         manager = get_project_manager()
         try:
-            manager.get_project_path(name)
+            await asyncio.to_thread(manager.get_project_path, name)
         except ValueError as exc:
             raise BadRequestError("invalid_project_name", name=name) from exc
         except FileNotFoundError as exc:
             raise NotFoundError("project_not_found", name=name) from exc
 
         with project_change_source("webui"):
-            result = await asyncio.to_thread(make_script_batch_editor(manager).execute, name, command)
+            result = await run_sync_transaction(make_script_batch_editor(manager).execute, name, command)
         return JSONResponse(status_code=script_batch_status(result), content=result.model_dump(mode="json"))
     except FileNotFoundError as exc:
-        if manager is None or not manager.project_exists(name):
+        if manager is None or not await asyncio.to_thread(manager.project_exists, name):
             raise NotFoundError("project_not_found", name=name) from exc
         target = command.script or str(command.episode)
         raise NotFoundError("script_not_found", name=target) from exc
@@ -1361,7 +1398,7 @@ async def insert_script_item(
             )
             return {"success": True, "item": inserted, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=req.script_file) from exc
     except ValueError as exc:
@@ -1385,7 +1422,7 @@ async def start_episode_blank_script(name: str, episode: int):
             return start_blank_script(get_project_manager(), name, episode)
 
     try:
-        script_file = await asyncio.to_thread(_sync)
+        script_file = await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except BlankScriptError as exc:
@@ -1427,7 +1464,7 @@ async def remove_script_item(
             require_script_edit_result(result, operation_not_found=True)
             return {"success": True, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=script_file) from exc
     except ValueError as exc:
@@ -1478,7 +1515,7 @@ async def move_script_item(
             require_script_edit_result(result)
             return {"success": True, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=req.script_file) from exc
     except ValueError as exc:
@@ -1557,7 +1594,7 @@ async def update_scene(
             matched = next(scene for scene in saved["scenes"] if scene.get("scene_id") == scene_id)
             return {"success": True, "scene": matched, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=req.script_file) from exc
     except ValueError as exc:
@@ -1660,7 +1697,7 @@ async def update_shot(
             matched = next(shot for shot in saved["shots"] if shot.get("shot_id") == shot_id)
             return {"success": True, "shot": matched, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=req.script_file) from exc
     except ValueError as exc:
@@ -1769,7 +1806,7 @@ async def update_segment(
             matched = next(segment for segment in saved["segments"] if segment.get("segment_id") == segment_id)
             return {"success": True, "segment": matched, "edit_result": result.model_dump(mode="json")}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("script_not_found", name=req.script_file) from exc
     except ValueError as exc:
@@ -1841,7 +1878,7 @@ async def update_episode(name: str, episode: int, req: UpdateEpisodeRequest, _t:
             # 不再锁后二次 load_project：省一次读盘，且避免锁外读取被并发写者污染返回值。
             return {"success": True, "episode": {"episode": episode, "title": title}}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except (HTTPException, ApiError):
         # ApiError 与 HTTPException 并列：_sync 内部抛出的 NotFoundError 不是
         # HTTPException 子类，不并入这里会被下面的 except Exception 吞成 500
@@ -1879,7 +1916,7 @@ async def update_episode_source(name: str, episode: int, req: UpdateEpisodeSourc
         }
 
     try:
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except EpisodeSourceError as exc:
         raise episode_source_http_error(exc, _t, episode=episode) from exc
     except (HTTPException, ApiError):
@@ -1896,6 +1933,7 @@ async def update_episode_source(name: str, episode: int, req: UpdateEpisodeSourc
 async def set_project_source(
     name: Annotated[str, FastAPIPath(pattern=r"^[a-zA-Z0-9_-]+$")],
     _t: Translator,
+    names: DisplayNamesCatalog,
     generate_overview: Annotated[bool, Form()] = True,
     content: Annotated[str | None, Form()] = None,
     file: Annotated[UploadFile | None, File()] = None,
@@ -1957,7 +1995,7 @@ async def set_project_source(
                 register_whole_source_file(project, f"source/{safe_filename}")
                 return safe_filename, len(text_content)
 
-        safe_filename, chars = await asyncio.to_thread(_sync_write)
+        safe_filename, chars = await run_sync_transaction(_sync_write)
 
         result: dict = {"success": True, "filename": safe_filename, "chars": chars}
 
@@ -1966,6 +2004,11 @@ async def set_project_source(
                 with project_change_source("webui"):
                     overview = await manager.generate_overview(name)
                 result["overview"] = overview
+            except ModelNotInCatalogError as ov_err:
+                # 文本模型已不在供应商清单中：回传「重新选择模型」指引，而非笼统的生成失败
+                logger.warning("上传后概览生成失败：模型不在清单中 (%s)", ov_err)
+                result["overview"] = None
+                result["overview_error"] = render_message(FAILURE_CODE_KEYS[ov_err.code], ov_err.params, _t, names)
             except Exception as ov_err:
                 # 概览生成是上传的可选后续步骤，失败仅降级回传提示、不影响上传成功。
                 # 裸 str(ov_err) 可能携带服务器路径等内部细节，回传翻译后的通用文案。
@@ -1995,7 +2038,7 @@ async def set_project_source(
 async def generate_overview(name: str, _t: Translator):
     """使用 AI 生成项目概述"""
     try:
-        get_project_manager().get_project_path(name)
+        await asyncio.to_thread(get_project_manager().get_project_path, name)
     except ValueError as e:
         # 非法项目名（路径穿越等）先于生成流程拦截，避免落入下面 generate_overview()
         # 内部供应商解析链路的 except ValueError，被误判为「未配置供应商」
@@ -2014,13 +2057,13 @@ async def generate_overview(name: str, _t: Translator):
         return BadRequestError("text_provider_not_configured")
 
     try:
-        # EmptySourceError / PydanticValidationError 都是 ValueError 子类，须放行给下方各自的
-        # 专属 except 分支，不能被 domain_error_on_value_error 的通用 ValueError 处理误判为「未配置供应商」
+        # EmptySourceError / PydanticValidationError / ModelNotInCatalogError 都是 ValueError 子类，须放行给
+        # 下方各自的处理，不能被 domain_error_on_value_error 的通用 ValueError 处理误判为「未配置供应商」
         with (
             project_change_source("webui"),
             domain_error_on_value_error(
                 _provider_not_configured,
-                extra_passthrough=(EmptySourceError, PydanticValidationError),
+                extra_passthrough=(EmptySourceError, PydanticValidationError, ModelNotInCatalogError),
             ),
         ):
             overview = await get_project_manager().generate_overview(name)
@@ -2045,7 +2088,8 @@ async def generate_overview(name: str, _t: Translator):
         # 供应商解析链路内部会重新 load_project，project.json 损坏时不能误判为「未配置供应商」
         logger.exception("生成概述失败：项目数据损坏 name=%s", name)
         raise HTTPException(status_code=500, detail=_t("internal_server_error")) from exc
-    except (HTTPException, ApiError):
+    except (HTTPException, ApiError, ModelNotInCatalogError):
+        # ModelNotInCatalogError：项目引用的文本模型已不在供应商清单中，交 app 级 handler 返回要求重新选择模型的 400
         raise
     except Exception as exc:
         logger.exception("请求处理失败")
@@ -2079,7 +2123,7 @@ async def update_overview(name: str, req: UpdateOverviewRequest, _t: Translator)
                 manager.update_project(name, _mutate)
             return {"success": True, "overview": captured["overview"]}
 
-        return await asyncio.to_thread(_sync)
+        return await run_sync_transaction(_sync)
     except FileNotFoundError as exc:
         raise NotFoundError("project_not_found", name=name) from exc
     except (HTTPException, ApiError):

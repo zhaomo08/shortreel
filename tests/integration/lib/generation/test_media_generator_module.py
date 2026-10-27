@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import json
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import ClassVar
@@ -16,7 +18,14 @@ from lib.generation.media_generator import (
     task_video_staging_path,
 )
 from tests.factories import comfyui_endpoint_definition, custom_endpoint_definition
-from tests.fakes import MP4_BYTES, PNG_BYTES, FakeConfigResolver, bounded_poll_clock, select_formal_video
+from tests.fakes import (
+    MP4_BYTES,
+    PNG_BYTES,
+    FakeConfigResolver,
+    bounded_poll_clock,
+    select_formal_video,
+    write_backend_output,
+)
 from tests.http_capture import capture_http
 
 
@@ -33,8 +42,7 @@ class _FakeImageBackend:
     async def generate(self, request):
         self.calls.append(request)
         # Touch the output file so version tracking works
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        request.output_path.write_bytes(b"fake-image-data")
+        await write_backend_output(request.output_path, b"fake-image-data")
         return ImageGenerationResult(
             image_path=request.output_path,
             provider=self.name,
@@ -67,8 +75,7 @@ class _FakeVideoBackend:
 
     async def generate(self, request):
         self.calls.append(request)
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        request.output_path.write_bytes(b"fake-video-data")
+        await write_backend_output(request.output_path, b"fake-video-data")
         duration = (
             self._result_duration_seconds if self._result_duration_seconds is not None else request.duration_seconds
         )
@@ -99,10 +106,12 @@ class _FakeLedgerCall:
         self.call_id = call_id
         self.declared = False
         self.result = None
+        self.usage = None
 
-    def success(self, result):
+    def success(self, result, *, usage=None):
         self.declared = True
         self.result = result
+        self.usage = usage
 
 
 class _FakeLedger:
@@ -150,7 +159,7 @@ def _build_generator(tmp_path: Path) -> MediaGenerator:
     gen._video_backend = _FakeVideoBackend()
     gen._user_id = "default"
     gen._config = FakeConfigResolver(requested_generate_audio=False)
-    gen._image_provider_id = None
+    gen._image_provider_id = "fake-image"
     gen._video_provider_id = None
     gen.versions = _FakeVersions()
     gen.ledger = _FakeLedger()
@@ -414,8 +423,7 @@ class TestMediaGenerator:
 
         class _BlockingImageBackend(_FakeImageBackend):
             async def generate(self, request) -> ImageGenerationResult:
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"new-image")
+                await write_backend_output(request.output_path, b"new-image")
                 backend_written.set()
                 await keep_running.wait()
                 return ImageGenerationResult(
@@ -628,8 +636,7 @@ class TestMediaGenerator:
                 self.calls.append(request)
                 if self.attempts == 1:
                     raise _http_413_error()
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"paid-video")
+                await write_backend_output(request.output_path, b"paid-video")
                 return _FakeVideoResult()
 
         backend = _RetryBackend()
@@ -700,7 +707,7 @@ class TestMediaGenerator:
 
         class _FailAfterWrite(_FakeVideoBackend):
             async def generate(self, request):
-                request.output_path.write_bytes(b"partial-new")
+                await write_backend_output(request.output_path, b"partial-new")
                 raise RuntimeError("provider download failed")
 
         gen._video_backend = _FailAfterWrite()
@@ -757,7 +764,7 @@ class TestMediaGenerator:
         events = []
 
         async def _prepare(staged_file, duration_seconds, version_metadata):
-            assert staged_file.read_bytes() == b"fake-video-data"
+            assert await asyncio.to_thread(staged_file.read_bytes) == b"fake-video-data"
             assert duration_seconds == 8
             assert version_metadata["execution_request_digest"] == "d" * 64
             events.append("prepared")
@@ -941,7 +948,7 @@ class TestMediaGenerator:
         class _CapturePathBackend(_FakeVideoBackend):
             async def generate(self, request):
                 assert request.output_path == staged
-                assert not request.output_path.exists()
+                assert not await asyncio.to_thread(request.output_path.exists)
                 return await super().generate(request)
 
         gen._video_backend = _CapturePathBackend()
@@ -1160,6 +1167,120 @@ class TestMediaGenerator:
         call = gen._video_backend.calls[0]
         assert call.end_image == end_image
 
+    @pytest.fixture
+    def user_added_video_model(self):
+        """在内置供应商下装入一个用户添加的视频模型（模型键与 _FakeVideoBackend.model 一致），按参数给能力覆盖。"""
+        from lib.catalog import query as catalog
+
+        def install(provider_id: str, overrides: dict[str, object]) -> None:
+            catalog.install_user_added_models(
+                [catalog.UserAddedModel(provider_id, _FakeVideoBackend.model, "video", capability_overrides=overrides)]
+            )
+
+        yield install
+        catalog.install_user_added_models(())
+
+    async def test_user_override_relaxes_execution_gate(self, tmp_path, user_added_video_model):
+        """内置供应商下用户放宽尾帧：执行闸门按叠加后的能力放行，请求真实发出。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
+
+        user_added_video_model("ark", {"last_frame": True})
+        gen = _build_generator(tmp_path)
+        gen._video_provider_id = "ark"
+        gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(last_frame=False))
+        end_image = tmp_path / "end.png"
+        end_image.write_bytes(b"fake-end-image")
+
+        await gen.generate_video_async(prompt="p", resource_type="videos", resource_id="E1S08", end_image=end_image)
+
+        assert gen._video_backend.calls[0].end_image == end_image
+
+    async def test_user_override_narrows_execution_gate(self, tmp_path, user_added_video_model):
+        """内置供应商下用户关掉尾帧：执行期也挡住，不调用后端、不开记账。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoCapabilityError
+
+        user_added_video_model("ark", {"last_frame": False})
+        gen = _build_generator(tmp_path)
+        gen._video_provider_id = "ark"
+        gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(last_frame=True))
+        end_image = tmp_path / "end.png"
+        end_image.write_bytes(b"fake-end-image")
+
+        with pytest.raises(VideoCapabilityError) as exc:
+            await gen.generate_video_async(prompt="p", resource_type="videos", resource_id="E1S09", end_image=end_image)
+
+        assert exc.value.code == "video_last_frame_unsupported"
+        assert gen._video_backend.calls == []
+        assert gen.ledger.started == []
+
+    async def test_request_carries_overlaid_capabilities(self, tmp_path, user_added_video_model):
+        """后端拿到的请求带着执行闸门那份已叠加覆盖的能力，按它判定可发输入。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
+
+        user_added_video_model("dashscope", {"last_frame": True, "max_reference_images": 6})
+        gen = _build_generator(tmp_path)
+        gen._video_provider_id = "dashscope"
+        gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(last_frame=False))
+
+        await gen.generate_video_async(prompt="p", resource_type="videos", resource_id="E1S11")
+
+        caps = gen._video_backend.calls[0].video_capabilities
+        assert caps.last_frame is True
+        assert caps.max_reference_images == 6
+
+    async def test_user_override_narrows_first_frame(self, tmp_path, user_added_video_model):
+        """内置供应商下用户关掉首帧：执行期挡住带首帧的请求，不调用后端、不开记账。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoCapabilityError
+
+        user_added_video_model("kling", {"first_frame": False})
+        gen = _build_generator(tmp_path)
+        gen._video_provider_id = "kling"
+        gen._video_backend = _FakeVideoBackend(video_capabilities=VideoCapabilities(first_frame=True))
+        start_image = tmp_path / "start.png"
+        Image.new("RGB", (8, 8)).save(start_image)
+
+        with pytest.raises(VideoCapabilityError) as exc:
+            await gen.generate_video_async(
+                prompt="p", resource_type="videos", resource_id="E1S12", start_image=start_image
+            )
+
+        assert exc.value.code == "video_first_frame_unsupported"
+        assert gen._video_backend.calls == []
+        assert gen.ledger.started == []
+
+    async def test_user_override_keeps_tier_aware_base(self, tmp_path, user_added_video_model):
+        """覆盖叠在按档位解析的能力上：未覆盖的尾帧仍随档位放行，覆盖的参考图上限同时生效。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
+
+        class _TierAwareVideoBackend(_FakeVideoBackend):
+            def video_capabilities_for_tier(self, service_tier: str, resolution: str | None = None):
+                return VideoCapabilities(last_frame=service_tier == "pro")
+
+        user_added_video_model("kling", {"max_reference_images": 2})
+        gen = _build_generator(tmp_path)
+        gen._video_provider_id = "kling"
+        gen._video_backend = _TierAwareVideoBackend(video_capabilities=VideoCapabilities())
+        end_image = tmp_path / "end.png"
+        end_image.write_bytes(b"fake-end-image")
+        refs = []
+        for i in range(2):
+            ref = tmp_path / f"ref{i}.png"
+            Image.new("RGB", (8, 8)).save(ref)
+            refs.append(ref)
+
+        await gen.generate_video_async(
+            prompt="p",
+            resource_type="videos",
+            resource_id="E1S10",
+            end_image=end_image,
+            reference_images=refs,
+            service_tier="pro",
+        )
+
+        call = gen._video_backend.calls[0]
+        assert call.end_image == end_image
+        assert len(call.reference_images) == 2
+
     @pytest.mark.asyncio
     async def test_end_image_rejected_when_tier_aware_backend_reports_std_tier(self, tmp_path):
         """同一后端，std 档时仍按能力收窄硬失败——覆盖 pro/std 两条分支。"""
@@ -1258,8 +1379,7 @@ class _ConfigurableImageBackend:
         if self._fail_left > 0:
             self._fail_left -= 1
             raise _http_413_error()
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        request.output_path.write_bytes(b"img")
+        await write_backend_output(request.output_path, b"img")
         return ImageGenerationResult(
             image_path=request.output_path,
             provider=self.name,
@@ -1346,6 +1466,84 @@ class TestProjectRelativePath:
 
 
 class TestReferenceCompressionSeam:
+    async def test_cancel_during_compression_still_removes_the_compressed_copies(self, tmp_path, monkeypatch):
+        """取消落在线程里压缩的那一程：压缩完成后照样清理临时副本，且不调用供应商。"""
+        from lib.references import reference_compression
+
+        gen = _build_generator(tmp_path)
+        backend = _ConfigurableImageBackend()
+        gen._image_backend = backend
+        src = _noise_png(tmp_path, "ref.png", 64, 64)
+        compressing = threading.Event()
+        release = threading.Event()
+        cleaned: list[bool] = []
+
+        @contextlib.contextmanager
+        def _slow_payload(specs, *, limits, start_step=0):
+            compressing.set()
+            release.wait(5)
+            try:
+                yield start_step, []
+            finally:
+                cleaned.append(True)
+
+        monkeypatch.setattr(reference_compression, "compressed_reference_payload", _slow_payload)
+        task = asyncio.create_task(
+            gen.generate_image_async(
+                prompt="p",
+                resource_type="storyboards",
+                resource_id="E1S01",
+                reference_images=[str(src)],
+            )
+        )
+        await asyncio.to_thread(compressing.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleaned == [True]
+        assert backend.calls == []
+
+    async def test_cancel_during_compressed_copy_cleanup_keeps_the_paid_result(self, tmp_path, monkeypatch):
+        """供应商已返回后，取消落在线程里清理压缩副本的那一程：清理结算后照常提交并返回付费结果。"""
+        from lib.references import reference_compression
+
+        gen = _build_generator(tmp_path)
+        backend = _ConfigurableImageBackend()
+        gen._image_backend = backend
+        src = _noise_png(tmp_path, "ref.png", 64, 64)
+        cleaning = threading.Event()
+        release = threading.Event()
+
+        @contextlib.contextmanager
+        def _slow_cleanup_payload(specs, *, limits, start_step=0):
+            try:
+                yield start_step, []
+            finally:
+                cleaning.set()
+                release.wait(5)
+
+        monkeypatch.setattr(reference_compression, "compressed_reference_payload", _slow_cleanup_payload)
+        task = asyncio.create_task(
+            gen.generate_image_async(
+                prompt="p",
+                resource_type="storyboards",
+                resource_id="E1S01",
+                reference_images=[str(src)],
+            )
+        )
+        await asyncio.to_thread(cleaning.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        output_path, version = await task
+        assert version == 1
+        assert await asyncio.to_thread(output_path.read_bytes) == b"img"
+        assert len(backend.calls) == 1
+
     async def test_backend_receives_compressed_copy_source_untouched(self, tmp_path):
         gen = _build_generator(tmp_path)
         backend = _ConfigurableImageBackend()
@@ -1441,14 +1639,16 @@ class TestReferenceCompressionSeam:
                 self.ref_dims: list[tuple[int, int]] = []
 
             async def generate(self, request):
-                if request.start_image:
-                    with Image.open(request.start_image) as im:
-                        self.start_dims = im.size
-                for r in request.reference_images or []:
-                    with Image.open(r) as im:
-                        self.ref_dims.append(im.size)
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"v")
+                def _read_dims() -> None:
+                    if request.start_image:
+                        with Image.open(request.start_image) as im:
+                            self.start_dims = im.size
+                    for r in request.reference_images or []:
+                        with Image.open(r) as im:
+                            self.ref_dims.append(im.size)
+
+                await asyncio.to_thread(_read_dims)
+                await write_backend_output(request.output_path, b"v")
                 return _FakeVideoResult()
 
         backend = _CapturingVideoBackend()
@@ -1492,8 +1692,7 @@ class TestReferenceCompressionSeam:
 
             async def generate(self, request):
                 self.received_audio = request.reference_audio_files
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"v")
+                await write_backend_output(request.output_path, b"v")
                 return _FakeVideoResult()
 
         backend = _AudioCapturingVideoBackend()
@@ -1582,8 +1781,7 @@ class TestReferenceCompressionSeam:
             )
 
             async def generate(self, request):
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"v")
+                await write_backend_output(request.output_path, b"v")
                 return _FakeVideoResult()
 
         gen._video_backend = _AudioDurationLimitedVideoBackend()
@@ -1623,8 +1821,7 @@ class TestReferenceCompressionSeam:
             )
 
             async def generate(self, request):
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"v")
+                await write_backend_output(request.output_path, b"v")
                 return _FakeVideoResult()
 
         gen._video_backend = _NoDurationLimitVideoBackend()
@@ -1691,8 +1888,7 @@ class TestReferenceCompressionSeam:
             video_capabilities = VideoCapabilities(max_prompt_chars=10)
 
             async def generate(self, request):
-                request.output_path.parent.mkdir(parents=True, exist_ok=True)
-                request.output_path.write_bytes(b"v")
+                await write_backend_output(request.output_path, b"v")
                 return _FakeVideoResult()
 
         gen._video_backend = _PromptLimitedVideoBackend()
@@ -1748,8 +1944,10 @@ class TestFirstFrameRatioAdaptiveOnly:
 
     async def test_default_capability_leaves_existing_model_payload_unchanged(self, tmp_path):
         """默认 False（现有模型未声明该约束）：首帧任务的请求 payload 保持原样。"""
+        from arcreel_market_core.video_backend_contract import VideoCapabilities
+
         gen = _build_generator(tmp_path)
-        backend = _FakeVideoBackend()  # video_capabilities=None，等同未声明
+        backend = _FakeVideoBackend(video_capabilities=VideoCapabilities())  # 默认档，未声明该约束
         gen._video_backend = backend
 
         start = _solid_png(tmp_path, "start.png", 100, 100)

@@ -1,5 +1,6 @@
 """server.services.tasks.generation_tasks 测试共享的替身与 helper。"""
 
+import asyncio
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from lib.artifacts.artifact_manifest import (
     ArtifactManifest,
     ProjectArtifactManifestAdapter,
 )
+from lib.artifacts.version_manager import VersionManager
 from lib.config.resolver import ProviderModel
 from lib.project.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
 from server.services.tasks import generation_tasks
@@ -20,7 +22,7 @@ from server.services.tasks.generation_context import (
     VideoLaneResult,
 )
 from tests.factories import make_video_request_facts
-from tests.fakes import persist_fake_script
+from tests.fakes import persist_fake_script, stage_and_commit
 
 
 def async_return(value):
@@ -268,6 +270,20 @@ class _FakePM:
         return self.project
 
 
+class SheetGenerator:
+    """按生产口径经正式图活化回调提交一张生成的资产图。"""
+
+    def __init__(self, project_dir: Path, content: bytes) -> None:
+        self.versions = VersionManager(project_dir)
+        self._project_dir = project_dir
+        self._content = content
+
+    async def generate_image_async(self, *, resource_type, resource_id, commit_formal_output, **_kwargs):
+        current = self._project_dir / resource_type / f"{resource_id}.png"
+        staged = self._project_dir / resource_type / f".{resource_id}.staged.png"
+        return current, await stage_and_commit(commit_formal_output, staged, current, self._content, {})
+
+
 class FakeGenerator:
     def __init__(self, project_path: Path | None = None):
         # 传入项目目录时把产出落到产物的规范路径，让任务按生产口径登记清单
@@ -280,6 +296,11 @@ class FakeGenerator:
 
     async def generate_image_async(self, **kwargs):
         self.image_calls.append(kwargs)
+        # 落盘产出、读参考图与提交版本都在工作线程里做：MediaGenerator 的后端在线程里写产物，
+        # 正式提交回调也经 run_noninterruptible_sync 在线程里执行
+        return await asyncio.to_thread(self._produce_and_commit, kwargs)
+
+    def _produce_and_commit(self, kwargs) -> tuple[Path, int]:
         self._materialize_image(kwargs["resource_type"], kwargs["resource_id"])
         self.image_reference_bytes.append(
             [
@@ -398,17 +419,17 @@ def seed_current_storyboard(fake_pm: _FakePM, resource_id: str = "E1S01") -> Non
     )
 
 
-EIGHT_REFERENCE_CHARACTERS = ["配角1", "配角2", "配角3", "配角4", "配角5"]
+_EIGHT_REFERENCE_CHARACTERS = ["配角1", "配角2", "配角3", "配角4", "配角5"]
 
 
 def pm_with_eight_references(project_path: Path) -> _FakePM:
     """E1S02 装配出 8 张参考图：6 张角色 sheet + 1 张场景 + 1 张道具（无上一分镜图），正文指认首角色、道具与场景。"""
     pm = _FakePM(project_path)
-    for name in EIGHT_REFERENCE_CHARACTERS:
+    for name in _EIGHT_REFERENCE_CHARACTERS:
         pm.project["characters"][name] = {"description": name, "character_sheet": f"characters/{name}.png"}
         (project_path / "characters" / f"{name}.png").write_bytes(b"png")
     segment = pm.script["segments"][1]
-    segment["characters_in_segment"] = ["Alice", *EIGHT_REFERENCE_CHARACTERS]
+    segment["characters_in_segment"] = ["Alice", *_EIGHT_REFERENCE_CHARACTERS]
     segment["image_prompt"] = {
         "scene": "@[Alice]握着@[玉佩]立在@[祠堂]门口",
         "composition": {"shot_type": "Medium Shot", "lighting": "暖光", "ambiance": "薄雾"},
@@ -437,15 +458,6 @@ def register_asset_sheet_claims(fake_pm: _FakePM) -> None:
                     ArtifactKey.asset_sheet(asset_type, name),
                     sheet,
                 )
-
-
-def build_currency_resolver(project_path: Path, project: dict):
-    """Persist the project and build the resolver production hands the reference collectors."""
-
-    from lib.artifacts.artifact_activation import active_artifact_currency_resolver
-
-    (project_path / "project.json").write_text(json.dumps(project, ensure_ascii=False), encoding="utf-8")
-    return active_artifact_currency_resolver(project_path, project)
 
 
 def register_stale_visual_claim(project_path: Path, key: ArtifactKey, artifact_path: str) -> None:
@@ -492,3 +504,10 @@ def ad_pm(project_path: Path, *, with_sheet: bool) -> _FakePM:
     }
     register_asset_sheet_claims(pm)
     return pm
+
+
+def skip_artifact_registration(monkeypatch) -> None:
+    """正式图提交跳过产物清单登记（视作登记成功），用例只看提交与项目写回。"""
+    monkeypatch.setattr(
+        "server.services.tasks.formal_image_commit.register_current_resource_artifact", lambda *_a, **_kw: True
+    )

@@ -66,6 +66,7 @@ from lib.speech.speech_presentation import (
     presentation_artifact_paths,
 )
 from lib.workflow.workflow_state import WorkflowStateService
+from tests.fakes import use_artifact_registration
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -447,7 +448,7 @@ def test_schema8_archive_activation_reconstructs_only_self_proving_presentation_
     # snapshot, but deliberately filter the hidden Manifest sidecar.
     (project_dir / MANIFEST_FILENAME).unlink()
 
-    assert ensure_imported_artifact_target_state(project_dir) is True
+    assert ensure_imported_artifact_target_state(project_dir) == ()
     adapter = ProjectArtifactManifestAdapter(project_dir)
     assert adapter.get_entry(subtitle_key) == subtitle_entry
     assert adapter.get_entry(presentation_key) == presentation_entry
@@ -466,7 +467,7 @@ def test_schema8_archive_activation_rejects_tampered_presentation_evidence(tmp_p
     _write_json(presentation_file, tampered)
     (project_dir / MANIFEST_FILENAME).unlink()
 
-    assert ensure_imported_artifact_target_state(project_dir) is True
+    assert ensure_imported_artifact_target_state(project_dir) == ()
     adapter = ProjectArtifactManifestAdapter(project_dir)
     assert adapter.get_entry(subtitle_key) is None
     assert adapter.get_entry(presentation_key) is None
@@ -551,7 +552,7 @@ def test_formal_script_plan_registration_failure_restores_the_previous_file(tmp_
     def _fail(*_args, **_kwargs):
         raise RuntimeError("injected manifest failure")
 
-    monkeypatch.setattr("lib.artifacts.artifact_activation.register_current_artifact_if_provable", _fail)
+    use_artifact_registration(monkeypatch, _fail)
 
     from lib.script.script_review import write_script_plan_locked
 

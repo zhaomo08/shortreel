@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from lib.backends.providers import CallStatus
 from lib.backends.text_backends.base import TextOutputTruncatedError
+from lib.catalog.errors import ModelNotInCatalogError
 from lib.db.models.api_call import ApiCall
 from lib.db.repositories.session_repo import SessionRepository
 from lib.db.repositories.task_repo import TaskRepository
@@ -32,6 +33,7 @@ from lib.script.script_batch_edit import (
 from lib.script.script_editor import ScriptEditError, patch_field, resolve_items
 from lib.speech.speech_composition import admit_script_unit
 from lib.workflow.workflow_state import ArtifactCount, EpisodesSummary, EpisodeSummary, ProjectSummary
+from tests.fakes import use_project_manager
 
 
 class _OverviewProbe(BaseModel):
@@ -97,14 +99,16 @@ class _FakePM:
         (self.base / "corrupted").mkdir(parents=True, exist_ok=True)
         (self.base / "bad-schema").mkdir(parents=True, exist_ok=True)
         (self.base / "truncated").mkdir(parents=True, exist_ok=True)
+        (self.base / "retired-model").mkdir(parents=True, exist_ok=True)
         # 上传后概览生成失败的软降级路径：项目存在，但 generate_overview 抛带路径异常
         (self.base / "leaky").mkdir(parents=True, exist_ok=True)
+        (self.base / "retired-upload").mkdir(parents=True, exist_ok=True)
 
     def list_projects(self):
         return ["ready", "empty", "broken"]
 
     def project_exists(self, name):
-        return name in {"ready", "broken", "leaky"}
+        return name in {"ready", "broken", "leaky", "retired-upload"}
 
     def load_project(self, name):
         if name == "broken":
@@ -276,6 +280,8 @@ class _FakePM:
             raise RuntimeError("open failed: /Users/secret/projects/leaky/source/novel.txt")
         if name == "no-provider":
             raise ValueError("未找到可用的 text 供应商")
+        if name == "retired-upload":
+            raise ModelNotInCatalogError(provider_id="ark", model_id="old-text", media_type="text")
         if name == "corrupted":
             # 模拟供应商解析链路内部重新 load_project 时命中损坏的 project.json：
             # JSONDecodeError 是 ValueError 子类，不该被误判为「未配置供应商」
@@ -285,6 +291,9 @@ class _FakePM:
             raise TextOutputTruncatedError(
                 provider="openai", model="my-llm", output_tokens=64, provider_id="custom-3", custom_model=True
             )
+        if name == "retired-model":
+            # 模拟项目引用的文本模型已不在供应商清单中：同样是 ValueError 子类，不该被误判为「未配置供应商」
+            raise ModelNotInCatalogError(provider_id="ark", model_id="doubao-seed-1-8-251228", media_type="text")
         if name == "bad-schema":
             # 模拟模型输出未通过 schema 校验：pydantic ValidationError 同样是 ValueError 子类，
             # 不该被误判为「未配置供应商」
@@ -454,7 +463,7 @@ class _FakeSummaries:
 
 def build_projects_client(monkeypatch, fake_pm, fake_summaries=None, *, session_factory=None):
     """``session_factory`` 给出时，路由经它开数据库会话（默认是生产的 ``async_session_factory``）。"""
-    monkeypatch.setattr(projects, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
     if session_factory is not None:
         monkeypatch.setattr(projects, "async_session_factory", session_factory)
 

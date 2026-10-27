@@ -10,6 +10,7 @@ Flow 没有 API，额度只能在网页里用，所以这里只负责「带出�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import zipfile
@@ -97,7 +98,9 @@ async def collect_storyboard_shots(project: dict, project_path: Path, script: di
                 note = "提示词格式不合规，导出的是原始内容"
         images: list[tuple[str, Path]] = []
         try:
-            start, end = resolve_storyboard_video_inputs(project_path=project_path, resource_id=shot_id, item=item)
+            start, end = await asyncio.to_thread(
+                resolve_storyboard_video_inputs, project_path=project_path, resource_id=shot_id, item=item
+            )
         except (StoryboardImageUnavailable, ValueError):
             note = note or "还没有可用的分镜图，没有附首帧"
         else:
@@ -124,7 +127,8 @@ async def collect_reference_units(
         projection = await project_reference_unit_request(
             project=project, script=script, unit=unit, project_path=project_path
         )
-        preview = render_reference_prompt_preview(
+        preview = await asyncio.to_thread(
+            render_reference_prompt_preview,
             project=project,
             unit=unit,
             project_path=project_path,

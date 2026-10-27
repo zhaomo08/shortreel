@@ -22,11 +22,11 @@ from typing import Any
 
 from lib.artifacts.artifact_input_claims import resolve_usable_episode_script_input
 from lib.artifacts.generation_input import (
-    InputRefused,
     StoryboardImageInput,
     project_input_observation,
     storyboard_image_input,
 )
+from lib.infra.async_thread import run_sync_transaction
 from lib.project.project_manager import ProjectManager, get_project_manager
 from lib.prompts.prompt_utils import render_storyboard_video_prompt
 from lib.script.script_models import resolve_content_mode
@@ -142,11 +142,11 @@ async def preview_item_prompts(
             raise ScriptItemNotFound(item_id)
         return project, project_path, script, resolved[0], resolve_content_mode(script, project)
 
-    project, project_path, script, item, content_mode = await asyncio.to_thread(_load)
+    project, project_path, script, item, content_mode = await run_sync_transaction(_load)
     # 声音绑定按项目当前的视频能力档解析（非 drama 或无声一律 None），与执行期同一判据。
     voice_characters = await resolve_voice_context(project, content_mode)
 
-    def _assemble() -> StoryboardImageInput | InputRefused:
+    def _assemble() -> StoryboardImageInput:
         # 与执行期读同一份生成输入（含上一分镜图的可用性判定），「图N」编号才能逐字一致；
         # 剧本未登记或内容已变更时以 ValueError 拒绝，按提示词不可渲染处理，产物清单本身的
         # 故障（ArtifactManifestError）沿用 fail loud。
@@ -177,8 +177,8 @@ async def preview_item_prompts(
         except (ValueError, TypeError, KeyError):
             image = RenderedPrompt(unavailable=UNAVAILABLE_INVALID, is_text_form=is_text_form)
         else:
-            if isinstance(assembled, InputRefused):
-                refusal = input_refusal_error(assembled)
+            if (refused := assembled.refusal) is not None:
+                refusal = input_refusal_error(refused)
                 image = RenderedPrompt(
                     unavailable=refusal.key,
                     unavailable_params=dict(refusal.params),

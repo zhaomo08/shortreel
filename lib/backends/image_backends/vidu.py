@@ -1,14 +1,15 @@
 """ViduImageBackend — Vidu 参考生图 / 文生图后端。
 
-Vidu 图片 API 仅有一个端点 ``/reference2image``：
-- ``viduq2``：images 为空时为 T2I，提供 1-7 张参考图时为 I2I / 图片编辑
-- ``viduq1``：必须提供 1-7 张参考图，仅 I2I
+Vidu 图片 API 仅有一个端点 ``/reference2image``：images 为空时为 T2I，提供 1-7 张参考图时为 I2I /
+图片编辑。调用通道两者都实现；各型号接不接受文生图（如 ``viduq1`` 只接受图生图）是模型事实，记在模型条目上。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
 
@@ -20,11 +21,13 @@ from lib.backends.backend_runtime import (
 )
 from lib.backends.http_status_errors import provider_rejected_error, redacted_status_error
 from lib.backends.image_backends.base import (
+    BOTH_IMAGE_CAPABILITIES,
     ImageCapability,
-    ImageCapabilityError,
     ImageGenerationRequest,
     ImageGenerationResult,
+    ImageRequestFacts,
     download_image_to_path,
+    per_image_usage,
 )
 from lib.backends.providers import PROVIDER_VIDU
 from lib.backends.vidu_shared import (
@@ -38,6 +41,7 @@ from lib.backends.vidu_shared import (
     safe_body_for_log,
     vidu_failure_reason,
 )
+from lib.billing.metering import Usage
 from lib.infra.logging_utils import format_kwargs_for_log
 from lib.infra.retry import with_retry_async
 
@@ -54,21 +58,12 @@ _ASPECT_RATIO_WHITELIST: dict[str, list[str]] = {
     "viduq1": ["16:9", "9:16", "1:1", "3:4", "4:3"],
     "viduq2": ["16:9", "9:16", "1:1", "3:4", "4:3", "21:9", "2:3", "3:2", "auto"],
 }
-# 文档明确的 resolution 白名单
-_RESOLUTION_WHITELIST: dict[str, list[str]] = {
-    "viduq1": ["1080p"],
-    "viduq2": ["1080p", "2K", "4K"],
-}
-
-
-_MODEL_CAPABILITIES: dict[str, set[ImageCapability]] = {
-    "viduq2": {ImageCapability.TEXT_TO_IMAGE, ImageCapability.IMAGE_TO_IMAGE},
-    "viduq1": {ImageCapability.IMAGE_TO_IMAGE},
-}
 
 
 class ViduImageBackend:
     """Vidu 图片生成后端。"""
+
+    CHANNEL_CAPABILITIES: ClassVar[frozenset[ImageCapability]] = BOTH_IMAGE_CAPABILITIES
 
     def __init__(
         self,
@@ -80,9 +75,6 @@ class ViduImageBackend:
         self._api_key = api_key
         self._base_url = base_url
         self._model = model or DEFAULT_MODEL
-        self._capabilities = _MODEL_CAPABILITIES.get(
-            self._model, {ImageCapability.TEXT_TO_IMAGE, ImageCapability.IMAGE_TO_IMAGE}
-        )
 
     @property
     def name(self) -> str:
@@ -94,19 +86,22 @@ class ViduImageBackend:
 
     @property
     def capabilities(self) -> set[ImageCapability]:
-        return self._capabilities
+        return set(self.CHANNEL_CAPABILITIES)
 
-    @property
-    def max_reference_images(self) -> int:
+    async def reference_image_limit(self) -> int:
         return _MAX_REFERENCE_IMAGES
 
-    async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
-        has_refs = bool(request.reference_images)
-        if has_refs and ImageCapability.IMAGE_TO_IMAGE not in self._capabilities:
-            raise ImageCapabilityError("image_endpoint_mismatch_no_i2i", model=self._model)
-        if not has_refs and ImageCapability.TEXT_TO_IMAGE not in self._capabilities:
-            raise ImageCapabilityError("image_endpoint_mismatch_no_t2i", model=self._model)
+    @staticmethod
+    def estimate_usage(facts: ImageRequestFacts) -> Usage:
+        refs = facts.reference_count
+        resolution = facts.image_size or None
+        return per_image_usage(
+            output_images=1,
+            input_images=None if refs is None else min(refs, _MAX_REFERENCE_IMAGES),
+            dimensions={"resolution": resolution} if resolution is not None else None,
+        )
 
+    async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
         # viduq1 必须 1-7 张；viduq2 允许 0-7 张。这里截断到上限。
         refs = list(request.reference_images or [])
         if len(refs) > _MAX_REFERENCE_IMAGES:
@@ -119,7 +114,7 @@ class ViduImageBackend:
             "prompt": prompt,
         }
         if refs:
-            body["images"] = [image_to_data_uri(Path(ref.path)) for ref in refs]
+            body["images"] = await asyncio.to_thread(lambda: [image_to_data_uri(Path(ref.path)) for ref in refs])
 
         # aspect_ratio 白名单兜底
         if request.aspect_ratio:
@@ -134,18 +129,10 @@ class ViduImageBackend:
                     ar_allowed,
                 )
 
-        # resolution 白名单兜底
-        if request.image_size:
-            res_allowed = _RESOLUTION_WHITELIST.get(self._model)
-            if res_allowed and request.image_size in res_allowed:
-                body["resolution"] = request.image_size
-            elif res_allowed:
-                logger.warning(
-                    "Vidu image resolution %s 不在 model=%s 白名单 %s，使用默认",
-                    request.image_size,
-                    self._model,
-                    res_allowed,
-                )
+        # resolution 以模型目录条目为准，原样透传；越界档位由上游拒绝（docs/adr/0104）
+        resolution = request.image_size or None
+        if resolution is not None:
+            body["resolution"] = resolution
         if request.seed is not None:
             body["seed"] = request.seed
 
@@ -181,6 +168,11 @@ class ViduImageBackend:
             model=self._model,
             seed=request.seed,
             usage_tokens=int(actual_credits) if actual_credits is not None else None,
+            usage=per_image_usage(
+                output_images=1,
+                input_images=len(refs),
+                dimensions={"resolution": resolution} if resolution is not None else None,
+            ),
         )
 
     @with_retry_async(retryable_errors=VIDU_RETRYABLE_ERRORS)

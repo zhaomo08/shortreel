@@ -105,6 +105,8 @@ MESSAGES = {
     "task_fail_comfyui_execution_error": "ComfyUI thất bại khi thực thi: {detail} (node lỗi: {node})",
     "task_fail_comfyui_interrupted": "Lần chạy trên ComfyUI đã bị gián đoạn; hãy thử lại",
     "task_fail_comfyui_output_missing": "ComfyUI đã chạy xong nhưng node thành phẩm {nodes} không tạo ra tệp nào; hãy kiểm tra liên kết node của nó và chuỗi tạo thành phẩm của workflow",
+    "task_fail_image_output_missing": "Mô hình {model} không trả về ảnh, có thể do bộ lọc an toàn nội dung; hãy điều chỉnh prompt hoặc ảnh tham chiếu rồi thử lại",
+    "task_fail_image_output_format_unsupported": "Mô hình {model} trả về ảnh định dạng {media_type} không thể chuyển sang PNG; hãy dùng mô hình xuất ảnh raster",
     "task_fail_comfyui_output_type_mismatch": "ComfyUI tạo ra {filename}, không phải loại tệp mà endpoint này cần xuất (cần {expected}); hãy trỏ liên kết node thành phẩm tới node xuất thành phẩm cuối cùng, hoặc đổi node lưu đó sang định dạng được hỗ trợ (với SaveVideo, hãy chọn h264-mp4)",
     "task_fail_comfyui_output_container_mismatch": "Nội dung của {filename} do ComfyUI tạo ra không phải container mà endpoint này cần xuất (cần {expected}); hãy đổi node lưu sang định dạng được hỗ trợ (với SaveVideo, hãy chọn h264-mp4)",
     "task_fail_artifact_download_failed": "Đã tạo video nhưng tải tệp xuống thất bại; hãy thử tải lại: {detail}",
@@ -322,11 +324,28 @@ MESSAGES = {
     "interface_offline": "Giao diện này đã ngừng hoạt động, vui lòng dùng giao diện được khuyến nghị",
     "answers_required": "answers không được để trống",
     # Custom Providers
-    "price_input_required": "price_input phải được đặt khi đặt price_output",
     "model_id_required": "Phải cung cấp model_id cho các mô hình đã bật",
     "duplicate_model_id": "model_id trùng lặp: {model_id}",
     "default_model_conflict": "Mỗi media_type chỉ có tối đa một mô hình mặc định. Xung đột: {conflict}",
     "provider_not_found": "Nhà cung cấp không tồn tại",
+    "provider_model_not_found": 'Nhà cung cấp này không có mô hình "{model}"',
+    "builtin_model_not_removable": '"{model}" là mô hình được liệt kê chính thức, chỉ có thể tắt, không thể xóa',
+    "builtin_model_duplicate": 'Mô hình "{model}" đã có trong danh sách mô hình của nhà cung cấp này',
+    "builtin_model_id_required": "Hãy nhập ID mô hình",
+    "model_id_dot_segment": "Không đoạn nào của ID mô hình được là . hoặc ..: {model}",
+    "builtin_model_media_type_required": 'Không xác định được loại của mô hình "{model}". Hãy chọn loại mô hình rồi thử lại',
+    "builtin_model_media_type_unsupported": "Nhà cung cấp này không hỗ trợ loại mô hình này ({media_type})",
+    "builtin_model_binding_invalid": 'Mô hình tương ứng "{binding}" sai định dạng, cần có dạng "nhà-sản-xuất/tên-mô-hình"',
+    "comfyui_model_endpoint_missing": "Chưa có endpoint ComfyUI nào. Hãy nhập một endpoint ComfyUI rồi thêm mô hình",
+    "discovery_not_applicable_builtin": "Nhà cung cấp này không có API danh sách mô hình. Hãy thêm mô hình theo ID mô hình",
+    "builtin_model_official_settings": '"{model}" là mô hình được liệt kê chính thức, chỉ có thể bật hoặc tắt; các thiết lập khác do phía chính thức duy trì',
+    "provider_model_setting_not_applicable": 'Mô hình "{model}" của nhà cung cấp tích hợp không có thiết lập "{setting}"',
+    "provider_model_entry_mismatch": 'Thông tin mô hình của "{model}" đã thay đổi. Hãy mở lại rồi thử lại',
+    "catalog_entry_invalid": 'Giá trị "{field}" trong thông tin mô hình không hợp lệ. Hãy sửa rồi lưu lại',
+    "catalog_entry_no_official": "Dữ liệu chính thức không có thông tin của mô hình này nên không thể khôi phục",
+    "catalog_entry_exists": "Danh mục mô hình đã có mô hình này, hãy chọn trực tiếp.",
+    "provider_model_binding_not_found": 'Danh mục mô hình không có mô hình "{binding}" thuộc loại này. Hãy chọn mô hình khác',
+    "provider_multiplier_not_in_config": "Không thể đổi hệ số giá của nhà cung cấp qua giao diện cấu hình; hãy dùng giao diện hệ số giá",
     "custom_endpoint_not_found": "Endpoint không tồn tại",
     "custom_endpoint_definition_invalid": "Định nghĩa endpoint không qua được kiểm tra, hãy sửa các lỗi được báo rồi thử lại",
     "custom_endpoint_referenced_by_models": "Endpoint này đang được {count} mô hình sử dụng, hãy gỡ các tham chiếu đó trước khi xóa",
@@ -371,6 +390,7 @@ MESSAGES = {
     "trial_run_already_running": "Đã có một lần chạy thử đang diễn ra, hãy đợi nó kết thúc hoặc hủy trước",
     "trial_run_not_found": "Không tìm thấy bản ghi chạy thử hoặc bản ghi đã hết hạn",
     "usage_record_not_found": "Không tìm thấy bản ghi sử dụng",
+    "usage_session_not_found": "Không tìm thấy phiên Agent",
     "usage_cursor_invalid": "Con trỏ phân trang không hợp lệ, hãy quay lại trang đầu và duyệt lại",
     "usage_range_too_wide": "Khoảng thời gian thống kê quá rộng, hãy thu hẹp mốc bắt đầu và kết thúc rồi thử lại",
     "usage_time_out_of_range": "Mốc bắt đầu hoặc kết thúc nằm ngoài phạm vi thời gian biểu diễn được, hãy kiểm tra lại rồi thử lại",
@@ -409,8 +429,11 @@ MESSAGES = {
     "capability_overrides_not_supported_for_comfyui": (
         "Mô hình {model_id} dùng endpoint ComfyUI, năng lực chỉ suy ra từ liên kết node; không hỗ trợ ghi đè năng lực"
     ),
-    "capability_overrides_video_only": (
-        "Endpoint {endpoint} của mô hình {model_id} không phải loại video; không hỗ trợ ghi đè năng lực"
+    "capability_override_not_applicable": (
+        "Endpoint {endpoint} của mô hình {model_id} thuộc loại {media_type}; năng lực {capability} không áp dụng"
+    ),
+    "capability_override_image_unsupported": (
+        "Endpoint {endpoint} của mô hình {model_id} không triển khai {capability}; không thể ghi đè thành true"
     ),
     "capability_override_invalid_value": (
         "Năng lực {capability} của mô hình {model_id} có kiểu giá trị không hợp lệ; cần {expected}"
@@ -423,6 +446,9 @@ MESSAGES = {
         "Mô hình {model_id} phải có max_reference_audio_count lớn hơn 0 khi hỗ trợ âm thanh tham chiếu; "
         "hãy ghi đè reference_audio_mode thành none để tắt tham chiếu giọng nói"
     ),
+    "path_override_unknown_request": "Endpoint của mô hình {model_id} không có yêu cầu {request} có thể đổi địa chỉ",
+    "path_override_invalid_path": "Địa chỉ yêu cầu {path} của mô hình {model_id} không hợp lệ: đường dẫn phải bắt đầu bằng /, không chứa khoảng trắng hay ký tự #, và chỉ dùng dấu ngoặc nhọn cho placeholder",
+    "path_override_placeholder_not_allowed": "Địa chỉ yêu cầu {path} của mô hình {model_id} dùng placeholder mà yêu cầu này không có; chỉ có thể dùng {allowed}",
     "capability_override_last_frame_unsupported": (
         "Endpoint {endpoint} của mô hình {model_id} không hỗ trợ tạo khung hình cuối; "
         "không thể ghi đè last_frame thành true"
@@ -627,6 +653,7 @@ MESSAGES = {
     "image_capability_missing_t2i": "{provider}/{model} không hỗ trợ text-to-image; hãy cấu hình mô hình mặc định có hỗ trợ text-to-image",
     "image_dashscope_4k_t2i_only": "Mô hình {model}: đầu ra 4K chỉ được wan2.7-image-pro hỗ trợ cho text-to-image; hãy dùng 2K hoặc thấp hơn",
     "image_reference_images_unreadable": "Mô hình {model} có ảnh tham chiếu bị thiếu hoặc không đọc được; đã hủy tạo: {names}; hãy kiểm tra đường dẫn ảnh tham chiếu",
+    "image_reference_images_exceeded": "Mô hình {model} hỗ trợ tối đa {limit} ảnh tham chiếu nhưng yêu cầu này có {count}; chưa gửi yêu cầu tạo; hãy tạo lại",
     # Image Edit
     "image_edit_resource_type_invalid": "Loại tài nguyên '{resource_type}' không hỗ trợ chỉnh sửa ảnh",
     "image_edit_instruction_required": "Chỉ dẫn chỉnh sửa không được để trống",
@@ -641,11 +668,10 @@ MESSAGES = {
     "video_capability_missing_i2v": "{provider}/{model} không hỗ trợ tạo video từ ảnh; hãy chỉ định mô hình hỗ trợ tính năng này cho mục tạo video từ ảnh trong Cài đặt, hoặc đổi mô hình video mặc định",
     "video_capability_missing_r2v": "{provider}/{model} không hỗ trợ tạo video theo tham chiếu; hãy chỉ định mô hình hỗ trợ tính năng này cho mục tạo video theo tham chiếu trong Cài đặt, hoặc đổi mô hình video mặc định",
     "video_capability_reference_unavailable": "Mô hình video đã cấu hình {provider}/{model} không còn khả dụng (mô hình bị xóa, năng lực đã thay đổi hoặc nhà cung cấp bị gỡ bỏ); hãy chọn lại mô hình video trong Cài đặt",
+    "model_not_in_provider_catalog": "{provider}/{model}: mô hình này không có trong danh sách mô hình của nhà cung cấp; hãy chọn lại mô hình trong Cài đặt",
     "video_resolution_not_supported": "Mô hình {model} không hỗ trợ độ phân giải {resolution} (chỉ hỗ trợ {supported}); hãy chọn một độ phân giải được hỗ trợ",
     "video_aspect_ratio_not_supported": "Mô hình {model} không hỗ trợ tỷ lệ khung hình {aspect_ratio} (chỉ hỗ trợ {supported}); hãy chọn một tỷ lệ được hỗ trợ",
-    "video_resolution_duration_unsupported": "Mô hình {model} không hỗ trợ {duration}s ở độ phân giải {resolution} (chỉ {supported}); hãy điều chỉnh độ phân giải hoặc thời lượng",
     "video_reference_resolution_unsupported": "Mô hình {model} chỉ hỗ trợ tối đa {max_resolution} khi dùng ảnh tham chiếu hoặc khung hình cuối, nhưng yêu cầu là {resolution}; hãy đổi độ phân giải thành {max_resolution}, hoặc bỏ ảnh tham chiếu và khung hình cuối",
-    "video_reference_images_duration_unsupported": "Mô hình {model} không hỗ trợ {duration}s khi dùng ảnh tham chiếu (chỉ {supported}); hãy đổi thời lượng sang {supported} hoặc bỏ ảnh tham chiếu",
     "video_reference_images_required": "Mô hình {model} cần ít nhất một ảnh tham chiếu; hãy cung cấp ảnh tham chiếu",
     "video_reference_images_unreadable": "Mô hình {model} có ảnh tham chiếu bị thiếu hoặc không đọc được; đã hủy tạo: {names}; hãy kiểm tra đường dẫn ảnh tham chiếu",
     "video_reference_images_unsupported": "Mô hình {model} không hỗ trợ ảnh tham chiếu đa chủ thể; hãy bỏ ảnh tham chiếu hoặc chuyển sang mô hình có hỗ trợ tạo video từ ảnh tham chiếu",
@@ -655,8 +681,10 @@ MESSAGES = {
     "video_end_image_unreadable": "Ảnh khung hình cuối của mô hình {model} không đọc được; đã hủy tạo: {name}; hãy kiểm tra đường dẫn ảnh khung hình cuối",
     "video_end_image_requires_start_image": "Mô hình {model} không hỗ trợ khung hình cuối độc lập; hãy cung cấp thêm khung hình đầu (chế độ khung đầu+cuối) hoặc bỏ khung hình cuối",
     "video_last_frame_requires_pro": "{provider}/{model} chỉ hỗ trợ khung đầu+cuối ở gói pro; hãy chuyển sang gói pro hoặc bỏ khung hình cuối",
+    "video_first_frame_unsupported": "{provider}/{model} không hỗ trợ khung hình đầu với cấu hình hiện tại; đã hủy tạo. Hãy bỏ khung hình đầu của cảnh quay này, hoặc chuyển sang mô hình hoặc gói có hỗ trợ",
     "video_last_frame_unsupported": "{provider}/{model} không hỗ trợ khung hình cuối với cấu hình hiện tại; đã hủy tạo. Hãy bỏ khung hình cuối của cảnh quay này, hoặc chuyển sang mô hình hoặc gói có hỗ trợ",
     "video_reference_audio_unsupported": "{provider}/{model} không hỗ trợ âm thanh tham chiếu; đã hủy tạo. Hãy bỏ âm thanh tham chiếu của nhân vật, hoặc chuyển sang mô hình có hỗ trợ tham chiếu giọng nói",
+    "video_reference_route_audio_unsupported": "{provider}/{model} không thể gửi công tắc âm thanh khi tạo từ ảnh tham chiếu nên video sẽ không có tiếng; đã hủy tạo. Hãy tắt công tắc âm thanh, gỡ ghi đè rãnh âm thanh của tuyến ảnh tham chiếu, hoặc bỏ ảnh tham chiếu rồi thử lại",
     "video_reference_audio_exceeded": "Mô hình {model} hỗ trợ tối đa {limit} đoạn âm thanh tham chiếu nhưng nhận được {count}; hãy giảm số nhân vật có âm thanh tham chiếu",
     "video_reference_audio_duration_exceeded": "Mô hình {model} hỗ trợ tổng thời lượng âm thanh tham chiếu tối đa {limit:g} giây nhưng nhận được {total:.1f} giây; hãy giảm số đoạn âm thanh tham chiếu hoặc dùng đoạn ngắn hơn",
     "video_reference_audio_slots_insufficient": "Mô hình {model} gắn mỗi đoạn âm thanh tham chiếu vào một tư liệu tham chiếu, nhưng chỉ có {slots} tư liệu cho {count} đoạn; hãy bổ sung ảnh tham chiếu cho các nhân vật đó, hoặc giảm số nhân vật có âm thanh tham chiếu",
@@ -674,6 +702,7 @@ MESSAGES = {
     "agent_base_url_invalid": "Địa chỉ chứng thực Agent không hỗ trợ tham số truy vấn, fragment hay tên người dùng/mật khẩu; hãy dùng dạng https://host/path",
     "agent_no_fields_to_update": "Không có trường nào để cập nhật",
     "agent_credential_not_found": "Không tìm thấy xác thực",
+    "agent_tier_binding_invalid": "Mô hình gắn với bậc này không có trong danh mục mô hình",
     "agent_cannot_delete_active": "Không thể xóa xác thực đang hoạt động; hãy kích hoạt xác thực khác trước",
     "agent_test_validation_error": "Kiểm tra kết nối thất bại; vui lòng kiểm tra cấu hình và thử lại",
     "invalid_project_name": "Tên dự án '{name}' không hợp lệ",
@@ -684,6 +713,7 @@ MESSAGES = {
     "version_not_found": "Phiên bản {version} không tồn tại",
     "version_resource_not_found": "Tài nguyên '{resource_type}/{resource_id}' không tồn tại",
     "version_snapshot_path_unmanaged": "Bản ghi phiên bản '{resource_type}' trỏ tới đường dẫn ảnh chụp không được quản lý; thao tác đã bị từ chối",
+    "version_snapshot_corrupted": "Không thể dùng phiên bản {version} vì tệp của phiên bản này đã bị hỏng. Bạn có thể chọn phiên bản khác hoặc tạo lại.",
     "session_capacity_exceeded": "Đã đạt giới hạn phiên đồng thời, vui lòng thử lại sau",
     "session_question_unavailable": "Phiên chưa chạy hoặc không có câu hỏi đang chờ",
     "rewrite_anchor_invalid": "Tin nhắn bạn muốn sửa không thuộc cuộc trò chuyện này, hãy tải lại rồi thử lại",
@@ -759,6 +789,8 @@ MESSAGES = {
     "final_cut_narration_unavailable": "Chỉ dự án lồng tiếng TTS mới kết xuất được video thành phẩm có lời dẫn",
     "final_cut_presentation_unavailable": "Âm thanh lời dẫn hoặc phụ đề của đơn vị video {unit_id} không thể dùng trong video thành phẩm; hãy kiểm tra âm thanh lời dẫn rồi kết xuất lại",
     "final_cut_blocked": "Dòng thời gian dựng có vấn đề chặn việc kết xuất video thành phẩm, ở các đơn vị video: {units}. Hãy xử lý các vấn đề này rồi gửi kết xuất lại",
+    "final_cut_video_version_corrupted": "Tệp video phiên bản {version} mà đơn vị video {unit_id} đang dùng đã bị hỏng, nên không thể xuất video thành phẩm. Bạn có thể chọn phiên bản khác cho đơn vị này hoặc tạo lại.",
+    "final_cut_narration_version_corrupted": "Tệp âm thanh thuyết minh phiên bản {version} mà đơn vị video {unit_id} đang dùng đã bị hỏng, nên không thể xuất video thành phẩm. Bạn có thể chọn phiên bản thuyết minh khác cho đơn vị này hoặc tạo lại thuyết minh.",
     "final_cut_empty": "Dòng thời gian dựng không có đoạn nào để kết xuất",
     "final_cut_ffmpeg_unavailable": "Không dùng được ffmpeg đi kèm, nên không thể kết xuất video thành phẩm",
     "final_cut_render_failed": "Kết xuất video thành phẩm thất bại, vui lòng thử lại",

@@ -1,7 +1,7 @@
 [project]
 name = "arcreel"
 # managed by release-please — do not bump manually
-version = "0.33.0"
+version = "0.34.0"
 description = "AI video generation workspace"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -47,8 +47,11 @@ dependencies = [
     "numpy>=2.5.2",
     "jinja2>=3.1.6",
     "arcreel-market-core",
+    "arcreel-catalog-core",
     # 随包分发的 ffmpeg，经 lib/infra/ffmpeg.py 的查找器取用；不依赖系统 ffmpeg / ffprobe。
     "imageio-ffmpeg>=0.6.0",
+    # 1.x 改用 httpx2，respx 与基于 httpx 的自定义 transport 拦截不到；约束见 docs/agents/dependencies.md。
+    "anthropic>=0.125.0,<1",
 ]
 
 [dependency-groups]
@@ -66,6 +69,7 @@ dev = [
     "respx>=0.22.0",
     "deptry>=0.24.0",
     "pytest-testmon>=2.2.0",
+    "blockbuster>=1.5.29",
 ]
 # 变异测试工具，不进 dev：只在按批次跑 mutmut 时 `uv sync --group mutation` 装入。
 # 独立成组是为了让版本 pin 进 uv.lock、被 dependabot 看到；流程见 docs/testing/mutmut-runbook.md。
@@ -74,10 +78,11 @@ mutation = [
 ]
 
 [tool.uv.workspace]
-members = ["packages/arcreel-market-core"]
+members = ["packages/arcreel-market-core", "packages/arcreel-catalog-core"]
 
 [tool.uv.sources]
 arcreel-market-core = { workspace = true }
+arcreel-catalog-core = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
@@ -108,7 +113,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["lib", "server", "arcreel_market_core"]
+source = ["lib", "server", "arcreel_market_core", "arcreel_catalog_core"]
 concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
@@ -123,7 +128,7 @@ exclude_lines = [
 # server 进入分析范围，「核心库不依赖服务端」才看得见跨包的边；arcreel_market_core 进入分析范围，
 # 「子包不依赖主仓」才看得见它指向 lib / server 的边。外部包只作叶子节点计入，供「核心库不依赖
 # HTTP 框架」点名 fastapi / starlette。
-root_packages = ["lib", "server", "arcreel_market_core"]
+root_packages = ["lib", "server", "arcreel_market_core", "arcreel_catalog_core"]
 include_external_packages = true
 
 # lib.config < lib.backends.*_backends < lib.custom_provider < lib.market：config 是配置解析的基础层，backends
@@ -133,7 +138,7 @@ include_external_packages = true
 # 契约（如图像通道取 video_backends.base 的 IMAGE_MIME_TYPES）不算方向违规；共用的运行支持在
 # lib.backends.backend_runtime，不属于任何一层。
 # ignore_imports 是存量违规的 baseline，逐条掐的是**违规链的终端边**而非首跳，这样中间模块
-# （project_manager / cost_calculator / usage_repo 等）后续新增的反向依赖仍会被契约拦下。
+# （project_manager / usage_repo 等）后续新增的反向依赖仍会被契约拦下。
 # 新增条目前先确认该边无法就地清零；清零一条即删一行。
 [[tool.importlinter.contracts]]
 name = "lib.config / lib.backends.*_backends / lib.custom_provider / lib.market 分层契约"
@@ -151,6 +156,7 @@ ignore_imports = [
     "lib.config.resolver -> lib.custom_provider.capabilities",
     "lib.config.resolver -> lib.custom_provider.default_models",
     "lib.config.resolver -> lib.custom_provider.endpoint_resolution",
+    "lib.config.resolver -> lib.custom_provider.model_facts",
     # lib.config.resolver 直接向上引用 backend 层
     "lib.config.resolver -> lib.backends.text_backends.base",
     # 中间模块把 backend 层拉回 config 之下的可达范围
@@ -163,13 +169,17 @@ ignore_imports = [
     "lib.backends.backend_assembly.specs -> lib.custom_provider.builtin_definitions",
     "lib.backends.backend_assembly.specs -> lib.custom_provider.declarative_backend",
     "lib.backends.backend_assembly.specs -> lib.custom_provider.endpoints",
+    # 内置供应商下用户添加的模型叠加通道事实的能力覆盖，与自定义供应商共用同一个合并点（docs/adr/0104）
+    "lib.backends.backend_assembly.specs -> lib.custom_provider.capabilities",
     "lib.project.project_manager -> lib.backends.text_backends.base",
     "lib.backends.text_generator -> lib.backends.text_backends.base",
     "lib.backends.text_generator -> lib.backends.text_backends.factory",
     # 中间模块反向引用 custom_provider（provider_id 解析与自定义供应商记账）
     "lib.backends.backend_assembly.assembler -> lib.custom_provider",
     "lib.backends.backend_assembly.assembler -> lib.custom_provider.loader",
-    "lib.billing.cost_calculator -> lib.custom_provider",
+    "lib.billing.multipliers -> lib.custom_provider",
+    "lib.billing.multipliers -> lib.custom_provider.discovery_formats",
+    "lib.db.repositories.usage_repo -> lib.custom_provider",
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider",
     "lib.db.repositories.custom_provider_repo -> lib.custom_provider.endpoints",
     "lib.db.models.custom_provider -> lib.custom_provider",
@@ -202,6 +212,14 @@ name = "arcreel_market_core 不依赖主仓"
 type = "forbidden"
 source_modules = ["arcreel_market_core"]
 forbidden_modules = ["lib", "server"]
+
+# arcreel_catalog_core 同为最底层：目录数据的格式与校验器被目录数据仓库的 CI 单独安装，
+# 只依赖标准库，主仓依赖子包，反向一律不许。
+[[tool.importlinter.contracts]]
+name = "arcreel_catalog_core 不依赖主仓"
+type = "forbidden"
+source_modules = ["arcreel_catalog_core"]
+forbidden_modules = ["lib", "server", "arcreel_market_core"]
 
 # 路线中立层不得依赖某一条具体路线的子包。违约条目类型（draft_violation）、草稿信封
 # （draft_quarantine）、正式 script_plan 的路径与写禁表（episode_paths）、已登记引用名的
@@ -308,19 +326,38 @@ DEP004 = [
     "_pytest",        # pytest 的内部模块，根 conftest 复用其选择参数解析器
     "pytest_asyncio", # pytest 的 asyncio 插件，测试内直接用 @pytest_asyncio.fixture（本规则按模块名匹配）
     "respx",          # httpx 的测试替身
+    "blockbuster",    # 事件循环阻塞检测，tests/blocking_guard 护栏的拦截点来源
 ]
 
 [tool.ruff]
 line-length = 120
-# 子包是 src 布局：列进 src 让 isort 把 arcreel_market_core 识别为第一方。
-src = [".", "packages/arcreel-market-core/src"]
+# 子包是 src 布局：列进 src 让 isort 把 arcreel_market_core、arcreel_catalog_core 识别为第一方。
+src = [".", "packages/arcreel-market-core/src", "packages/arcreel-catalog-core/src"]
 # .agents/skills 是按 skills-lock.json 安装的外部 skill，随上游更新，不套本仓规则。
 exclude = [".worktrees", ".claude/worktrees", ".agents/skills"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "C4", "PIE", "PT", "RET", "PERF", "RUF", "SIM", "ASYNC"]
+select = [
+    "E", "F", "I", "UP", "B", "C4", "PIE", "PT", "RET", "PERF", "RUF", "SIM", "ASYNC",
+    "TID251", "PLW1514", "S108", "S602", "S604", "S605", "S607",
+]
 # RUF001-003：中文注释与文案里的全角标点被判为「易混淆 unicode」，对中文仓库是纯噪音。
 ignore = ["E402", "E501", "RUF001", "RUF002", "RUF003"]
+# PLW1514 只在 preview 中提供，explicit-preview-rules 保证其他规则不受 preview 影响。
+preview = true
+explicit-preview-rules = true
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.O_NOFOLLOW".msg = "Windows 上不存在。用 getattr(os, \"<名>\", 0) 取值；不可信路径缺少 O_NOFOLLOW 时，见 docs/standards/backend.md「不可信路径缺少 `O_NOFOLLOW` 时，打开后校验文件身份」"
+"os.O_DIRECTORY".msg = "Windows 上不存在。用 getattr(os, \"<名>\", 0) 取值；不可信路径缺少 O_NOFOLLOW 时，见 docs/standards/backend.md「不可信路径缺少 `O_NOFOLLOW` 时，打开后校验文件身份」"
+"os.O_NONBLOCK".msg = "Windows 上不存在。用 getattr(os, \"<名>\", 0) 取值；不可信路径缺少 O_NOFOLLOW 时，见 docs/standards/backend.md「不可信路径缺少 `O_NOFOLLOW` 时，打开后校验文件身份」"
+"asyncio.create_subprocess_shell".msg = "命令经 shell 解析，Windows 上行为不同且有注入风险。改用 asyncio.create_subprocess_exec 并传 list 参数"
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里的 /tmp 是假路径字符串，测试调用 git 依赖 PATH 是预期行为。
+"tests/**" = ["S108", "S607"]
+# 子包测试与主仓 tests/ 同一口径。
+"packages/*/tests/**" = ["S108", "S607"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI 依赖注入以「参数默认值处调用」为惯用法，B008 对其属误报；登记后无需逐处 noqa。
@@ -337,7 +374,7 @@ extend-immutable-calls = [
 ]
 
 [tool.basedpyright]
-include = ["lib", "server", "alembic", "tests", "scripts", "packages/arcreel-market-core/src", "packages/arcreel-market-core/tests"]
+include = ["lib", "server", "alembic", "tests", "scripts", "packages/arcreel-market-core/src", "packages/arcreel-market-core/tests", "packages/arcreel-catalog-core/src", "packages/arcreel-catalog-core/tests"]
 exclude = [
     "**/__pycache__",
     ".venv",
@@ -373,6 +410,8 @@ reportUnusedImport = "warning"
 reportUnusedVariable = "warning"
 reportUnusedClass = "warning"
 reportUnusedFunction = "warning"
+# reportUnreachable 在回调赋值上会误报：basedpyright 不跟踪回调里的赋值，`x: T | None = None` 配 `nonlocal` 会让外层的空值判定被当成恒真、随后的分支被判不可达。
+# 这类告警改用单元素列表当信箱（`box: list[T] = []`，回调里 append，外层读 box[0]），不要删除被误判的分支，也不要加忽略注释。
 reportUnreachable = "warning"
 reportDeprecated = "warning"
 
@@ -421,6 +460,10 @@ reportOptionalMemberAccess = "none"
 reportOptionalIterable = "none"
 reportOperatorIssue = "none"
 reportOptionalCall = "none"
+
+[[tool.basedpyright.executionEnvironments]]
+root = "packages/arcreel-catalog-core/tests"
+extraPaths = ["packages/arcreel-catalog-core/tests"]
 
 [[tool.basedpyright.executionEnvironments]]
 root = "alembic"

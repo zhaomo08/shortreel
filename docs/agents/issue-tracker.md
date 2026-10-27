@@ -16,12 +16,12 @@ Infer the repo from `git remote -v`; `gh` does this automatically when run insid
 
 ## Pull requests as a triage surface
 
-**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
+**PRs as a request surface: yes.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_ The daily unattended triage sweep follows `docs/agents/triage-sweep.md`.
 
 When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
 
 - **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh api --paginate 'repos/{owner}/{repo}/pulls?state=open' --jq '.[] | select(.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not) | {number, title, author: .user.login, author_association, labels: [.labels[].name]}'`.
+- **List external PRs for triage**: `gh api --paginate 'repos/{owner}/{repo}/pulls?state=open' --jq '.[] | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not) and .user.type != "Bot") | {number, title, author: .user.login, author_association, labels: [.labels[].name]}'`.
 - **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
@@ -48,7 +48,7 @@ Spec 和按 Spec 拆出的 ticket 在**列表视图**即可区分与溯源：
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue.
+Create a GitHub issue. After publishing a batch, read every issue back (`gh issue view <n> --json title,body`) and check each title is the one the approved breakdown assigned to that body: a title shifted onto the next issue, or left empty, is the easiest mistake to make here and the hardest for the next agent to notice.
 
 ## When a skill says "fetch the relevant ticket"
 

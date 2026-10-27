@@ -16,7 +16,13 @@ from lib.generation.video_request_facts import VideoRequestFactsFailure
 from lib.i18n import SUPPORTED_LOCALES, _, render_message
 from lib.script.reference_video.request_projection import resolve_reference_assets
 from tests.factories import make_display_names, make_video_request_facts, wav_bytes
-from tests.fakes import FakeConfigResolver
+from tests.fakes import (
+    FakeConfigResolver,
+    use_generation_context,
+    use_project_manager,
+    use_video_thumbnail_extractor,
+    write_backend_output,
+)
 from tests.integration.server.services.tasks.reference_video_tasks_support import (
     _TINY_PNG,
     register_asset_sheet,
@@ -138,7 +144,7 @@ def _wire_context(
             )
         return GenerationContext(generator=fake_generator, video_lane=_lane(kwargs["video"]))
 
-    monkeypatch.setattr(rvt, "resolve_generation_context", _fake_resolve)
+    use_generation_context(monkeypatch, _fake_resolve)
 
 
 @pytest.mark.asyncio
@@ -157,13 +163,12 @@ async def test_execute_reference_video_task_success(tmp_path: Path, monkeypatch:
 
     fake_pm.load_script.side_effect = fake_load_script
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     # Mock generator.generate_video_async: 创建伪视频文件
     async def _fake_generate_video_async(**kwargs):
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         # (output_path, version, video_ref, video_uri)
         return out, 1, None, None
 
@@ -176,7 +181,7 @@ async def test_execute_reference_video_task_success(tmp_path: Path, monkeypatch:
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo",
@@ -210,13 +215,12 @@ async def test_execute_reference_video_task_passes_planned_duration_when_endpoin
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         await kwargs["before_submit"]()
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -235,7 +239,7 @@ async def test_execute_reference_video_task_passes_planned_duration_when_endpoin
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
     persisted: dict[str, Any] = {}
     fake_queue = MagicMock()
     fake_queue.persist_execution_checkpoint = AsyncMock(
@@ -275,7 +279,7 @@ async def test_execute_reference_video_task_rejects_changed_claim_provider_befor
     fake_pm.load_script.side_effect = lambda _project_name, _filename: json.loads(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -319,7 +323,7 @@ async def test_execute_reference_video_task_blocks_a_dirty_text_before_submissio
     fake_pm.load_script.side_effect = lambda _project_name, _filename: json.loads(
         script_path.read_text(encoding="utf-8")
     )
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -370,12 +374,11 @@ async def test_execute_reference_video_task_bucket_follows_resolved_references(
 
     fake_pm.load_script.side_effect = fake_load_script
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -391,12 +394,12 @@ async def test_execute_reference_video_task_bucket_follows_resolved_references(
         captured["payload"] = args[1]
         return await inner(*args, **kwargs)
 
-    monkeypatch.setattr(rvt, "resolve_generation_context", _capture)
+    use_generation_context(monkeypatch, _capture)
 
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -433,7 +436,7 @@ async def test_execute_reference_video_task_rechecks_text_to_video_capability(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _name, _filename: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -494,15 +497,14 @@ async def test_execute_reference_video_task_sends_reference_audio_in_prompt_orde
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -521,7 +523,7 @@ async def test_execute_reference_video_task_sends_reference_audio_in_prompt_orde
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task("demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1")
 
@@ -591,15 +593,14 @@ async def test_execute_reference_video_task_omits_reference_audio_when_episode_i
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -619,7 +620,7 @@ async def test_execute_reference_video_task_omits_reference_audio_when_episode_i
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1"
@@ -652,7 +653,7 @@ async def test_execute_reference_video_task_blocks_on_request_facts_failure_with
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -706,7 +707,7 @@ async def test_execute_reference_video_task_rechecks_audio_switch_for_latest_mod
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -779,15 +780,14 @@ async def test_execute_reference_video_task_aligns_reference_audio_targets_for_p
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -807,7 +807,7 @@ async def test_execute_reference_video_task_aligns_reference_audio_targets_for_p
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task("demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1")
 
@@ -843,15 +843,14 @@ async def test_execute_reference_video_task_omits_audio_field_for_soft_tier(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -869,7 +868,7 @@ async def test_execute_reference_video_task_omits_audio_field_for_soft_tier(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task("demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1")
 
@@ -892,15 +891,14 @@ async def test_execute_reference_video_task_surfaces_backend_warnings(tmp_path: 
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     warning = {"key": "comfyui_multiple_outputs", "params": {"count": 2, "filename": "final.mp4"}}
 
     async def _fake_generate_video_async(**kwargs):
         kwargs["warnings"].append(warning)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -911,7 +909,7 @@ async def test_execute_reference_video_task_surfaces_backend_warnings(tmp_path: 
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1"
@@ -950,12 +948,11 @@ async def test_execute_reference_video_task_surfaces_render_warnings(tmp_path: P
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -974,7 +971,7 @@ async def test_execute_reference_video_task_surfaces_render_warnings(tmp_path: P
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1"
@@ -999,15 +996,14 @@ async def test_execute_reference_video_task_reports_reference_image_limit(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda _n, _f: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict[str, Any] = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured["reference_images"] = kwargs.get("reference_images")
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1025,7 +1021,7 @@ async def test_execute_reference_video_task_reports_reference_image_limit(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo", "E1U1", {"script_file": "scripts/episode_1.json"}, user_id="u1"
@@ -1083,13 +1079,12 @@ async def test_execute_reference_video_task_clears_stale_video_uri_and_thumbnail
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     fake_pm.locked_script.side_effect = _locked_script
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     # 新后端不返回 video_uri（第 4 个元素为 None）
     async def _fake_generate_video_async(**kwargs):
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1101,7 +1096,7 @@ async def test_execute_reference_video_task_clears_stale_video_uri_and_thumbnail
     async def _fake_extract(*_a, **_k):
         return False
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -1137,15 +1132,14 @@ async def test_execute_reference_video_task_sends_the_request_facts_resolution(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1163,7 +1157,7 @@ async def test_execute_reference_video_task_sends_the_request_facts_resolution(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -1192,15 +1186,14 @@ async def test_execute_reference_video_task_picks_the_tier_from_narrowed_request
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00\x00\x00 ftypmp42")
+        await write_backend_output(out, b"\x00\x00\x00 ftypmp42")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1220,7 +1213,7 @@ async def test_execute_reference_video_task_picks_the_tier_from_narrowed_request
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -1246,7 +1239,7 @@ async def test_execute_reference_video_task_missing_reference_fails(tmp_path: Pa
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
     _wire_context(
         monkeypatch,
         rvt,
@@ -1291,7 +1284,7 @@ async def test_execute_reference_video_task_rejects_unclaimed_formal_sheet_befor
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -1333,7 +1326,7 @@ async def test_execute_reference_video_task_rejects_unclaimed_bound_script_befor
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     fake_generator = MagicMock()
     fake_generator.generate_video_async = AsyncMock()
@@ -1376,12 +1369,15 @@ async def test_execute_reference_video_task_rechecks_formal_sheet_claim_before_p
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     provider_submissions: list[str] = []
 
     async def _fake_generate_video_async(**kwargs):
-        ProjectArtifactManifestAdapter(proj_dir).delete_entry(ArtifactKey.asset_sheet("character", "张三"))
+        # 模拟另一处并发撤掉认领：在工作线程里改清单，不占事件循环
+        await asyncio.to_thread(
+            lambda: ProjectArtifactManifestAdapter(proj_dir).delete_entry(ArtifactKey.asset_sheet("character", "张三"))
+        )
         await kwargs["before_submit"]()
         provider_submissions.append("submitted")
         raise AssertionError("provider submission must remain unreachable")
@@ -1437,7 +1433,7 @@ async def test_execute_reference_video_task_blocks_an_unmigrated_project_before_
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     provider_submissions: list[str] = []
 
@@ -1490,12 +1486,13 @@ async def test_execute_reference_video_task_rejects_a_replaced_sheet_before_prov
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     provider_submissions: list[str] = []
 
     async def _fake_generate_video_async(**kwargs):
-        (proj_dir / "characters" / "张三.png").write_bytes(b"replacement-sheet")
+        # 模拟另一处并发替换设定图：在工作线程里写盘，不占事件循环
+        await asyncio.to_thread((proj_dir / "characters" / "张三.png").write_bytes, b"replacement-sheet")
         await kwargs["before_submit"]()
         provider_submissions.append("submitted")
         raise AssertionError("provider submission must remain unreachable")
@@ -1547,7 +1544,7 @@ async def test_execute_reference_video_task_refuses_a_script_outside_the_episode
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(unbound_script.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         await kwargs["before_submit"]()
@@ -1601,7 +1598,7 @@ async def test_execute_reference_video_task_uses_real_media_generator(tmp_path: 
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     # 只 mock 最外层：VideoBackend（唯一的真外部依赖）+ Ledger/ConfigResolver
     # （这俩摸 DB，测试无 DB）。VersionManager 用真实实现 —— 这样 VersionManager
@@ -1620,8 +1617,7 @@ async def test_execute_reference_video_task_uses_real_media_generator(tmp_path: 
 
         async def generate(self, request):
             captured_requests.append(request)
-            request.output_path.parent.mkdir(parents=True, exist_ok=True)
-            request.output_path.write_bytes(b"\x00\x00\x00 ftypmp42")
+            await write_backend_output(request.output_path, b"\x00\x00\x00 ftypmp42")
             return VideoGenerationResult(
                 video_path=request.output_path,
                 provider=self.name,
@@ -1638,7 +1634,7 @@ async def test_execute_reference_video_task_uses_real_media_generator(tmp_path: 
             class _Call:
                 call_id = 1
 
-                def success(self, _result):
+                def success(self, _result, *, usage=None):
                     pass
 
             yield _Call()
@@ -1662,7 +1658,7 @@ async def test_execute_reference_video_task_uses_real_media_generator(tmp_path: 
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo",
@@ -1701,7 +1697,7 @@ async def test_execute_reference_video_task_passes_source_refs(tmp_path: Path, m
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
     call_count = {"n": 0}
@@ -1710,8 +1706,7 @@ async def test_execute_reference_video_task_passes_source_refs(tmp_path: Path, m
         call_count["n"] += 1
         captured["reference_images"] = kwargs.get("reference_images")
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1722,7 +1717,7 @@ async def test_execute_reference_video_task_passes_source_refs(tmp_path: Path, m
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     result = await rvt.execute_reference_video_task(
         "demo",
@@ -1764,15 +1759,14 @@ async def test_execute_reference_video_task_rejects_duration_above_lane_maximum(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1792,7 +1786,7 @@ async def test_execute_reference_video_task_rejects_duration_above_lane_maximum(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     from lib.script.reference_video.request_projection import ReferenceProjectionBlockedError
 
@@ -1842,15 +1836,14 @@ async def test_execute_reference_video_task_prompt_matches_clipped_refs(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1870,7 +1863,7 @@ async def test_execute_reference_video_task_prompt_matches_clipped_refs(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -1954,15 +1947,14 @@ async def test_execute_reference_video_task_prompt_matches_deduped_refs(
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
     async def _fake_generate_video_async(**kwargs):
         captured.update(kwargs)
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -1982,7 +1974,7 @@ async def test_execute_reference_video_task_prompt_matches_deduped_refs(
     async def _fake_extract(*_a, **_k):
         return True
 
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", _fake_extract)
+    use_video_thumbnail_extractor(monkeypatch, _fake_extract)
 
     await rvt.execute_reference_video_task(
         "demo",
@@ -2032,7 +2024,7 @@ async def test_execute_reference_video_task_requests_planned_tier_regardless_of_
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     captured: dict = {}
 
@@ -2040,8 +2032,7 @@ async def test_execute_reference_video_task_requests_planned_tier_regardless_of_
         captured.update(kwargs)
         await kwargs["before_submit"]()
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -2104,13 +2095,12 @@ async def test_execute_reference_video_task_persists_effective_duration_when_rou
     fake_pm.get_project_path.return_value = proj_dir
     fake_pm.load_script.side_effect = lambda *_a: json.loads(script_path.read_text(encoding="utf-8"))
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         await kwargs["before_submit"]()
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -2161,13 +2151,12 @@ async def test_execute_reference_video_task_persists_duration_when_unchanged(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_generate_video_async(**kwargs):
         await kwargs["before_submit"]()
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -2215,7 +2204,7 @@ async def test_execute_reference_video_task_persists_execution_identity(
         (proj_dir / "scripts" / "episode_1.json").read_text(encoding="utf-8")
     )
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     events: list[str] = []
 
@@ -2223,8 +2212,7 @@ async def test_execute_reference_video_task_persists_execution_identity(
         await kwargs["before_submit"]()
         events.append("provider_submit")
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"\x00")
+        await write_backend_output(out, b"\x00")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -2293,7 +2281,7 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
 
     fake_pm.load_script.side_effect = _load_script
     _wire_locked_script(fake_pm)
-    monkeypatch.setattr(rvt, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     events: list[str] = []
     submitted: dict[str, Any] = {}
@@ -2302,7 +2290,7 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
     async def _edit_source_before_staging(project_path, task_id, inputs):
         """经 ``stage_media_for_task`` 注入：在现摘要与暂存之间改写源文件，其余照真实暂存跑。"""
         if inputs:
-            inputs[0].path.write_bytes(b"edited-between-live-basis-and-staging")
+            await asyncio.to_thread(inputs[0].path.write_bytes, b"edited-between-live-basis-and-staging")
         return await rvt.stage_provider_media_for_task(project_path, task_id, inputs, stage=rvt.stage_provider_media)
 
     async def _fake_generate_video_async(**kwargs):
@@ -2317,8 +2305,7 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
         submitted["checkpoint_metadata"] = await kwargs["before_submit"]()
         events.append("provider_submit")
         out = proj_dir / "reference_videos" / "E1U1.mp4"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(b"paid-video")
+        await write_backend_output(out, b"paid-video")
         return out, 1, None, None
 
     fake_generator = MagicMock()
@@ -2342,7 +2329,7 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
     fake_queue = MagicMock()
     fake_queue.persist_execution_checkpoint = AsyncMock(side_effect=_persist_checkpoint)
     monkeypatch.setattr(rvt, "get_generation_queue", lambda: fake_queue)
-    monkeypatch.setattr(rvt, "extract_video_thumbnail", AsyncMock(return_value=False))
+    use_video_thumbnail_extractor(monkeypatch, AsyncMock(return_value=False))
 
     # 基线：源文件未改时提交的视觉依据摘要，即改写前的现摘要所依据的字节。
     await rvt.execute_reference_video_task(
@@ -2392,7 +2379,7 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
     assert not (proj_dir / ".arcreel" / "tasks" / "task-submit" / "provider_media").exists()
 
     async def _cancel_after_staging(**_kwargs):
-        assert (proj_dir / ".arcreel" / "tasks" / "task-cancel" / "provider_media").is_dir()
+        assert await asyncio.to_thread((proj_dir / ".arcreel" / "tasks" / "task-cancel" / "provider_media").is_dir)
         raise asyncio.CancelledError
 
     fake_generator.generate_video_async = AsyncMock(side_effect=_cancel_after_staging)
@@ -2445,7 +2432,9 @@ async def test_execute_reference_video_task_stages_actual_request_and_checkpoint
         raise RuntimeError("checkpoint construction failed")
 
     async def _invoke_rejected_checkpoint(**kwargs):
-        assert (proj_dir / ".arcreel" / "tasks" / "task-checkpoint-failure" / "provider_media").is_dir()
+        assert await asyncio.to_thread(
+            (proj_dir / ".arcreel" / "tasks" / "task-checkpoint-failure" / "provider_media").is_dir
+        )
         await kwargs["before_submit"]()
         raise AssertionError("provider submit must not run after checkpoint construction fails")
 

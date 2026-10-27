@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -172,7 +173,7 @@ class TestPayloadBuilding:
         backend = _jwt_backend()
         payload = backend._build_payload(_request(tmp_path, reference_images=refs))
         # o1 上限 10 张，超出截断；声明的上限即实际下传张数，编排层按它裁剪后编号。
-        assert len(payload["image"]) == backend.max_reference_images == 10
+        assert len(payload["image"]) == asyncio.run(backend.reference_image_limit()) == 10
 
     def test_missing_reference_raises(self, tmp_path):
         bad = ReferenceImage(path=str(tmp_path / "nope.png"))
@@ -222,6 +223,10 @@ class TestGenerateHappyPath:
         assert result.provider == PROVIDER_KLING
         assert result.image_uri == "https://x/final.png"
         assert result.image_path.read_bytes() == b"png-bytes"
+        # 请求体不带分辨率，不报分辨率
+        assert result.usage is not None
+        assert result.usage.dimensions == {}
+        assert result.usage.quantities == {"output_images": 1, "input_images": 0}
 
     async def test_multiple_images_takes_first(self, tmp_path):
         with _kling_image_api() as routes:

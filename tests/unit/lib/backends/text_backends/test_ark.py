@@ -28,12 +28,15 @@ def _recorded_openai_clients() -> Generator[list[dict[str, Any]]]:
 
 @contextmanager
 def _recorded_instructor_fallback(result: tuple[str, int, int]) -> Generator[list[dict[str, Any]]]:
-    """instructor 降级入口的记录器：收下降级调用参数，回固定结果。"""
+    """instructor 降级入口的记录器：收下降级调用参数，回固定结果（JSON 文本、输入与输出 token）。"""
     calls: list[dict[str, Any]] = []
+    json_text, input_tokens, output_tokens = result
 
-    def _call(**kwargs: Any) -> tuple[str, int, int]:
+    def _call(**kwargs: Any) -> TextGenerationResult:
         calls.append(kwargs)
-        return result
+        return TextGenerationResult(
+            text=json_text, provider="", model="", input_tokens=input_tokens, output_tokens=output_tokens
+        )
 
     with patch("lib.backends.text_backends.instructor_support.generate_structured_via_instructor", _call):
         yield calls
@@ -68,7 +71,7 @@ class TestProperties:
 
     def test_default_model(self, mock_ark):
         b = ArkTextBackend(api_key="k")
-        assert b.model == "doubao-seed-2-0-lite-260215"
+        assert b.model == "doubao-seed-2-1-lite-260915"
 
     def test_capabilities(self, mock_ark):
         b = ArkTextBackend(api_key="k")
@@ -172,8 +175,7 @@ class TestCapabilityAwareStructured:
     def backend_no_structured(self, mock_ark):
         """创建一个模型不支持原生 structured_output 的 backend。"""
         _, mock_client = mock_ark
-        # 使用默认模型 doubao-seed-2-0-lite-260215，registry 中已移除 structured_output
-        b = ArkTextBackend(api_key="k")
+        b = ArkTextBackend(api_key="k", model="doubao-seed-2-0-mini-260428")
         b._test_client = mock_client
         return b
 
@@ -187,8 +189,8 @@ class TestCapabilityAwareStructured:
         b._capabilities.add(TextCapability.STRUCTURED_OUTPUT)
         return b
 
-    async def test_default_model_does_not_support_native_structured(self, backend_no_structured):
-        """默认豆包模型不支持原生结构化输出。"""
+    async def test_model_without_structured_output_lacks_native_capability(self, backend_no_structured):
+        """目录未声明 structured_output 的豆包模型不支持原生结构化输出。"""
         assert TextCapability.STRUCTURED_OUTPUT not in backend_no_structured.capabilities
 
     async def test_fallback_uses_instructor(self, backend_no_structured, sync_to_thread):
@@ -202,7 +204,9 @@ class TestCapabilityAwareStructured:
 
         with patch(
             "lib.backends.text_backends.instructor_support.generate_structured_via_instructor",
-            return_value=(sample.model_dump_json(), 50, 20),
+            return_value=TextGenerationResult(
+                text=sample.model_dump_json(), provider="", model="", input_tokens=50, output_tokens=20
+            ),
         ) as mock_instructor:
             result = await backend_no_structured.generate(
                 TextGenerationRequest(prompt="gen", response_schema=TestModel)
