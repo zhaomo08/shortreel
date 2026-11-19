@@ -6,14 +6,14 @@
     <img src="docs/assets/logo-animated-light.svg" alt="ArcReel Logo" width="128">
   </picture>
   <br>
-  ArcReel
+  shortreel
   <br>
 </h1>
 
 <p align="center">
-  <strong>开源、自托管的 AI 视频生产工作台</strong>
+  <strong>ArcReel 的定制版：中英双语成片、Google Flow 往返、大陆网络开箱即用</strong>
   <br>
-  将小说、成品剧本或商品素材转化为角色一致、过程可控、成本可追踪、可继续编辑的短视频。
+  基于上游 ArcReel 0.34.0 的自托管 AI 视频生产工作台：把小说、成品剧本或商品素材转化为角色一致、过程可控、成本可追踪、可继续编辑的短视频。
 </p>
 
 <p align="center">
@@ -22,63 +22,91 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ArcReel/ArcReel/releases/latest"><img src="https://img.shields.io/github/v/release/ArcReel/ArcReel?style=flat-square&label=release" alt="Release"></a>
-  <a href="https://github.com/ArcReel/ArcReel/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/ArcReel/ArcReel/test.yml?style=flat-square&label=tests" alt="Tests"></a>
-  <a href="https://codecov.io/gh/ArcReel/ArcReel"><img src="https://img.shields.io/codecov/c/github/ArcReel/ArcReel?style=flat-square&label=coverage" alt="Coverage"></a>
-  <a href="https://hub.docker.com/r/arcreel/arcreel"><img src="https://img.shields.io/docker/pulls/arcreel/arcreel?style=flat-square&logo=docker&logoColor=white&label=docker%20pulls" alt="Docker"></a>
+  <a href="https://github.com/zhaomo08/shortreel/releases/latest"><img src="https://img.shields.io/github/v/release/zhaomo08/shortreel?style=flat-square&label=release" alt="Release"></a>
+  <a href="https://github.com/zhaomo08/shortreel/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/zhaomo08/shortreel/test.yml?style=flat-square&label=tests" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-2ea44f?style=flat-square" alt="License"></a>
-  <a href="https://github.com/ArcReel/ArcReel"><img src="https://img.shields.io/github/stars/ArcReel/ArcReel?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/zhaomo08/shortreel"><img src="https://img.shields.io/github/stars/zhaomo08/shortreel?style=flat-square" alt="Stars"></a>
 </p>
 
 <p align="center">
   <a href="#快速开始"><strong>快速开始</strong></a>
   ·
-  <a href="https://docs.arc-reel.com/guide/getting-started">入门教程</a>
+  <a href="#shortreel-改了什么">定制改动</a>
   ·
-  <a href="https://docs.arc-reel.com/">完整文档</a>
+  <a href="#google-flow-任务包往返">Google Flow 往返</a>
   ·
-  <a href="#交流群">加入社区</a>
+  <a href="#文档">文档</a>
 </p>
 
 <p align="center">
-  <img src="docs/assets/screenshots/hero.webp" alt="ArcReel 工作台" width="900">
+  <img src="docs/assets/screenshots/hero.webp" alt="shortreel 工作台" width="900">
 </p>
 
-## 赞助商
+> **品牌说明**：界面默认品牌仍为 ArcReel（`frontend/src/branding.ts` 默认值未改，可用 `VITE_BRAND_NAME` / `VITE_BRAND_TAGLINE` / `VITE_BRAND_DESCRIPTION` 在构建期覆盖）。本仓库的定制内容见下文，与上游同名不代表同一发行。
 
-> [想出现在这里？](mailto:support@arc-reel.com)
+## shortreel 改了什么
 
-<table>
-  <tr>
-    <td width="200" align="center" valign="top">
-      <a href="https://metaso.cn/minimax-h3/?s=arc"><img src="docs/assets/sponsors/metaso.png" alt="秘塔科技" width="180"></a>
-    </td>
-    <td valign="top">
-      <strong>MiniMax H3 视频生成 API｜秘塔科技</strong><br>
-      秘塔科技提供高性价比的 MiniMax H3 视频生成服务：<strong>768P 仅 0.09 元/秒，2K 仅 0.15 元/秒</strong>。支持原生 2K、音画同步，API 兼容 <strong>OpenAI 协议</strong>，同时支持 <strong>ComfyUI</strong>，无需自行部署 GPU。<br>
-      🎁 通过 <a href="https://metaso.cn/minimax-h3/?s=arc">ArcReel 专属链接注册</a>，即可领取赠送额度及专属优惠。
-    </td>
-  </tr>
-  <tr>
-    <td width="200" align="center" valign="top">
-      <a href="https://ofox.ai/?utm_source=github&utm_medium=sponsorship&utm_content=arcreel"><img src="docs/assets/sponsors/ofox-ai.svg" alt="OfoxAI" width="180"></a>
-    </td>
-    <td valign="top">
-      <strong>OfoxAI：脚本、图像与视频创作的模型 API</strong><br>
-      通过 OfoxAI 接入文本、图像和视频模型，为脚本打磨、角色与场景参考图、视频镜头素材选择合适的能力。具体模型的输入要求、支持参数及调用方式请查看 API 文档。<br>
-      <a href="https://ofox.ai/?utm_source=github&utm_medium=sponsorship&utm_content=arcreel">探索 OfoxAI 模型与 API →</a>
-    </td>
-  </tr>
-  <tr>
-    <td width="200" align="center" valign="top">
-      <a href="https://go.apimart.ai/tw-arcreel"><img src="docs/assets/sponsors/apimart.webp" alt="APIMart" width="180"></a>
-    </td>
-    <td valign="top">
-      <strong>APIMart：AI 图片/视频生成低价 API</strong><br>
-      感谢 APIMart 赞助了本项目！APIMart 是专注 AI 图片/视频生成的低价 API 平台，<strong>GPT-Image-2 低至 $0.006/张，1 美元可出图 160+ 张</strong>。图片、视频一套异步 API 通吃，提交任务拿 ID、回调取结果，跑批万张不超时、换模型不改代码。按量付费、无月费，通过<a href="https://go.apimart.ai/tw-arcreel">此注册链接</a>注册即可开用。
-    </td>
-  </tr>
-</table>
+相对上游 ArcReel 0.34.0，本 fork 的改动集中在四件事上；其余能力（生产链路、剪映导出、供应商体系）与上游一致。
+
+### Google Flow 任务包往返
+
+上游没有的工作流：用 Google Flow 的订阅额度出片，再把视频导回对应镜头。
+
+1. 在剧集页点**导出 Flow 任务包**，得到一个 zip：每个镜头一个 `序号_镜头ID` 目录，内含 `prompt.txt`（该镜头送视频模型的最终提示词，与执行路径同一渲染出口）、首帧/尾帧（分镜图生视频）或 `ref_N_*` 参考图（参考生视频，提示词里的 `@图片N` 对应 `ref_N`），另附 `manifest.json`、`prompts.md` 汇总与包内 `README.txt`。两种生成模式都支持；导出只读，不向供应商发请求、不产生费用、不写项目。
+2. 在 Google Flow 网页里按提示词出片。
+3. 回到剧集页点**导入 Flow 视频**，选择整个任务包目录：按目录名优先、文件名里的镜头 ID 其次匹配镜头；同一镜头多个视频取最后修改的那个，其余记为 superseded；正在生成的镜头跳过；对不上的视频会列出来。导入逐个走既有单镜头上传接口，版本记录、元数据回写与推送与手动上传一致，旧版本可在版本记录里恢复。
+
+### 成片语言可锁定
+
+- 新建项目时在向导第一步选成片语言：`auto`（跟随源文）、`zh`、`en`、`vi`，默认 `auto`。选定后概述生成不再用 LLM 识别出的源文语言覆盖它——中文梗概做英文片成为常态。
+- 需要默认值时的回退语言由中文改为英文：广告提示词默认语言、口播语速折算默认按英文（词/秒）而非中文（字/秒）、脏数据或缺失语言码的回退。另修了一个静默错误：此前语速表拿写进提示词的语言名（如 "English"）查 zh/en/vi 的表会查不中、静默回退中文语速，现改走语言码查表。
+
+### 四套配色
+
+上游的浅色 / 深色 / 跟随系统三档已替换为四套命名配色，挂在 `<html data-theme>` 上，只覆盖语义 token 取值：
+
+| 配色 | 样式 |
+|---|---|
+| 暗房 darkroom（默认） | 深色暖调 |
+| 定影 fixer | 深色冷调 |
+| 相纸 baryta | 浅色暖调 |
+| 银盐 silver | 浅色冷调 |
+
+切换入口在设置页「通用」→「配色」下拉，切换不触发组件重渲染。
+
+### OpenAI TTS 进入模型目录
+
+上游模型目录没有收录 OpenAI 的 TTS 模型，本 fork 在出厂快照与官方同步数据装入时补进三条：`gpt-4o-mini-tts`（默认音频模型）、`tts-1`、`tts-1-hd`，附估算定价约 $0.12 / $0.15 / $0.30 每万字符。补丁是幂等的、缺了才补，官方日后收录同名模型时以官方为准。音频后端实现本身是上游已有的代码，补的是注册、装配与目录收录三处接线。
+
+### 其他改动
+
+- **Agent 调用鲁棒性**：模型常在工具调用上附 `_` / `reason` / `rationale` 等说明键，而请求模型声明了 `extra="forbid"`，整个调用会被拒；现入口会剥掉这类说明键，未知键仍照常报错。另修了模型往资产条目里混进字符串说明导致整批资产被拒的问题，按值的形状剔掉字符串条目。
+- **部署（大陆网络）**：构建期可传 `--build-arg UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple` 走阿里 PyPI 镜像；运行时设 `UV_NO_SYNC=1`，不再同步依赖（否则每次启动都会联网安装依赖，PyPI 连不上时容器起不来）。`deploy/docker-compose.yml` 已改为从源码构建（上游镜像行已注释掉，前后端须同源）。
+- **CI**：工作流固定在 `ubuntu-24.04`（上游 `ubuntu-latest` 在 2026-10-19 至 2026-11-19 迁移到 Ubuntu 26.04）；删除了向上游 `ArcReel/skills` 仓库同步 `skills/` 的工作流。
+
+## shortreel 是什么
+
+面向 AI 漫剧与小说改编、旁白/解说短视频、广告与带货短片的开源自托管工作台。它把内容分析、资产管理、分镜、媒体生成、费用追踪和导出组织成一条可审核、可中断恢复的生产流水线。
+
+- **统一生产链路**：小说、成品剧本或商品素材都能逐步转化为角色、场景、道具、分镜、视频片段和最终成片。
+- **视觉一致、人工可控**：跨分镜复用资产图等参考图，关键阶段可确认，单个素材可重做，历史版本可回滚。
+- **模型与成本可管理**：统一配置文本、图像、视频和 TTS 能力，并在生成前后查看费用与实际用量。
+- **交付可继续编辑**：既可直接合成视频，也可导出剪映草稿继续调整字幕、配音、节奏和转场。导出面向中国大陆版剪映，与 CapCut 的兼容性尚未验证。
+
+## 从输入到成片
+
+```mermaid
+flowchart LR
+    A["小说 / 成品剧本 / 商品素材"] --> B["内容分析与项目规划"]
+    B --> C["角色 / 场景 / 道具资产"]
+    C --> D["分集与结构化剧本"]
+    D --> E["分镜图 / 多宫格分镜"]
+    E --> F["视频片段 / 旁白音轨"]
+    F --> G["成片合成"]
+    F --> H["剪映草稿导出"]
+```
+
+每个阶段都可以由 Agent（智能体）编排，也可以由用户在工作台中审核、调整或重新生成。详细模式选择见 [创作流程与模式](https://docs.arc-reel.com/guide/workflows)（上游文档，描述与本 fork 共享的核心流程）。
 
 ## 界面一览
 
@@ -113,37 +141,13 @@
 
 > 《入职地府后投诉鬼都是我老客户》第 3 集
 
-## ArcReel 是什么
-
-ArcReel 是面向 AI 漫剧与小说改编、旁白/解说短视频、广告与带货短片的开源自托管工作台。它把内容分析、资产管理、分镜、媒体生成、费用追踪和导出组织成一条可审核、可中断恢复的生产流水线。
-
-- **统一生产链路**：小说、成品剧本或商品素材都能逐步转化为角色、场景、道具、分镜、视频片段和最终成片。
-- **视觉一致、人工可控**：跨分镜复用资产图等参考图，关键阶段可确认，单个素材可重做，历史版本可回滚。
-- **模型与成本可管理**：统一配置文本、图像、视频和 TTS 能力，并在生成前后查看费用与实际用量。
-- **交付可继续编辑**：既可直接合成视频，也可导出剪映草稿继续调整字幕、配音、节奏和转场。导出面向中国大陆版剪映，与 CapCut 的兼容性尚未验证。
-
-## 从输入到成片
-
-```mermaid
-flowchart LR
-    A["小说 / 成品剧本 / 商品素材"] --> B["内容分析与项目规划"]
-    B --> C["角色 / 场景 / 道具资产"]
-    C --> D["分集与结构化剧本"]
-    D --> E["分镜图 / 多宫格分镜"]
-    E --> F["视频片段 / 旁白音轨"]
-    F --> G["成片合成"]
-    F --> H["剪映草稿导出"]
-```
-
-每个阶段都可以由 Agent（智能体）编排，也可以由用户在工作台中审核、调整或重新生成。详细模式选择见 [创作流程与模式](https://docs.arc-reel.com/guide/workflows)。
-
 ## 快速开始
 
 准备好 Docker 和 Docker Compose，然后运行：
 
 ```bash
-git clone https://github.com/ArcReel/ArcReel.git
-cd ArcReel/deploy
+git clone https://github.com/zhaomo08/shortreel.git
+cd shortreel/deploy
 
 cp .env.example .env
 docker compose up -d
@@ -151,36 +155,36 @@ docker compose up -d
 
 访问 <http://localhost:1241>。默认用户名为 `admin`；`AUTH_PASSWORD` 留空时，首次启动会自动生成密码并回写到 `deploy/.env`。
 
-> 默认 Compose 会将 `1241` 端口发布到宿主机所有网络接口。请勿将服务直接暴露到公网；远程访问前请配置认证，并使用 HTTPS、VPN 或安全隧道，详见 [反向代理与 HTTPS](https://docs.arc-reel.com/ops/deployment#reverse-proxy-and-https)。
+> 本 fork 从源码构建镜像，首次启动需要构建前后端，比直接拉镜像慢。默认 Compose 会将 `1241` 端口发布到宿主机所有网络接口。请勿将服务直接暴露到公网；远程访问前请配置认证，并使用 HTTPS、VPN 或安全隧道，详见 [反向代理与 HTTPS](https://docs.arc-reel.com/ops/deployment#reverse-proxy-and-https)。
 
-登录后进入 **设置** 页面，配置 ArcReel Agent 以及文本、图像、视频等生成能力，再创建项目开始制作。
+大陆网络构建时可用阿里 PyPI 镜像：
 
-完整的首次使用流程见 [完整入门教程](https://docs.arc-reel.com/guide/getting-started)；生产部署、升级、备份和反向代理见 [部署与运维](https://docs.arc-reel.com/ops/deployment)。
+```bash
+docker compose build --build-arg UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
+```
+
+登录后进入 **设置** 页面，配置 Agent 以及文本、图像、视频等生成能力，再创建项目开始制作。新建项目时记得在向导第一步选成片语言。
+
+完整的首次使用流程见 [完整入门教程](https://docs.arc-reel.com/guide/getting-started)；生产部署、升级、备份和反向代理见 [部署与运维](https://docs.arc-reel.com/ops/deployment)。以上两处是上游文档，描述与本 fork 共享的核心流程；本 fork 独有的功能（Flow 往返、语言锁定、四套配色、OpenAI TTS）见本 README 的 [shortreel 改了什么](#shortreel-改了什么)。
 
 ## 文档
 
 | 页面 | 内容 |
 |---|---|
-| [文档首页](https://docs.arc-reel.com/) | 按使用者、运维者和开发者进入文档 |
+| [文档首页](https://docs.arc-reel.com/) | 按使用者、运维者和开发者进入文档（上游文档站） |
 | [完整入门教程](https://docs.arc-reel.com/guide/getting-started) | 从首次部署到生成第一条视频 |
 | [创作流程与模式](https://docs.arc-reel.com/guide/workflows) | 小说、剧本与创作构想，三种创作类型及两种生成模式 |
 | [供应商与模型配置](https://docs.arc-reel.com/guide/providers) | Agent、文本、图像、视频、TTS 供应商的选择和配置 |
-| [剪映草稿导出](https://docs.arc-reel.com/guide/jianying-export) | 将 ArcReel 生成结果交给剪映继续编辑 |
+| [剪映草稿导出](https://docs.arc-reel.com/guide/jianying-export) | 将生成结果交给剪映继续编辑 |
 | [常见问题](https://docs.arc-reel.com/guide/faq) | 部署、费用、模型、数据和许可证问题 |
 | [部署与运维](https://docs.arc-reel.com/ops/deployment) | SQLite、PostgreSQL、升级、备份和反向代理 |
 | [从 SQLite 迁移到 PostgreSQL](https://docs.arc-reel.com/ops/migrate-to-postgres) | 数据迁移、验证与回滚流程 |
 | [架构说明](https://docs.arc-reel.com/dev/architecture) | Agent Runtime、任务队列、供应商抽象和数据层 |
 | [贡献指南](https://docs.arc-reel.com/dev/contributing) | 本地开发、测试、代码规范和 PR 流程 |
 
-## 交流群
+## 反馈
 
-扫码加入飞书交流群，获取使用帮助、版本动态和创作经验：
-
-<p align="center">
-  <img src="docs/assets/feishu-qr.png" alt="ArcReel 飞书交流群二维码" width="280">
-</p>
-
-遇到可以复现的 Bug 或明确的功能需求，也可以直接提交 [GitHub Issue](https://github.com/ArcReel/ArcReel/issues)。
+遇到可以复现的 Bug 或明确的功能需求，直接提交 [GitHub Issue](https://github.com/zhaomo08/shortreel/issues)。上游 ArcReel 的交流群、赞助商与商务联系方式不适用于本 fork。
 
 ## 贡献
 
@@ -194,26 +198,20 @@ uv run pre-commit install
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=arcreel%2Farcreel&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=zhaomo08%2Fshortreel&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=arcreel/arcreel&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=arcreel/arcreel&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=arcreel/arcreel&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=zhaomo08/shortreel&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=zhaomo08/shortreel&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=zhaomo08/shortreel&type=date&legend=top-left" />
  </picture>
 </a>
 
-## 许可证与商业使用
+## 许可证
 
-ArcReel 采用 [GNU Affero General Public License v3.0](LICENSE)，附加条款见 [NOTICE](NOTICE)。
-
-如果你的组织无法采用 AGPL-3.0，或者希望在不承担 AGPL 开源义务的情况下进行商业部署、白标或再分发，请联系：
-
-**support@arc-reel.com**
-
-Copyright © 2026 Pollo3470 and ArcReel contributors
+shortreel 基于上游 ArcReel，采用 [GNU Affero General Public License v3.0](LICENSE)，附加条款见 [NOTICE](NOTICE)。上游版权归 ArcReel contributors 所有；本 fork 的改动部分同样遵循 AGPL-3.0。
 
 ---
 
 <p align="center">
-  如果 ArcReel 对你有帮助，欢迎点亮一个 ⭐ Star。
+  如果 shortreel 对你有帮助，欢迎点亮一个 ⭐ Star。
 </p>
