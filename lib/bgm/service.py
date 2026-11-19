@@ -31,6 +31,7 @@ from lib.bgm.library import (
     read_bgm_library,
 )
 from lib.bgm.loudness import LoudnessMeasurementError, measure_integrated_loudness
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.content_digest import sha256_file
 from lib.infra.ffmpeg import FfmpegUnavailableError, ffmpeg_executable
 from lib.infra.media_probe import MediaProbeError, probe_media
@@ -79,13 +80,16 @@ class BgmLibraryService:
 
     async def list(self, project_name: str) -> tuple[BgmTrack, ...]:
         """项目里已上传的 BGM，按上传先后排列。"""
-        self._project_dir(project_name)
-        project = await asyncio.to_thread(self._projects.load_project, project_name)
+        project = await asyncio.to_thread(self._load_project, project_name)
         return tuple(read_bgm_library(project).values())
+
+    def _load_project(self, project_name: str) -> dict[str, Any]:
+        self._project_dir(project_name)
+        return self._projects.load_project(project_name)
 
     async def upload(self, project_name: str, *, filename: str, content: bytes) -> BgmTrack:
         """登记一首 BGM：校验格式与大小，探测时长，实测积分响度并折算增益，原子落盘并按字节登记。"""
-        project_dir = self._project_dir(project_name)
+        project_dir = await asyncio.to_thread(self._project_dir, project_name)
         extension = Path(filename).suffix.lower()
         if extension not in BGM_EXTENSIONS:
             raise BgmError(
@@ -105,7 +109,7 @@ class BgmLibraryService:
         staged = bgm_dir / f".{bgm_id}.{secrets.token_hex(4)}.upload{extension}"
         await asyncio.to_thread(bgm_dir.mkdir, exist_ok=True)
         try:
-            await asyncio.to_thread(staged.write_bytes, content)
+            await run_sync_transaction(staged.write_bytes, content)
             duration_us = await self._duration_us(staged)
             integrated = await self._loudness(ffmpeg, staged, duration_us)
             track = BgmTrack(
@@ -118,7 +122,7 @@ class BgmLibraryService:
                 content_digest=await asyncio.to_thread(sha256_file, staged),
                 uploaded_at=_utc_now(),
             )
-            await asyncio.to_thread(self._commit, project_name, project_dir, staged, track)
+            await run_sync_transaction(self._commit, project_name, project_dir, staged, track)
         finally:
             await asyncio.to_thread(staged.unlink, missing_ok=True)
         return track

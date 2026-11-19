@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from lib.artifacts.version_manager import VersionManager
 from lib.backends.audio_backends.base import AudioCapability, AudioSynthesisResult
+from lib.billing.metering import Usage
 from lib.db.base import Base
 from lib.db.models.api_call import ApiCall
 from lib.db.repositories.usage_repo import SettlementInput, UsageRepository
@@ -22,7 +23,7 @@ from lib.generation.media_generator import MediaGenerator
 from lib.project.data_validator import DataValidator
 from lib.project.resource_paths import RESOURCE_TYPES, resource_extension, resource_relative_path
 from lib.script.script_models import GeneratedAssets
-from tests.fakes import refuse_resume_execution
+from tests.fakes import refuse_resume_execution, write_backend_output
 
 
 async def _refuse_generation_execution(task: dict[str, Any], *, claimed_provider_id: str) -> dict[str, Any]:
@@ -87,10 +88,9 @@ class _FakeAudioBackend:
 
     async def synthesize(self, request):
         self.calls.append(request)
-        request.output_path.parent.mkdir(parents=True, exist_ok=True)
-        request.output_path.write_bytes(b"RIFFfakewav")
+        await write_backend_output(request.output_path, b"RIFFfakewav")
         return AudioSynthesisResult(
-            provider=self.name, model=self.model, characters=len(request.text), output_path=request.output_path
+            provider=self.name, model=self.model, text=request.text, output_path=request.output_path
         )
 
 
@@ -200,11 +200,11 @@ class TestGenerateAudioAsync:
         assert gen._audio_backend.calls[0].output_path != output_path
         assert not gen._audio_backend.calls[0].output_path.exists()
         assert version == 1
-        # 记账括号用 call_type=audio；合成字符数由真 Ledger union 分发从 result.characters 转写
+        # 记账括号用 call_type=audio；backend 上报原始文本，由真 Ledger union 分发转成计量用量
         assert gen.ledger.started[0]["call_type"] == "audio"
         assert gen.ledger.started[0]["model"] == "tts-model"
         assert gen.ledger.outcomes[0]["status"] == "success"
-        assert gen.ledger.outcomes[0]["result"].characters == len("你好世界")
+        assert gen.ledger.outcomes[0]["result"].text == "你好世界"
         assert gen.versions.add_calls[0]["resource_type"] == "audio"
 
     async def test_before_submit_failure_prevents_audio_backend_call(self, tmp_path: Path):
@@ -242,7 +242,7 @@ class TestGenerateAudioAsync:
         formal.write_bytes(b"paid-old-audio")
 
         async def _overwrite_then_raise(request):
-            request.output_path.write_bytes(b"broken-new-audio")
+            await write_backend_output(request.output_path, b"broken-new-audio")
             raise RuntimeError("boom")
 
         gen._audio_backend.synthesize = _overwrite_then_raise
@@ -261,7 +261,7 @@ class TestGenerateAudioAsync:
         formal.write_bytes(b"paid-old-audio")
 
         async def _overwrite_then_cancel(request):
-            request.output_path.write_bytes(b"cancelled-new-audio")
+            await write_backend_output(request.output_path, b"cancelled-new-audio")
             raise asyncio.CancelledError
 
         gen._audio_backend.synthesize = _overwrite_then_cancel
@@ -374,11 +374,16 @@ class TestAudioCallSettlement:
                 call_id = await repo.start_call(
                     project_name="demo", call_type="audio", model="qwen3-tts-flash", provider="dashscope"
                 )
-                await repo.finish_call(call_id, status="success", settlement=SettlementInput(usage_tokens=1500))
+                await repo.finish_call(
+                    call_id,
+                    status="success",
+                    settlement=SettlementInput(usage_tokens=1500, usage=(Usage(text="念" * 1500),)),
+                )
                 stored = (await session.execute(select(ApiCall))).scalars().all()
                 assert [row.call_type for row in stored] == ["audio"]
                 # audio 按字符冻结费用（非 0）
                 assert stored[0].currency == "CNY"
+                assert stored[0].cost_amount is not None
                 assert stored[0].cost_amount > 0
         finally:
             await engine.dispose()
@@ -454,7 +459,7 @@ class TestWorkerAudioLane:
             resume_executor=refuse_resume_execution,
         )
 
-        async def _fake_process(task):
+        async def _fake_process(task, *, claimed_provider_id):
             await asyncio.sleep(0)
 
         w._process_task = _fake_process

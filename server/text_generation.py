@@ -25,6 +25,7 @@ from lib.backends.providers import CallPurpose
 from lib.backends.text_backends.base import DEFAULT_MAX_OUTPUT_TOKENS, TextOutputTruncatedError, TextTaskType
 from lib.backends.text_backends.base import TextGenerationRequest as BackendTextGenerationRequest
 from lib.backends.text_generator import TextGenerator
+from lib.catalog.errors import ModelNotInCatalogError
 from lib.config.resolver import ConfigResolver
 from lib.episode.episode_ids import describe_episode_for_agent
 from lib.episode.episode_paths import (
@@ -247,6 +248,19 @@ def _assert_draft_revision(path: Path, expected: str | None) -> None:
         )
 
 
+def _after_draft_revision_check[**P, T](
+    draft_path: Path,
+    expected: str | None,
+    func: Callable[P, T],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """草稿修订校验与随后的写入放进同一次线程调用，二者之间不让出事件循环。"""
+    _assert_draft_revision(draft_path, expected)
+    return func(*args, **kwargs)
+
+
 def _quarantine_formal_generation_conflict(
     project_path: Path,
     episode: int,
@@ -301,7 +315,7 @@ def _commit_generated_reference_script_plan(
         clear_quarantine(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
 
 
-def _commit_single_script_plan(
+def commit_single_script_plan(
     project_path: Path,
     episode: int,
     script_plan_path: Path,
@@ -472,7 +486,7 @@ def load_novel_source(project_path: Path, source: str | None, *, episode: int) -
     return novel_text
 
 
-def _load_script_plan_source_with_basis(
+def load_script_plan_source_with_basis(
     project_path: Path,
     source: str | None,
     project: dict[str, Any],
@@ -641,6 +655,14 @@ def script_plan_preflight(project_path: Path, project: Mapping[str, Any], episod
     )
 
 
+def _load_project_context(projects: ProjectManager, project_name: str) -> tuple[Path, dict[str, Any]]:
+    return projects.get_project_path(project_name), projects.load_project(project_name)
+
+
+def _formal_script_exists(project_path: Path, project: dict[str, Any], episode: int) -> bool:
+    return (project_path / "scripts" / script_review.formal_script_filename(project_path, project, episode)).exists()
+
+
 async def generate_episode_script(
     request: TextGenerationRequest,
     *,
@@ -650,7 +672,7 @@ async def generate_episode_script(
 ) -> TextGenerationResult:
     episode = request.episode
     instructions = _instructions(request.instructions)
-    project_path = projects.get_project_path(project_name)
+    project_path = await asyncio.to_thread(projects.get_project_path, project_name)
     await asyncio.to_thread(
         prompt_authoring_preflight,
         project_path,
@@ -678,13 +700,7 @@ async def generate_episode_script(
             config_resolver=config_resolver,
         )
         # 正式剧本已存在时只编写条目；ad 项目尚无正式剧本才整份生成。
-        formal_existed = await asyncio.to_thread(
-            (
-                project_path
-                / "scripts"
-                / script_review.formal_script_filename(project_path, generator.project_json, episode)
-            ).exists
-        )
+        formal_existed = await asyncio.to_thread(_formal_script_exists, project_path, generator.project_json, episode)
         rewritten: list[str] = []
         skipped: list[str] = []
         registered: list[dict[str, str]] = []
@@ -701,15 +717,15 @@ async def generate_episode_script(
         )
     except AdScriptRejected as exc:
         raise AdScriptRejectedError(
-            f"❌ {_describe(projects, project_name, episode)} 的 AI 生成脚本不合规，本次未写入正式脚本、未登记资产：\n"
+            f"❌ {await _describe(projects, project_name, episode)} 的 AI 生成脚本不合规，本次未写入正式脚本、未登记资产：\n"
             + "\n".join(f"   - {problem}" for problem in exc.problems)
             + "\n   可以带上针对这些问题的附加指令重新生成。",
             exc.problems,
         ) from exc
     except AdScriptOverwriteRequired as exc:
-        raise _ad_overwrite_error(_describe(projects, project_name, episode), exc.overwrite) from exc
+        raise _ad_overwrite_error(await _describe(projects, project_name, episode), exc.overwrite) from exc
     except PromptOverwriteRequired as exc:
-        raise _prompt_overwrite_error(_describe(projects, project_name, episode), exc) from exc
+        raise _prompt_overwrite_error(await _describe(projects, project_name, episode), exc) from exc
     except PromptAuthoringTargetError as exc:
         # 点名的条目不在正式剧本内是调用方的错：报「拒绝生成」而不是让它冒成 internal_error，
         # 后者会引导 Agent 原样重试同一份必然失败的参数。
@@ -769,8 +785,8 @@ def _unbound_mentions_note(warnings: Sequence[Mapping[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _describe(projects: ProjectManager, project_name: str, episode: int) -> str:
-    return describe_episode_for_agent(projects.load_project(project_name), episode)
+async def _describe(projects: ProjectManager, project_name: str, episode: int) -> str:
+    return describe_episode_for_agent(await asyncio.to_thread(projects.load_project, project_name), episode)
 
 
 async def confirm_script_review(
@@ -792,7 +808,7 @@ async def confirm_script_review(
             overwrite = script_review.overwrite_with_text(exc.overwrite, translate)
             loss_text = overwrite["text"] if overwrite is not None else ""
             raise ScriptOverwriteRequiredError(
-                f"⚠️ {_describe(projects, project_name, episode)} 需要用户确认覆盖，本次未写入。\n{loss_text}\n"
+                f"⚠️ {await _describe(projects, project_name, episode)} 需要用户确认覆盖，本次未写入。\n{loss_text}\n"
                 "须先把上面的丢失清单原文转述给用户，得到明确同意后，再以 "
                 "overwrite_revision=params.script_overwrite.revision 重新确认；"
                 "正式脚本在此期间又有变化时会按新清单再次拒绝。",
@@ -802,7 +818,7 @@ async def confirm_script_review(
             raise VideoRequestFactsUnavailableError(exc.problem) from exc
         raise TextGenerationError(f"❌ 无法完成 script_plan 内容确认（{exc.code}）：{exc.message or exc.code}") from exc
     return TextGenerationResult(
-        f"✅ {_describe(projects, project_name, episode)} 的 script_plan 已确认并整份转为正式脚本，全部分镜待编写，"
+        f"✅ {await _describe(projects, project_name, episode)} 的 script_plan 已确认并整份转为正式脚本，全部分镜待编写，"
         f"prompt_authoring 视觉生成已放行（status={state['status']}）"
     )
 
@@ -842,7 +858,7 @@ def _unregistered_reference_violations(
     return violations
 
 
-def _collect_drama_violations(
+def collect_drama_violations(
     scenes: list[Any], *, project: Mapping[str, Any], new_assets: object
 ) -> list[DraftViolation]:
     """drama script_plan 的资产违约：引用须已登记或在本次新增项中，新增项的处理决定须解析得出。"""
@@ -876,11 +892,10 @@ async def generate_drama_script_plan(
 ) -> TextGenerationResult:
     episode = request.episode
     instructions = _instructions(request.instructions)
-    project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project, project_name)
+    project_path, project = await asyncio.to_thread(_load_project_context, projects, project_name)
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
-            _load_script_plan_source_with_basis,
+            load_script_plan_source_with_basis,
             project_path,
             request.source,
             project,
@@ -921,7 +936,9 @@ async def generate_drama_script_plan(
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_DRAMA_SCRIPT_PLAN)
         script_plan_path = episode_drafts_dir(project_path, episode) / SCRIPT_PLAN_FILENAMES["drama"]
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
+        # 构造 ProjectManager 会建目录，放到线程里。
+        draft_locks = await asyncio.to_thread(ProjectManager.for_project_dir, project_path)
+        async with draft_locks.async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -951,11 +968,13 @@ async def generate_drama_script_plan(
                 scene["needs_replan"] = True
         content = with_new_assets(content, content[NEW_ASSETS_FIELD])
 
-        violations = _collect_drama_violations(raw_scenes, project=project, new_assets=content.get(NEW_ASSETS_FIELD))
+        violations = collect_drama_violations(raw_scenes, project=project, new_assets=content.get(NEW_ASSETS_FIELD))
         if violations:
-            async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-                _assert_draft_revision(draft_path, draft_baseline)
+            async with draft_locks.async_file_lock(draft_path):
                 report = await run_sync_transaction(
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
                     _quarantine_invalid_script_plan_generation,
                     project_path,
                     episode,
@@ -967,11 +986,13 @@ async def generate_drama_script_plan(
                 )
             raise TextGenerationError(report)
 
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-            _assert_draft_revision(draft_path, draft_baseline)
+        async with draft_locks.async_file_lock(draft_path):
             try:
                 await run_sync_transaction(
-                    _commit_single_script_plan,
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
+                    commit_single_script_plan,
                     project_path,
                     episode,
                     script_plan_path,
@@ -982,7 +1003,8 @@ async def generate_drama_script_plan(
                 )
             except script_review.ScriptPlanWriteConflict as exc:
                 raise TextGenerationError(
-                    _quarantine_formal_generation_conflict(
+                    await run_sync_transaction(
+                        _quarantine_formal_generation_conflict,
                         project_path,
                         episode,
                         QUARANTINE_KIND_DRAMA_SCRIPT_PLAN,
@@ -993,8 +1015,8 @@ async def generate_drama_script_plan(
                     )
                 ) from exc
 
-        return TextGenerationResult(_drama_script_plan_result_text(script_plan_path, raw_scenes, action="生成"))
-    except (TextGenerationError, TextOutputTruncatedError):
+        return TextGenerationResult(drama_script_plan_result_text(script_plan_path, raw_scenes, action="生成"))
+    except (TextGenerationError, TextOutputTruncatedError, ModelNotInCatalogError):
         raise
     except VideoRequestFactsError as exc:
         raise VideoRequestFactsUnavailableError(exc.failure) from exc
@@ -1034,7 +1056,7 @@ class ReferenceSplitCaps(NamedTuple):
         return self.reference_durations if has_references else self.text_durations
 
 
-async def _fetch_reference_split_caps(
+async def fetch_reference_split_caps(
     project: dict[str, Any],
     *,
     config_resolver: ConfigResolver | None = None,
@@ -1048,7 +1070,7 @@ async def _fetch_reference_split_caps(
     收窄逐 unit 分两套：「参考图↔时长」约束只对真的带参考图的请求生效，整集一律按带图收窄会把无
     引用 unit 本可申请的短档也收掉。schema 枚举与 prompt 候选取两套的并集——落在任一套内的时长都
     可能合法，具体归属由该 unit 正文提及且此刻可用的参考图决定，在正文解析之后逐 unit 判（见
-    ``_collect_reference_flat_violations``）。``max_duration`` 随之是并集的最大值。
+    ``collect_reference_flat_violations``）。``max_duration`` 随之是并集的最大值。
 
     r2v 桶（本路线的主桶）解析不出即抛 :class:`VideoRequestFactsError`，不回退到任何档位；i2v 桶
     解析不出时无图档位为空、失败原样带在 ``text_problem`` 里，落 i2v 的 unit 逐条报违约。
@@ -1123,7 +1145,7 @@ def _reference_unit_label(episode: int, index: int) -> str:
     return f"unit {_reference_unit_id(episode, index)}"
 
 
-def _collect_reference_flat_violations(
+def collect_reference_flat_violations(
     flat_units: list[dict[str, Any]],
     project: dict[str, Any],
     *,
@@ -1183,7 +1205,7 @@ def _collect_reference_flat_violations(
     return violations
 
 
-def _build_reference_units_from_flat(
+def build_reference_units_from_flat(
     flat_units: list[dict[str, Any]],
     project: dict[str, Any],
     *,
@@ -1194,7 +1216,7 @@ def _build_reference_units_from_flat(
 
     LLM 只写内容，机器写结构：``unit_id`` 按数组序号编号，正文原样落盘。参考图不落盘——
     执行期再按正文 ``@[名称]`` 的首现顺序解析。调用方须先经
-    ``_collect_reference_flat_violations`` 确认无违约；此处仍复判一次正文，让「校验看到的
+    ``collect_reference_flat_violations`` 确认无违约；此处仍复判一次正文，让「校验看到的
     文本」与「落盘的正文」出自同一次解析。
     """
     units: list[dict] = []
@@ -1353,14 +1375,14 @@ def render_soft_violation_section(soft_violations: list[str], *, note: str) -> s
     return f"\n⚠️ 降级提示（不阻断，{note}）:\n" + "\n".join(f"- {line}" for line in soft_violations)
 
 
-def _drama_script_plan_result_text(script_plan_path: Path, scenes: list[dict], *, action: str) -> str:
+def drama_script_plan_result_text(script_plan_path: Path, scenes: list[dict], *, action: str) -> str:
     """drama script_plan 的落盘回执。``action`` 是「生成」/「晋升」——两条路的统计段同一出口，
     只在动作词上分叉，Agent 因此按同一种格式读产出与晋升两次结果。
     """
     return f"✅ 规范化剧本{action}（结构化内容）已保存: {script_plan_path}\n📊 生成统计: {len(scenes)} 个分镜"
 
 
-def _narration_script_plan_result_text(script_plan_path: Path, segments: list[dict], *, action: str) -> str:
+def narration_script_plan_result_text(script_plan_path: Path, segments: list[dict], *, action: str) -> str:
     """narration script_plan 的落盘回执；``action`` 取「拆分」/「晋升」，理由同 drama 侧。"""
     total_chars = sum(len(str(segment.get("novel_text") or "")) for segment in segments)
     total_seconds = sum(int(segment.get("duration_seconds") or 0) for segment in segments)
@@ -1372,9 +1394,7 @@ def _narration_script_plan_result_text(script_plan_path: Path, segments: list[di
     )
 
 
-def _reference_result_text(
-    script_plan_path: Path, units: list[dict], soft_violations: list[str], *, action: str
-) -> str:
+def reference_result_text(script_plan_path: Path, units: list[dict], soft_violations: list[str], *, action: str) -> str:
     """晋升 / 拆分成功后回给 Agent 的摘要：落盘统计 + 软违约段。
 
     ``action`` 点明这份正式 script_plan 是重新拆分还是草稿晋升来的：两条路都写同一个文件，摘要不分
@@ -1394,7 +1414,7 @@ def _reference_result_text(
     return text + render_soft_violation_section(soft_violations, note=SOFT_VIOLATION_NOTE_COMMITTED)
 
 
-def _narration_script_plan_path(project_path: Path, episode: int) -> Path:
+def narration_script_plan_path(project_path: Path, episode: int) -> Path:
     """该集正式 narration script_plan 的路径（``drafts/episode_N/script_plan_segments.json``）。"""
     return episode_drafts_dir(project_path, episode) / SCRIPT_PLAN_FILENAMES["narration"]
 
@@ -1426,7 +1446,7 @@ def _normalize_for_coverage(text: str) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
 
 
-def _coverage_source_scope(source: str | None, *, episode: int) -> str:
+def coverage_source_scope(source: str | None, *, episode: int) -> str:
     """覆盖判定所依据的源文范围的人话描述，供违约消息指名。
 
     覆盖判定是「分镜拼接 == 整份源文」的全等式，判定结果因此既取决于分镜正文、也取决于源文
@@ -1456,7 +1476,7 @@ def _covers_source_verbatim(parts: list[str], source: str) -> bool:
     return cursor == len(source)
 
 
-def _collect_narration_violations(
+def collect_narration_violations(
     segments: list[dict[str, Any]],
     *,
     episode: int,
@@ -1478,7 +1498,7 @@ def _collect_narration_violations(
     抛的是内容违约而非 ``ValueError``：这些都是 Agent 改一改草稿就能修好的，走草稿的修复
     闭环，不该退回丢弃重抽。
 
-    ``source_scope`` 是 ``novel_text`` 那份文本的来源描述（见 :func:`_coverage_source_scope`），
+    ``source_scope`` 是 ``novel_text`` 那份文本的来源描述（见 :func:`coverage_source_scope`），
     只落进覆盖违约的消息里：覆盖判定同时取决于源文范围，范围本身不写出来就没法从报告里判断
     该改分镜还是该改范围。
     """
@@ -1589,12 +1609,11 @@ async def generate_reference_script_plan(
 ) -> TextGenerationResult:
     episode = request.episode
     instructions = _instructions(request.instructions)
-    project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project, project_name)
+    project_path, project = await asyncio.to_thread(_load_project_context, projects, project_name)
 
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
-            _load_script_plan_source_with_basis,
+            load_script_plan_source_with_basis,
             project_path,
             request.source,
             project,
@@ -1608,7 +1627,7 @@ async def generate_reference_script_plan(
         characters = cast(dict[str, Any], prompt_inputs["characters"])
         scenes = cast(dict[str, Any], prompt_inputs["scenes"])
         props = cast(dict[str, Any], prompt_inputs["props"])
-        split_caps = await _fetch_reference_split_caps(project, config_resolver=config_resolver)
+        split_caps = await fetch_reference_split_caps(project, config_resolver=config_resolver)
         prompt = build_reference_units_split_prompt(
             novel_text=novel_text,
             project_overview=cast(dict[str, Any], prompt_inputs["project_overview"]),
@@ -1639,7 +1658,9 @@ async def generate_reference_script_plan(
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_SCRIPT_PLAN)
         formal_script_plan_path = script_review.official_reference_script_plan_path(project_path, episode)
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
+        # 构造 ProjectManager 会建目录，放到线程里。
+        draft_locks = await asyncio.to_thread(ProjectManager.for_project_dir, project_path)
+        async with draft_locks.async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -1663,7 +1684,8 @@ async def generate_reference_script_plan(
             raise ValueError("script_plan 拆分内容结构异常：units 必须是非空的 unit 对象数组")
         new_assets = dedupe_new_assets(flat[NEW_ASSETS_FIELD])
 
-        violations = _collect_reference_flat_violations(
+        violations = await asyncio.to_thread(
+            collect_reference_flat_violations,
             flat_units,
             project,
             project_path=project_path,
@@ -1677,9 +1699,11 @@ async def generate_reference_script_plan(
         unit_texts = [flat_unit["text"] for flat_unit in flat_units]
         soft_violations = _reference_soft_violation_lines(unit_texts, planning, episode=episode, voice=split_caps.voice)
         if violations:
-            async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-                _assert_draft_revision(draft_path, draft_baseline)
+            async with draft_locks.async_file_lock(draft_path):
                 report = await run_sync_transaction(
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
                     _quarantine_invalid_script_plan_generation,
                     project_path,
                     episode,
@@ -1695,16 +1719,18 @@ async def generate_reference_script_plan(
                 report + render_soft_violation_section(soft_violations, note=SOFT_VIOLATION_NOTE_QUARANTINED)
             )
 
-        raw_units = _build_reference_units_from_flat(
+        raw_units = build_reference_units_from_flat(
             flat_units,
             planning,
             episode=episode,
             max_refs=split_caps.max_refs,
         )
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-            _assert_draft_revision(draft_path, draft_baseline)
+        async with draft_locks.async_file_lock(draft_path):
             try:
                 await run_sync_transaction(
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
                     _commit_generated_reference_script_plan,
                     project_path,
                     episode,
@@ -1715,7 +1741,8 @@ async def generate_reference_script_plan(
                 )
             except script_review.ScriptPlanWriteConflict as exc:
                 raise TextGenerationError(
-                    _quarantine_formal_generation_conflict(
+                    await run_sync_transaction(
+                        _quarantine_formal_generation_conflict,
                         project_path,
                         episode,
                         QUARANTINE_KIND_SCRIPT_PLAN,
@@ -1726,14 +1753,14 @@ async def generate_reference_script_plan(
                     )
                 ) from exc
         return TextGenerationResult(
-            _reference_result_text(
+            reference_result_text(
                 script_review.official_reference_script_plan_path(project_path, episode),
                 raw_units,
                 soft_violations,
                 action="拆分",
             )
         )
-    except (TextGenerationError, TextOutputTruncatedError):
+    except (TextGenerationError, TextOutputTruncatedError, ModelNotInCatalogError):
         raise
     except VideoRequestFactsError as exc:
         raise VideoRequestFactsUnavailableError(exc.failure) from exc
@@ -1750,12 +1777,11 @@ async def generate_narration_script_plan(
 ) -> TextGenerationResult:
     episode = request.episode
     instructions = _instructions(request.instructions)
-    project_path = projects.get_project_path(project_name)
-    project = await asyncio.to_thread(projects.load_project, project_name)
+    project_path, project = await asyncio.to_thread(_load_project_context, projects, project_name)
 
     try:
         novel_text, prompt_inputs, script_plan_basis = await asyncio.to_thread(
-            _load_script_plan_source_with_basis,
+            load_script_plan_source_with_basis,
             project_path,
             request.source,
             project,
@@ -1792,8 +1818,10 @@ async def generate_narration_script_plan(
             )
 
         draft_path = quarantine_path(project_path, episode, QUARANTINE_KIND_NARRATION_SCRIPT_PLAN)
-        script_plan_path = _narration_script_plan_path(project_path, episode)
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
+        script_plan_path = narration_script_plan_path(project_path, episode)
+        # 构造 ProjectManager 会建目录，放到线程里。
+        draft_locks = await asyncio.to_thread(ProjectManager.for_project_dir, project_path)
+        async with draft_locks.async_file_lock(draft_path):
             draft_baseline, formal_baseline = await asyncio.to_thread(
                 _generation_baselines,
                 draft_path,
@@ -1821,19 +1849,21 @@ async def generate_narration_script_plan(
             raise ValueError("script_plan 拆分内容结构异常：segments 必须是非空的分镜对象数组")
         content = with_new_assets(content, content[NEW_ASSETS_FIELD])
 
-        violations = _collect_narration_violations(
+        violations = collect_narration_violations(
             raw_segments,
             episode=episode,
             supported_durations=supported_durations,
             project=project,
             new_assets=content.get(NEW_ASSETS_FIELD),
             novel_text=novel_text,
-            source_scope=_coverage_source_scope(request.source, episode=episode),
+            source_scope=coverage_source_scope(request.source, episode=episode),
         )
         if violations:
-            async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-                _assert_draft_revision(draft_path, draft_baseline)
+            async with draft_locks.async_file_lock(draft_path):
                 report = await run_sync_transaction(
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
                     _quarantine_invalid_script_plan_generation,
                     project_path,
                     episode,
@@ -1845,11 +1875,13 @@ async def generate_narration_script_plan(
                 )
             raise TextGenerationError(report)
 
-        async with ProjectManager.for_project_dir(project_path).async_file_lock(draft_path):
-            _assert_draft_revision(draft_path, draft_baseline)
+        async with draft_locks.async_file_lock(draft_path):
             try:
                 await run_sync_transaction(
-                    _commit_single_script_plan,
+                    _after_draft_revision_check,
+                    draft_path,
+                    draft_baseline,
+                    commit_single_script_plan,
                     project_path,
                     episode,
                     script_plan_path,
@@ -1860,7 +1892,8 @@ async def generate_narration_script_plan(
                 )
             except script_review.ScriptPlanWriteConflict as exc:
                 raise TextGenerationError(
-                    _quarantine_formal_generation_conflict(
+                    await run_sync_transaction(
+                        _quarantine_formal_generation_conflict,
                         project_path,
                         episode,
                         QUARANTINE_KIND_NARRATION_SCRIPT_PLAN,
@@ -1871,8 +1904,8 @@ async def generate_narration_script_plan(
                     )
                 ) from exc
 
-        return TextGenerationResult(_narration_script_plan_result_text(script_plan_path, raw_segments, action="拆分"))
-    except (TextGenerationError, TextOutputTruncatedError):
+        return TextGenerationResult(narration_script_plan_result_text(script_plan_path, raw_segments, action="拆分"))
+    except (TextGenerationError, TextOutputTruncatedError, ModelNotInCatalogError):
         raise
     except VideoRequestFactsError as exc:
         raise VideoRequestFactsUnavailableError(exc.failure) from exc

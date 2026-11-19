@@ -13,13 +13,14 @@ import os
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import ClassVar
 
 import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from arcreel_market_core.video_backend_contract import VideoCapabilities
+from arcreel_market_core.video_backend_contract import VideoCapabilities, VideoGenerationRequest
 from lib.billing.ledger import Ledger
 from lib.custom_provider.declarative_backend import DeclarativeVideoBackend
 from lib.custom_provider.endpoint_test import (
@@ -31,6 +32,7 @@ from lib.custom_provider.endpoint_test import (
     TrialRunStatus,
     TrialRunTarget,
     declarative_target,
+    model_ref_target,
     provider_from_base_url,
 )
 from lib.db.models.api_call import ApiCall
@@ -83,17 +85,27 @@ def _mock_pending_run(router) -> asyncio.Event:
 
     pending 记账行在发这一枪之前就落了库（``run.api_call_id`` 同点赋值），所以等这次握手
     等到的正是「取消要翻的那一行已经存在」，不必去猜事件循环要让步多少次。
+
+    首次轮询回 processing，之后的轮询停在请求上直到 run 被取消。``bounded_poll_clock`` 把轮询
+    间隔换成不让出的空等、并替换全局 ``time.monotonic``：一直回 processing 的话，这条 run 会在
+    用例的其他让出点上反复轮询，连同事件循环的读表一起耗掉超时预算，提前以超时失败。
     """
     submitted = asyncio.Event()
+    parked = asyncio.Event()
+    fetches: list[httpx.Request] = []
 
     def _create(_request: httpx.Request) -> httpx.Response:
         submitted.set()
         return httpx.Response(200, json={"task_id": "job-42"})
 
+    async def _fetch(request: httpx.Request) -> httpx.Response:
+        if fetches:
+            await parked.wait()
+        fetches.append(request)
+        return httpx.Response(200, json={"status": "processing"})
+
     router.post("https://relay.test/v1/video/create").mock(side_effect=_create)
-    router.get("https://relay.test/v1/video/fetch/job-42").mock(
-        return_value=httpx.Response(200, json={"status": "processing"})
-    )
+    router.get("https://relay.test/v1/video/fetch/job-42").mock(side_effect=_fetch)
     return submitted
 
 
@@ -490,6 +502,89 @@ class TestTrialRun:
             assert (await session.execute(select(ApiCall))).scalars().all() == []
 
 
+class _RecordingBackend(DeclarativeVideoBackend):
+    """记下后端实际收到的请求，出站仍走声明式端点的真实路径。"""
+
+    requests: ClassVar[list[VideoGenerationRequest]] = []
+
+    async def generate(self, request: VideoGenerationRequest):
+        type(self).requests.append(request)
+        return await super().generate(request)
+
+
+class TestBuiltinUserAddedOverrides:
+    """内置供应商下用户添加的模型：测试连接与生产执行闸门同样叠加用户的能力覆盖（docs/adr/0104）。"""
+
+    @pytest.fixture
+    def builtin_target(self):
+        from lib.catalog import query as catalog
+
+        def install(overrides: dict[str, object], *, declared_last_frame: bool) -> TrialRunTarget:
+            catalog.install_user_added_models(
+                [catalog.UserAddedModel("ark", PARAMETERS.model, "video", capability_overrides=overrides)]
+            )
+            definition = custom_endpoint_definition(
+                inputs={
+                    "first_frame": {"source": "start_image", "encoding": "data_uri"},
+                    "last_frame": {"source": "end_image", "encoding": "data_uri"},
+                },
+                capabilities={"first_frame": True, "last_frame": declared_last_frame},
+            )
+            definition["submit"]["body"]["last_image"] = "{{ inputs.last_frame }}"
+            _RecordingBackend.requests = []
+
+            async def build() -> _RecordingBackend:
+                return _RecordingBackend(
+                    api_key=CREDENTIALS.api_key,
+                    base_url=CREDENTIALS.base_url,
+                    model=PARAMETERS.model,
+                    definition=definition,
+                    provider="ark",
+                )
+
+            return replace(model_ref_target("ark", PARAMETERS.model, resolver=None), build_backend=build)
+
+        yield install
+        catalog.install_user_added_models(())
+
+    def _frames(self, tmp_path: Path) -> dict[str, Path]:
+        frame = tmp_path / "frame.png"
+        frame.write_bytes(b"png")
+        last = tmp_path / "last.png"
+        last.write_bytes(b"png")
+        return {"start_image": frame, "end_image": last}
+
+    async def test_relaxed_override_passes_and_rides_the_request(
+        self, tmp_path: Path, trial_runs: TrialRunManager, builtin_target
+    ):
+        target = builtin_target({"last_frame": True, "max_reference_images": 4}, declared_last_frame=False)
+
+        with capture_http() as router, bounded_poll_clock():
+            _mock_successful_run(router)
+            started = await trial_runs.start(target, PARAMETERS, assets=self._frames(tmp_path))
+            run = await _await_terminal(trial_runs, started.id)
+
+        assert run.status is TrialRunStatus.SUCCEEDED, run.error
+        caps = _RecordingBackend.requests[0].video_capabilities
+        assert caps.last_frame is True
+        assert caps.max_reference_images == 4
+
+    async def test_narrowed_override_is_rejected_before_billing(
+        self, tmp_path: Path, trial_runs: TrialRunManager, db_factory: async_sessionmaker, builtin_target
+    ):
+        target = builtin_target({"last_frame": False}, declared_last_frame=True)
+
+        with capture_http() as router, bounded_poll_clock():
+            started = await trial_runs.start(target, PARAMETERS, assets=self._frames(tmp_path))
+            run = await _await_terminal(trial_runs, started.id)
+
+        assert run.status is TrialRunStatus.FAILED
+        assert (run.error or "").startswith("[video_last_frame_unsupported]")
+        assert router.calls.call_count == 0
+        async with db_factory() as session:
+            assert (await session.execute(select(ApiCall))).scalars().all() == []
+
+
 class TestConcurrencyAndCancel:
     async def test_a_second_run_for_the_same_user_is_refused(self, trial_runs: TrialRunManager):
         with capture_http() as router, bounded_poll_clock():
@@ -569,8 +664,17 @@ class TestConcurrencyAndCancel:
             retried = await trial_runs.start(_target(), PARAMETERS)
             await _await_terminal(trial_runs, retried.id)
 
-    async def test_shutdown_keeps_draining_after_a_failed_settlement(self, trial_runs: TrialRunManager, monkeypatch):
+    async def test_shutdown_keeps_draining_after_a_failed_settlement(
+        self, tmp_path: Path, file_db_factory: async_sessionmaker, monkeypatch
+    ):
         """一条 run 结算失败不能中断关停：后面的 run 一条都不会停，关库等后续步骤也一起跳过。"""
+        # 两条 run 并发记账：内存库只有一条共享连接，一边的提交或回滚会带走另一边未提交的写入，
+        # 这里用各自独立连接的文件库。
+        trial_runs = TrialRunManager(
+            root=tmp_path / "trial_runs",
+            ledger=Ledger(session_factory=file_db_factory),
+            read_poll_timeout=_fixed_timeout,
+        )
         settled: list[int] = []
         original = trial_runs._ledger.resume_cancelled
 

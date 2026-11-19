@@ -18,14 +18,18 @@ from server.media_tools import videos as enqueue_videos_mod
 from server.media_tools.context import generation_is_error
 from server.tool_runtime import ToolOutcome
 from tests.factories import make_video_request_facts
-from tests.fakes import fake_reference_request_facts
+from tests.fakes import (
+    fake_reference_request_facts,
+    use_active_tasks_lookup,
+    use_reference_projection,
+    write_backend_output,
+)
 from tests.integration.server.agent_tool_support import (
-    _CLAIMED_BASIS_DIGEST,
+    CLAIMED_BASIS_DIGEST,
     ToolHarness,
     activate_unbound_project,
     fake_caps_resolver,
     fake_reference_projection,
-    fake_scene_batch,
     read_generation_result,
     reference_video_script,
     run_declared_tool,
@@ -38,6 +42,22 @@ from tests.integration.server.agent_tool_support import (
 def storyboard_request_facts(set_admission_video_request_facts) -> None:
     facts = make_video_request_facts(provider_id="fake", model_id="fake-video", audio_switch_controllable=True)
     set_admission_video_request_facts(facts)
+
+
+async def fake_scene_batch(*, project_name, specs, on_success=None, on_failure=None, **_batch_kwargs):
+    """Stand in for the queue: every scene spec lands its canonical mp4."""
+
+    from lib.generation.generation_queue_client import BatchTaskResult
+
+    return [
+        BatchTaskResult(
+            resource_id=spec.resource_id,
+            task_id="t1",
+            status="succeeded",
+            result={"file_path": f"videos/scene_{spec.resource_id}.mp4"},
+        )
+        for spec in specs
+    ], []
 
 
 _EPISODE_1: dict[str, Any] = {"scope": "episode", "episode_id": 1}
@@ -125,7 +145,7 @@ def _activated_project(project_dir: Path, storyboard_ids: dict[str, str] | None 
     for resource_id, artifact_path in (storyboard_ids or {}).items():
         manifest.register_entry_transactionally(
             ArtifactKey.episode_storyboard(1, resource_id),
-            ArtifactManifestEntry(artifact_path=artifact_path, basis_digest=_CLAIMED_BASIS_DIGEST),
+            ArtifactManifestEntry(artifact_path=artifact_path, basis_digest=CLAIMED_BASIS_DIGEST),
         )
     return project
 
@@ -554,9 +574,7 @@ async def test_generate_videos_episode_scope_storyboard_batch_blocks_on_mixed_sp
         },
     ]
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.get_active_tasks_for_resources", AsyncMock(return_value=[])
-    )
+    use_active_tasks_lookup(monkeypatch, AsyncMock(return_value=[]))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
 
@@ -591,9 +609,7 @@ async def test_generate_videos_episode_scope_storyboard_batch_blocks_when_a_vide
         },
     ]
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.get_active_tasks_for_resources", AsyncMock(return_value=[])
-    )
+    use_active_tasks_lookup(monkeypatch, AsyncMock(return_value=[]))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
 
@@ -743,13 +759,8 @@ async def test_generate_videos_episode_scope_reference_duration_needs_confirmati
     async def fake_active_tasks(**_kwargs):
         return []
 
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.get_active_tasks_for_resources", fake_active_tasks
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
+    use_active_tasks_lookup(monkeypatch, fake_active_tasks)
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
 
@@ -793,10 +804,7 @@ async def test_generate_videos_episode_scope_reference_duration_confirm_enqueues
             for spec in specs
         ], []
 
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, confirmed_request_duration_seconds=8, batch_waiter=fake_batch)
 
@@ -832,10 +840,7 @@ async def test_generate_videos_episode_scope_confirms_two_tiers_in_one_batch(
         return DurationSlot(seconds=seconds, total_seconds=5, adjustment=UP)
 
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
 
     out = await run_generate_videos(
         fake_ctx,
@@ -866,8 +871,8 @@ async def test_generate_videos_reference_request_is_independent_of_project_narra
     set_video_request_facts(
         make_video_request_facts(
             route="reference_video",
-            provider_id="openai",
-            model_id="sora-2",
+            provider_id="grok",
+            model_id="grok-imagine-video",
             resolution="720p",
             supported_durations=(4, 8, 12),
             allowed_durations=(4, 8, 12),
@@ -899,11 +904,12 @@ async def test_generate_videos_reference_request_is_independent_of_project_narra
     [unit] = admission["units"]
     assert unit["request_duration_seconds"] == 8
     assert unit["request_cost"] == {
-        "amount": pytest.approx(0.8),
+        "amount": pytest.approx(0.56),
         "currency": "USD",
-        "provider_id": "openai",
-        "model_id": "sora-2",
+        "provider_id": "grok",
+        "model_id": "grok-imagine-video",
         "request_duration_seconds": 8,
+        "unpriced_reason": None,
     }
     assert specs == [("E1U1", specs[0][1])]
     assert specs[0][1]["reference_request_options"] == {"confirmed_request_duration_seconds": 8}
@@ -922,10 +928,7 @@ async def test_generate_videos_episode_scope_reference_duration_repeat_without_c
         return DurationSlot(seconds=8, total_seconds=5, adjustment=UP)
 
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
 
     await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
@@ -961,10 +964,7 @@ async def test_generate_videos_episode_scope_reference_duration_exact_enqueues_d
             for spec in specs
         ], []
 
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=fake_batch)
 
@@ -1002,10 +1002,7 @@ async def test_generate_videos_episode_scope_reference_duration_resolves_project
         return DurationSlot(seconds=8, total_seconds=5, adjustment=UP)
 
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck, calls=context_calls),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck, calls=context_calls))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
 
@@ -1027,10 +1024,7 @@ async def test_generate_videos_episode_scope_reference_skips_duration_context_wh
     fake_ctx.pm.script_payload = script
 
     projection_calls: list[str] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(calls=projection_calls),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(calls=projection_calls))
 
     await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch([]))
 
@@ -1049,10 +1043,7 @@ async def test_generate_videos_episode_scope_reference_skips_duration_context_wh
     fake_ctx.pm.script_payload = script
 
     projection_calls: list[str] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(calls=projection_calls),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(calls=projection_calls))
 
     out = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch([]))
 
@@ -1073,10 +1064,7 @@ async def test_generate_videos_episode_scope_ad_reference_duration_needs_confirm
         return DurationSlot(seconds=8, total_seconds=5, adjustment=UP)
 
     enqueued: list[Any] = []
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
 
     out = await run_generate_videos(ad_reference_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
 
@@ -1111,13 +1099,8 @@ async def test_generate_video_reference_duration_confirmation_across_entries(
     async def fake_active_tasks(**_kwargs):
         return []
 
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.project_reference_unit_request",
-        fake_reference_projection(fake_precheck),
-    )
-    monkeypatch.setattr(
-        "server.services.admission.video_batch_admission.get_active_tasks_for_resources", fake_active_tasks
-    )
+    use_reference_projection(monkeypatch, fake_reference_projection(fake_precheck))
+    use_active_tasks_lookup(monkeypatch, fake_active_tasks)
     extra: dict[str, Any] = {} if force is None else {"force": force}
 
     pending = await run_generate_videos(fake_ctx, target, batch_waiter=_recording_batch(enqueued), **extra)
@@ -1536,9 +1519,8 @@ def _successful_reference_batch(ctx: ToolHarness, enqueued: list[Any]):
         successes: list[BatchTaskResult] = []
         for spec in specs:
             enqueued.append(spec)
-            output = ctx.project_path / "reference_videos" / f"{spec.resource_id}.mp4"
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"\x00")
+            # 产物由生成 worker 在别处落盘，不占工具所在的事件循环。
+            await write_backend_output(ctx.project_path / "reference_videos" / f"{spec.resource_id}.mp4", b"\x00")
             result = BatchTaskResult(
                 resource_id=spec.resource_id,
                 task_id="t1",
@@ -1790,8 +1772,8 @@ async def test_generate_videos_preview_quotes_the_reference_tier_without_enqueui
     set_video_request_facts(
         make_video_request_facts(
             route="reference_video",
-            provider_id="openai",
-            model_id="sora-2",
+            provider_id="grok",
+            model_id="grok-imagine-video",
             resolution="720p",
             supported_durations=(4, 8, 12),
             allowed_durations=(4, 8, 12),
@@ -1810,7 +1792,7 @@ async def test_generate_videos_preview_quotes_the_reference_tier_without_enqueui
     assert (unit["script_duration_seconds"], unit["request_duration_seconds"], unit["tier_changed"]) == (5, 8, True)
     assert quote["submittable"] is True
     assert quote["confirmed_request_durations"] == {"E1U1": 8}
-    assert quote["estimated_total"] == {"USD": pytest.approx(0.8)}
+    assert quote["estimated_total"] == {"USD": pytest.approx(0.56)}
 
     unconfirmed = await run_generate_videos(fake_ctx, _EPISODE_1, batch_waiter=_recording_batch(enqueued))
     [admission_unit] = unconfirmed.value["batch_admission"]["units"]
@@ -1846,7 +1828,7 @@ async def test_generate_videos_preview_reports_blockers_per_unit(
     )
     set_video_request_facts(
         make_video_request_facts(
-            route="reference_video", provider_id="openai", model_id="sora-2", allowed_durations=(4, 8, 12)
+            route="reference_video", provider_id="grok", model_id="grok-imagine-video", allowed_durations=(4, 8, 12)
         )
     )
     enqueued: list[Any] = []
@@ -1893,12 +1875,11 @@ async def test_generate_videos_preview_quotes_storyboard_units_at_their_planned_
     """分镜图生视频预检：不入队，按编排时长报价，档位不变；报价与 Web 批量确认的计价同一口径。"""
 
     from lib.db import async_session_factory
-    from lib.db.repositories.custom_provider_repo import CustomProviderRepository
     from lib.generation.video_request_facts import VideoRequestCostFacts
-    from server.services.admission.cost_estimation import quote_video_request_from_price
+    from server.services.admission.cost_estimation import load_video_price_source, quote_video_request_from_price
 
     facts = make_video_request_facts(
-        provider_id="openai", model_id="sora-2", resolution="720p", audio_switch_controllable=True
+        provider_id="grok", model_id="grok-imagine-video", resolution="720p", audio_switch_controllable=True
     )
     set_admission_video_request_facts(facts)
     enqueued: list[Any] = []
@@ -1913,7 +1894,34 @@ async def test_generate_videos_preview_quotes_storyboard_units_at_their_planned_
     assert unit["outcome"] == "generate"
     assert (unit["script_duration_seconds"], unit["request_duration_seconds"], unit["tier_changed"]) == (4, 4, False)
     async with async_session_factory() as session:
-        price = await CustomProviderRepository(session).resolve_price(facts.provider_id, facts.model_id)
-    expected = quote_video_request_from_price(VideoRequestCostFacts(facts, 4), price)
+        source = await load_video_price_source(session, facts.provider_id, facts.model_id)
+    expected = quote_video_request_from_price(
+        VideoRequestCostFacts(facts, 4, aspect_ratio="9:16", has_first_frame=True), source
+    )
+    assert expected.amount is not None
     assert unit["estimated_cost"] == expected.to_payload()
     assert quote["estimated_total"] == {expected.currency: pytest.approx(expected.amount)}
+
+
+async def test_generate_videos_preview_states_plainly_that_a_unit_is_unpriced(
+    fake_ctx: ToolHarness,
+    set_admission_video_request_facts,
+) -> None:
+    """分镜图生视频预检：价目表算不出价的单元如实返回未定价，不当作 0 元，也不给出偏低的合计。"""
+
+    set_admission_video_request_facts(
+        make_video_request_facts(provider_id="grok", model_id="grok-model-without-a-price", resolution="720p")
+    )
+
+    out = await run_generate_videos(fake_ctx, _selected("E1S01"), force=True, preview=True)
+
+    quote = _video_quote(out)
+    [unit] = quote["units"]
+    assert unit["outcome"] == "generate"
+    assert unit["unpriced"] is True
+    assert unit["estimated_cost"]["amount"] is None
+    assert unit["estimated_cost"]["unpriced_reason"] == "no_entry"
+    assert quote["unpriced_count"] == 1
+    assert quote["estimated_total"] is None
+    assert "未定价" in out.value["summary"]
+    assert "费用未知" in out.value["summary"]

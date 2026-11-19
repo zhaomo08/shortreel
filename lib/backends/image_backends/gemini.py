@@ -6,39 +6,52 @@ import asyncio
 import json as json_module
 import logging
 from pathlib import Path
+from typing import ClassVar
 
 from PIL import Image
 
 from lib.backends.gemini_shared import (
     VERTEX_SCOPES,
     RateLimiter,
+    gemini_http_options,
     get_shared_rate_limiter,
     resolve_gemini_api_key,
     with_retry_async,
 )
 from lib.backends.image_backends.base import (
+    BOTH_IMAGE_CAPABILITIES,
     ImageCapability,
     ImageGenerationRequest,
     ImageGenerationResult,
+    ImageRequestFacts,
+    per_image_usage,
 )
 from lib.backends.providers import PROVIDER_GEMINI
+from lib.backends.transport_layer import TransportLayer
+from lib.billing.metering import Usage
 from lib.config.system_config import resolve_vertex_credentials_path
 from lib.config.url_utils import normalize_base_url
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.logging_utils import format_kwargs_for_log
 
 logger = logging.getLogger(__name__)
 
 # 默认图片模型
-DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image-preview"
+DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image"
 
 # Gemini 3 图像模型单请求最多混合 14 张参考图。
 # 参考：https://ai.google.dev/gemini-api/docs/image-generation
 _MAX_REFERENCE_IMAGES = 14
-_MODELS_WITH_14_REFERENCES = frozenset({"gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"})
+# 自定义供应商（中转站）仍可能沿用带 -preview 的旧名，一并认。
+_MODELS_WITH_14_REFERENCES = frozenset(
+    {"gemini-3-pro-image", "gemini-3.1-flash-image", "gemini-3-pro-image-preview", "gemini-3.1-flash-image-preview"}
+)
 
 
 class GeminiImageBackend:
     """Gemini 图片生成后端，支持 AI Studio 和 Vertex AI。"""
+
+    CHANNEL_CAPABILITIES: ClassVar[frozenset[ImageCapability]] = BOTH_IMAGE_CAPABILITIES
 
     def __init__(
         self,
@@ -49,6 +62,7 @@ class GeminiImageBackend:
         image_model: str | None = None,
         base_url: str | None = None,
         credentials_path: str | None = None,
+        transport_layer: TransportLayer | None = None,
     ):
         from google import genai as _genai
         from google.genai import types as _types
@@ -84,15 +98,9 @@ class GeminiImageBackend:
         else:
             api_key = resolve_gemini_api_key(api_key)
             effective_base_url = normalize_base_url(base_url)
-            http_options: _types.HttpOptionsDict | None = (
-                {"base_url": effective_base_url} if effective_base_url else None
+            self._client = _genai.Client(
+                api_key=api_key, http_options=gemini_http_options(effective_base_url, transport_layer)
             )
-            self._client = _genai.Client(api_key=api_key, http_options=http_options)
-
-        self._capabilities: set[ImageCapability] = {
-            ImageCapability.TEXT_TO_IMAGE,
-            ImageCapability.IMAGE_TO_IMAGE,
-        }
 
     @property
     def name(self) -> str:
@@ -104,11 +112,30 @@ class GeminiImageBackend:
 
     @property
     def capabilities(self) -> set[ImageCapability]:
-        return self._capabilities
+        return set(self.CHANNEL_CAPABILITIES)
+
+    async def reference_image_limit(self) -> int:
+        return self._reference_limit
 
     @property
-    def max_reference_images(self) -> int:
+    def _reference_limit(self) -> int:
         return _MAX_REFERENCE_IMAGES if self._image_model in _MODELS_WITH_14_REFERENCES else 0
+
+    @staticmethod
+    def _usage(image_size: str | None) -> Usage:
+        """上报输出张数，分辨率取请求里的 ``image_size``（没发就不报）。
+
+        参考图按输入 token 计费，不报张数，以免与输入 token 重叠；输入 token 与思考 token 目前不在价目表里，也不报。
+        """
+        return per_image_usage(
+            output_images=1,
+            input_images=None,
+            dimensions={"resolution": image_size} if image_size is not None else None,
+        )
+
+    @staticmethod
+    def estimate_usage(facts: ImageRequestFacts) -> Usage:
+        return GeminiImageBackend._usage(facts.image_size)
 
     @with_retry_async(max_attempts=5, backoff_seconds=(2, 4, 8, 16, 32))
     async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
@@ -120,7 +147,7 @@ class GeminiImageBackend:
         # 2. 构建 contents：参考图按数组序位排在前，prompt 置于末尾；
         #    参考图的身份由 prompt 内的 Reference_Images 声明行按「图N」指认，图片之间不夹任何文本标签。
         refs = request.reference_images
-        limit = self.max_reference_images
+        limit = self._reference_limit
         if limit and len(refs) > limit:
             logger.warning("Gemini 参考图数量 %d 超过上限 %d，截断", len(refs), limit)
             refs = refs[:limit]
@@ -150,12 +177,13 @@ class GeminiImageBackend:
         )
 
         # 5. 解析响应并保存
-        self._process_image_response(response, request.output_path)
+        await run_sync_transaction(self._process_image_response, response, request.output_path)
 
         return ImageGenerationResult(
             image_path=request.output_path,
             provider=PROVIDER_GEMINI,
             model=self._image_model,
+            usage=self._usage(request.image_size),
         )
 
     @staticmethod

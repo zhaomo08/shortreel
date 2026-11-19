@@ -192,6 +192,18 @@ class TestUnexpectedErrorsDoNotLeak:
             # 回传的是翻译后的通用文案，而非裸异常串
             assert payload["overview_error"] == zh_errors.MESSAGES["overview_generation_failed"]
 
+    def test_set_project_source_overview_model_not_in_catalog_guides_reselect(self, tmp_path, monkeypatch):
+        client = build_projects_client(monkeypatch, _FakePM(tmp_path))
+        with client:
+            resp = client.post(
+                "/api/v1/projects/retired-upload/source",
+                data={"content": "正文", "generate_overview": "true"},
+            )
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert payload["overview"] is None
+            assert "重新选择模型" in payload["overview_error"]
+
     def test_generate_overview_unexpected_error_maps_to_500(self, tmp_path, monkeypatch):
         sentinel = "LEAKED_SECRET_generate_overview"
         client = build_projects_client(monkeypatch, _FakePM(tmp_path))
@@ -209,6 +221,17 @@ class TestUnexpectedErrorsDoNotLeak:
             resp = client.post("/api/v1/projects/corrupted/generate-overview")
             assert resp.status_code == 500
             assert "配置文本供应商" not in self._body(resp)
+
+    def test_generate_overview_model_not_in_catalog_asks_to_reselect(self, tmp_path, monkeypatch):
+        # 项目引用的文本模型已不在供应商清单中：交 app 级 handler 返回要求重新选择模型的 400，
+        # 不被通用 ValueError 处理误判为「未配置文本供应商」
+        client = build_projects_client(monkeypatch, _FakePM(tmp_path))
+        with client:
+            resp = client.post("/api/v1/projects/retired-model/generate-overview", headers={"Accept-Language": "en"})
+            assert resp.status_code == 400
+            detail = resp.json()["detail"]
+            assert "doubao-seed-1-8-251228" in detail
+            assert "re-select a model" in detail
 
     def test_generate_overview_schema_failure_maps_to_ai_response_invalid(self, tmp_path, monkeypatch):
         # pydantic ValidationError 也是 ValueError 子类：模型输出不合 schema 时须命中

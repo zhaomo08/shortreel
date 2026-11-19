@@ -30,6 +30,22 @@ describe("GeneralSection", () => {
     expect(i18n.language).toBe("en");
   });
 
+  it("选浅色配色后立即切换，重新打开设置仍是该配色", async () => {
+    document.documentElement.classList.add("dark");
+    const user = userEvent.setup();
+    const { unmount } = render(<GeneralSection />);
+
+    const theme = screen.getByRole("combobox", { name: "配色" });
+    await user.click(theme);
+    await user.click(await screen.findByRole("option", { name: "相纸" }));
+
+    expect(document.documentElement).not.toHaveClass("dark");
+    expect(document.documentElement.dataset.theme).toBe("baryta");
+    unmount();
+    render(<GeneralSection />);
+    expect(screen.getByRole("combobox", { name: "配色" })).toHaveTextContent("相纸");
+  });
+
   it("重看引导会重新开始新手引导", async () => {
     const user = userEvent.setup();
     render(<GeneralSection />);

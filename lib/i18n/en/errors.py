@@ -105,6 +105,8 @@ MESSAGES = {
     "task_fail_comfyui_execution_error": "ComfyUI failed during execution: {detail} (failing node: {node})",
     "task_fail_comfyui_interrupted": "The run on ComfyUI was interrupted; please retry",
     "task_fail_comfyui_output_missing": "ComfyUI finished but output node {nodes} produced no file; check its node bindings and the workflow's output chain",
+    "task_fail_image_output_missing": "Model {model} returned no image, possibly because of content safety filtering; adjust the prompt or reference images and try again",
+    "task_fail_image_output_format_unsupported": "Model {model} returned an image in {media_type} format that cannot be converted to PNG; switch to a model that outputs raster images",
     "task_fail_comfyui_output_type_mismatch": "ComfyUI produced {filename}, which is not a file type this endpoint should output (expected {expected}); point the output node bindings at the node that exports the final artifact, or switch that save node to a supported format (for SaveVideo, pick h264-mp4)",
     "task_fail_comfyui_output_container_mismatch": "The contents of {filename} produced by ComfyUI are not a container this endpoint should output (expected {expected}); switch the save node to a supported format (for SaveVideo, pick h264-mp4)",
     "task_fail_artifact_download_failed": "Video generation succeeded but artifact download failed; retry the download: {detail}",
@@ -322,11 +324,28 @@ MESSAGES = {
     "interface_offline": "This interface is offline, please use the recommended interface",
     "answers_required": "answers cannot be empty",
     # Custom Providers
-    "price_input_required": "price_input must be set when setting price_output",
     "model_id_required": "model_id must be provided for enabled models",
     "duplicate_model_id": "Duplicate model_id: {model_id}",
     "default_model_conflict": "Each media_type can have at most one default model. Conflict: {conflict}",
     "provider_not_found": "Provider does not exist",
+    "provider_model_not_found": 'This provider has no model "{model}"',
+    "builtin_model_not_removable": '"{model}" is an officially listed model. It can be disabled but not removed',
+    "builtin_model_duplicate": 'Model "{model}" is already in this provider\'s model list',
+    "builtin_model_id_required": "Enter a model ID",
+    "model_id_dot_segment": "No segment of a model ID may be . or ..: {model}",
+    "builtin_model_media_type_required": 'Can\'t tell the type of model "{model}". Choose a model type and try again',
+    "builtin_model_media_type_unsupported": "This provider doesn't support this type of model ({media_type})",
+    "builtin_model_binding_invalid": 'Matched model "{binding}" is malformed. Use "maker/model-name"',
+    "comfyui_model_endpoint_missing": "There are no ComfyUI endpoints yet. Import a ComfyUI endpoint, then add the model",
+    "discovery_not_applicable_builtin": "This provider has no model list API. Add models by model ID instead",
+    "builtin_model_official_settings": '"{model}" is an officially listed model. You can only enable or disable it; its other settings are maintained officially',
+    "provider_model_setting_not_applicable": 'Built-in provider model "{model}" has no "{setting}" setting',
+    "provider_model_entry_mismatch": 'The model information for "{model}" has changed. Reopen it and try again',
+    "catalog_entry_invalid": 'The value of "{field}" in the model information is invalid. Fix it and save again',
+    "catalog_entry_no_official": "There is no official information for this model to restore",
+    "catalog_entry_exists": "The model catalog already has this model. Select it instead.",
+    "provider_model_binding_not_found": 'The model catalog has no model "{binding}" of this type. Choose another model',
+    "provider_multiplier_not_in_config": "The provider multiplier cannot be changed through the config endpoint; use the multiplier endpoint",
     "custom_endpoint_not_found": "Endpoint does not exist",
     "custom_endpoint_definition_invalid": "The endpoint definition failed validation. Fix the reported issues and try again",
     "custom_endpoint_referenced_by_models": "This endpoint is used by {count} model(s). Remove those references before deleting it",
@@ -371,6 +390,7 @@ MESSAGES = {
     "trial_run_already_running": "A trial run is already in progress. Wait for it to finish or cancel it first",
     "trial_run_not_found": "Trial run not found or expired",
     "usage_record_not_found": "Usage record not found",
+    "usage_session_not_found": "Agent session not found",
     "usage_cursor_invalid": "Invalid pagination cursor; go back to the first page and browse again",
     "usage_range_too_wide": "The requested time range is too wide; narrow the start and end and try again",
     "usage_time_out_of_range": "The start or end time is outside the representable range; check it and try again",
@@ -410,8 +430,11 @@ MESSAGES = {
         "Model {model_id} uses a ComfyUI endpoint, whose capabilities are derived from node bindings alone; "
         "capability overrides are not supported"
     ),
-    "capability_overrides_video_only": (
-        "Endpoint {endpoint} of model {model_id} is not a video endpoint; capability overrides are not supported"
+    "capability_override_not_applicable": (
+        "Endpoint {endpoint} of model {model_id} is a {media_type} endpoint; capability {capability} does not apply"
+    ),
+    "capability_override_image_unsupported": (
+        "Endpoint {endpoint} of model {model_id} does not implement {capability}; it cannot be overridden to true"
     ),
     "capability_override_invalid_value": (
         "Capability {capability} of model {model_id} has an invalid value type; expected {expected}"
@@ -428,6 +451,9 @@ MESSAGES = {
         "Model {model_id} must have max_reference_audio_count greater than 0 when reference audio is supported; "
         "override reference_audio_mode to none to turn voice reference off"
     ),
+    "path_override_unknown_request": "The endpoint of model {model_id} has no request {request} whose URL can be changed",
+    "path_override_invalid_path": "Request URL {path} of model {model_id} is invalid: the path must start with /, contain no whitespace or #, and use braces only for placeholders",
+    "path_override_placeholder_not_allowed": "Request URL {path} of model {model_id} uses a placeholder this request does not have; only {allowed} are available",
     # Projects
     "unknown_style_template": "Unknown style template: {template_id}",
     "ad_only_field": "{field} is only available for ad/short-video projects (content_mode=ad)",
@@ -625,6 +651,7 @@ MESSAGES = {
     "image_capability_missing_t2i": "{provider}/{model} does not support text-to-image; configure a default model that supports text-to-image",
     "image_dashscope_4k_t2i_only": "Model {model}: 4K output is only supported by wan2.7-image-pro for text-to-image; use 2K or lower",
     "image_reference_images_unreadable": "Model {model} has reference images that are missing or unreadable; generation aborted: {names}; check the reference image paths",
+    "image_reference_images_exceeded": "Model {model} supports at most {limit} reference images but this request carried {count}; nothing was submitted; generate again",
     # Image Edit
     "image_edit_resource_type_invalid": "Resource type '{resource_type}' does not support image editing",
     "image_edit_instruction_required": "Edit instruction must not be empty",
@@ -639,11 +666,10 @@ MESSAGES = {
     "video_capability_missing_i2v": "{provider}/{model} does not support image-to-video generation; assign a model that supports it for image-to-video in Settings, or change the default video model",
     "video_capability_missing_r2v": "{provider}/{model} does not support reference-to-video generation; assign a model that supports it for reference-to-video in Settings, or change the default video model",
     "video_capability_reference_unavailable": "The configured video model {provider}/{model} is no longer available (model deleted, capabilities changed, or provider removed); re-select a video model in Settings",
+    "model_not_in_provider_catalog": "{provider}/{model}: this model is not in the provider's model list; re-select a model in Settings",
     "video_resolution_not_supported": "Model {model} does not support {resolution} resolution (only {supported}); choose a supported resolution",
     "video_aspect_ratio_not_supported": "Model {model} does not support aspect ratio {aspect_ratio} (only {supported}); choose a supported aspect ratio",
-    "video_resolution_duration_unsupported": "Model {model} does not support {duration}s at {resolution} resolution (only {supported}); adjust the resolution or duration",
     "video_reference_resolution_unsupported": "Model {model} supports at most {max_resolution} when reference images or a last frame are used, but {resolution} was requested; change the resolution to {max_resolution}, or remove the reference images and last frame",
-    "video_reference_images_duration_unsupported": "Model {model} does not support {duration}s with reference images (only {supported}); change the duration to {supported} or remove the reference images",
     "video_reference_images_required": "Model {model} requires at least one reference image; please provide reference images",
     "video_reference_images_unreadable": "Model {model} has reference images that are missing or unreadable; generation aborted: {names}; check the reference image paths",
     "video_reference_images_unsupported": "Model {model} does not support multi-subject reference images; remove the reference images or switch to a model that supports reference-to-video",
@@ -653,8 +679,10 @@ MESSAGES = {
     "video_end_image_unreadable": "The last-frame image for model {model} is unreadable; generation aborted: {name}; check the last-frame image path",
     "video_end_image_requires_start_image": "Model {model} does not support a standalone last frame; also provide a first frame (first+last keyframes) or remove the last frame",
     "video_last_frame_requires_pro": "{provider}/{model} only supports first+last frame at the pro tier; switch to the pro tier or remove the last frame",
+    "video_first_frame_unsupported": "{provider}/{model} does not support a first frame under the current configuration; generation aborted. Remove the shot's first frame, or switch to a model or tier that supports it",
     "video_last_frame_unsupported": "{provider}/{model} does not support a last frame under the current configuration; generation aborted. Remove the shot's last frame, or switch to a model or tier that supports it",
     "video_reference_audio_unsupported": "{provider}/{model} does not support reference audio; generation aborted. Remove the character's reference audio, or switch to a model that supports voice reference",
+    "video_reference_route_audio_unsupported": "{provider}/{model} cannot send the audio switch when generating from reference images, so the video would be silent; generation aborted. Turn off the audio switch, remove the audio track override for the reference-image route, or remove the reference images and try again",
     "video_reference_audio_exceeded": "Model {model} supports at most {limit} reference audio clips but received {count}; reduce the number of characters with reference audio",
     "video_reference_audio_duration_exceeded": "Model {model} supports at most {limit:g} seconds of combined reference audio but received {total:.1f} seconds; use fewer reference audio clips or shorter clips",
     "video_reference_audio_slots_insufficient": "Model {model} attaches each reference audio clip to a reference asset, but only {slots} reference assets are available for {count} clips; add reference images for those characters, or reduce the number of characters with reference audio",
@@ -672,6 +700,7 @@ MESSAGES = {
     "agent_base_url_invalid": "Agent credential URLs cannot carry query strings, fragments or userinfo; use a plain https://host/path address",
     "agent_no_fields_to_update": "No fields to update",
     "agent_credential_not_found": "Credential not found",
+    "agent_tier_binding_invalid": "The model bound to this tier is not in the model catalog",
     "agent_cannot_delete_active": "Cannot delete the active credential; activate another first",
     "agent_test_validation_error": "Test connection failed; please check the configuration and retry",
     "invalid_project_name": "Invalid project name '{name}'",
@@ -682,6 +711,7 @@ MESSAGES = {
     "version_not_found": "Version {version} does not exist",
     "version_resource_not_found": "Resource '{resource_type}/{resource_id}' does not exist",
     "version_snapshot_path_unmanaged": "A '{resource_type}' version record points to an unmanaged snapshot path; the operation was refused",
+    "version_snapshot_corrupted": "Version {version} can't be used because its file is damaged. You can choose another version or regenerate.",
     "session_capacity_exceeded": "Concurrent session limit reached, please try again later",
     "session_question_unavailable": "The session is not running or has no pending question",
     "rewrite_anchor_invalid": "The message you are editing is not part of this conversation; refresh and try again",
@@ -757,6 +787,8 @@ MESSAGES = {
     "final_cut_narration_unavailable": "Only TTS voiceover projects can render the final cut version with narration",
     "final_cut_presentation_unavailable": "Narration audio or subtitles for video unit {unit_id} cannot be used in the final cut; check the narration audio, then render again",
     "final_cut_blocked": "The edit timeline has issues that block rendering the final cut, in video units: {units}. Resolve them, then submit the render again",
+    "final_cut_video_version_corrupted": "The video file of version {version} used by video unit {unit_id} is damaged, so the final cut can't be rendered. You can choose another version for this unit or regenerate it.",
+    "final_cut_narration_version_corrupted": "The narration audio file of version {version} used by video unit {unit_id} is damaged, so the final cut can't be rendered. You can choose another narration version for this unit or regenerate the narration.",
     "final_cut_empty": "The edit timeline has no clips to render",
     "final_cut_ffmpeg_unavailable": "The bundled ffmpeg is unavailable, so the final cut cannot be rendered",
     "final_cut_render_failed": "Rendering the final cut failed; please try again",

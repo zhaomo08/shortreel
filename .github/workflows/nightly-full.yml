@@ -32,7 +32,7 @@ jobs:
     # 失败时开/更新带 ci 标签的追踪 issue，恢复时自动关闭
     needs: full-suite
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:

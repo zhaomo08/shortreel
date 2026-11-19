@@ -1,7 +1,8 @@
-"""ViduImageBackend 单元测试 — 重点校验 prompt/aspect_ratio/resolution 白名单兜底逻辑。"""
+"""ViduImageBackend 单元测试 — 重点校验 prompt/aspect_ratio 白名单兜底与 resolution 原样透传。"""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import httpx
@@ -10,7 +11,6 @@ import pytest
 from lib.backends.http_status_errors import ProviderRejectedError
 from lib.backends.image_backends.base import (
     ImageCapability,
-    ImageCapabilityError,
     ImageGenerationRequest,
     ReferenceImage,
 )
@@ -18,7 +18,6 @@ from lib.backends.image_backends.vidu import (
     _ASPECT_RATIO_WHITELIST,
     _MAX_REFERENCE_IMAGES,
     _PROMPT_MAX_LEN,
-    _RESOLUTION_WHITELIST,
     DEFAULT_MODEL,
     ViduImageBackend,
 )
@@ -46,22 +45,9 @@ class TestViduImageBackendBasics:
         assert ImageCapability.TEXT_TO_IMAGE in backend.capabilities
         assert ImageCapability.IMAGE_TO_IMAGE in backend.capabilities
 
-    def test_q1_capability_only_i2i(self):
-        backend = ViduImageBackend(api_key="test-key", model="viduq1")
-        assert ImageCapability.IMAGE_TO_IMAGE in backend.capabilities
-        assert ImageCapability.TEXT_TO_IMAGE not in backend.capabilities
-
 
 class TestWhitelistConfig:
     """避免运行时调用，先把配置常量当 spec 钉死，防止误改。"""
-
-    def test_q1_resolution_only_1080p(self):
-        assert _RESOLUTION_WHITELIST["viduq1"] == ["1080p"]
-
-    def test_q2_resolution_includes_1080p_2k_4k(self):
-        assert "1080p" in _RESOLUTION_WHITELIST["viduq2"]
-        assert "2K" in _RESOLUTION_WHITELIST["viduq2"]
-        assert "4K" in _RESOLUTION_WHITELIST["viduq2"]
 
     def test_q1_aspect_ratio_no_2_3_or_3_2(self):
         # 文档：viduq1 只允许 16:9 9:16 1:1 3:4 4:3
@@ -71,21 +57,34 @@ class TestWhitelistConfig:
     def test_q2_aspect_ratio_includes_auto(self):
         assert "auto" in _ASPECT_RATIO_WHITELIST["viduq2"]
 
-    def test_max_reference_images_is_seven(self):
+    def test_reference_image_limit_is_seven(self):
         assert _MAX_REFERENCE_IMAGES == 7
-        assert ViduImageBackend(api_key="k", model="viduq2").max_reference_images == 7
+        assert asyncio.run(ViduImageBackend(api_key="k", model="viduq2").reference_image_limit()) == 7
 
     def test_prompt_truncation_limit(self):
         assert _PROMPT_MAX_LEN == 2000
 
 
-class TestCapabilityMismatchRaises:
-    async def test_q1_without_refs_rejects_t2i(self, image_output_path: Path):
-        backend = ViduImageBackend(api_key="test-key", model="viduq1")
-        request = ImageGenerationRequest(prompt="hello", output_path=image_output_path)
-        with pytest.raises(ImageCapabilityError):
-            await backend.generate(request)
+class TestEstimateUsage:
+    """预估的分辨率维度与请求同源：请求带什么档位就报什么。"""
 
+    def test_requested_resolution_is_reported(self):
+        from lib.backends.image_backends.base import ImageRequestFacts
+
+        usage = ViduImageBackend.estimate_usage(
+            ImageRequestFacts(model="viduq2", aspect_ratio="9:16", image_size="2K", reference_count=3)
+        )
+        assert usage.dimensions == {"resolution": "2K"}
+        assert usage.quantities == {"output_images": 1, "input_images": 3}
+
+    def test_no_resolution_when_not_requested(self):
+        from lib.backends.image_backends.base import ImageRequestFacts
+
+        usage = ViduImageBackend.estimate_usage(ImageRequestFacts(model="viduq1", aspect_ratio="9:16"))
+        assert usage.dimensions == {}
+
+
+class TestCapabilityMismatchRaises:
     async def test_q2_with_refs_path_does_not_raise_capability(
         self, tmp_path: Path, image_output_path: Path, monkeypatch
     ):
@@ -135,7 +134,7 @@ class TestViduReferenceImageLimit:
         import json
 
         body = json.loads(route.calls.last.request.content)
-        assert len(body["images"]) == backend.max_reference_images == 7
+        assert len(body["images"]) == (await backend.reference_image_limit()) == 7
 
 
 class TestViduImageCreateTaskHttpErrors:
@@ -176,3 +175,25 @@ class TestViduImageCreateTaskHttpErrors:
 
         assert ei.value.response.status_code == 400
         assert ei.value.provider_reason == "1013: reference image is not readable"
+
+
+class TestViduImageResolutionPassthrough:
+    @pytest.mark.parametrize(("model", "resolution"), [("viduq1", "2K"), ("viduq2", "8K")])
+    async def test_resolution_is_sent_as_requested_and_upstream_rejection_is_readable(
+        self, image_output_path: Path, model: str, resolution: str
+    ):
+        """档位以模型目录条目为准：越界值照发，由上游拒绝并以拒因摘要返回（docs/adr/0104）。"""
+        import json
+
+        with capture_http() as router:
+            route = router.post("https://api.vidu.com/ent/v2/reference2image").mock(
+                return_value=httpx.Response(400, json={"code": 1013, "message": "resolution not supported"})
+            )
+            backend = ViduImageBackend(api_key="k", model=model, base_url="https://api.vidu.com/ent/v2")
+            with pytest.raises(ProviderRejectedError) as ei:
+                await backend.generate(
+                    ImageGenerationRequest(prompt="x", output_path=image_output_path, image_size=resolution)
+                )
+
+        assert json.loads(route.calls.last.request.content)["resolution"] == resolution
+        assert ei.value.provider_reason == "1013: resolution not supported"

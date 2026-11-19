@@ -1,6 +1,6 @@
 import asyncio
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -16,7 +16,7 @@ from lib.generation.generation_worker import (
 from lib.project.task_project_claim import revoke_task_project_claims
 from lib.script.script_editor import ScriptEditError
 from tests.factories import activate_reference_project
-from tests.fakes import bind_safe_session_factory
+from tests.fakes import bind_safe_session_factory, bind_session_factory
 from tests.integration.lib.generation.worker_support import (
     FakeWorkerQueue,
     capacity_table,
@@ -60,7 +60,7 @@ async def patch_empty_db(db_factory, monkeypatch):
     解析全局默认供应商，视频的入队派生与请求投影则在函数内晚导入 ``lib.db`` 上的全局名字；不隔离时
     它们读真实 dev 库，本机一旦配了其它 ready 供应商，回退断言就被污染。
     """
-    monkeypatch.setattr("lib.db.async_session_factory", db_factory)
+    bind_session_factory(monkeypatch, db_factory)
     monkeypatch.setattr("lib.generation.generation_worker.async_session_factory", db_factory)
     return db_factory
 
@@ -91,7 +91,7 @@ class TestExtractProvider:
 
     async def test_project_level_video_backend(self, monkeypatch):
         """项目级 video_backend 优先于全局默认。"""
-        _patch_pm(monkeypatch, {"video_backend": "ark/doubao-seedance-1-5-pro-251215"})
+        _patch_pm(monkeypatch, {"video_backend": "ark/doubao-seedance-2-0-260128"})
         task = {"payload": {}, "project_name": "demo", "task_type": "video"}
         assert await _extract_provider(task) == "ark"
 
@@ -112,7 +112,7 @@ class TestExtractProvider:
         _patch_pm(
             monkeypatch,
             {
-                "video_backend": "ark/doubao-seedance-1-5-pro-251215",
+                "video_backend": "ark/doubao-seedance-2-0-260128",
                 "image_provider_t2i": "gemini-vertex/imagen-3",
             },
         )
@@ -124,20 +124,20 @@ class TestExtractProvider:
         _patch_pm(
             monkeypatch,
             {
-                "video_backend": "ark/doubao-seedance-1-5-pro-251215",
-                "video_provider_r2v": "minimax/S2V-01",
+                "video_backend": "ark/doubao-seedance-2-0-260128",
+                "video_provider_r2v": "dashscope/happyhorse-1.1-r2v",
             },
         )
         task = {
-            "payload": {"video_provider_r2v": "ark/doubao-seedance-1-5-pro-251215"},
+            "payload": {"video_provider_r2v": "ark/doubao-seedance-2-0-260128"},
             "project_name": "demo",
             "task_type": "reference_video",
         }
-        assert await _extract_provider(task) == "minimax"
+        assert await _extract_provider(task) == "dashscope"
 
     @pytest.mark.parametrize(
         ("text", "expected_provider"),
-        [("@[A] 走进房间", "minimax"), ("空镜头", "ark")],
+        [("@[A] 走进房间", "dashscope"), ("空镜头", "ark")],
     )
     async def test_reference_video_routes_by_hydrated_reference_bucket(
         self, tmp_path, monkeypatch, text, expected_provider
@@ -149,8 +149,8 @@ class TestExtractProvider:
         project = activate_reference_project(
             tmp_path,
             {
-                "video_provider_i2v": "ark/doubao-seedance-1-5-pro-251215",
-                "video_provider_r2v": "minimax/S2V-01",
+                "video_provider_i2v": "ark/doubao-seedance-2-0-260128",
+                "video_provider_r2v": "dashscope/happyhorse-1.1-r2v",
                 "video_generate_audio": True,
                 "characters": {"A": {"description": "x", "character_sheet": "characters/A.png"}},
             },
@@ -180,8 +180,8 @@ class TestExtractProvider:
 
     async def test_reference_video_claim_uses_frozen_task_script_locator(self, tmp_path, monkeypatch):
         project = {
-            "video_provider_i2v": "ark/doubao-seedance-1-5-pro-251215",
-            "video_provider_r2v": "minimax/S2V-01",
+            "video_provider_i2v": "ark/doubao-seedance-2-0-260128",
+            "video_provider_r2v": "dashscope/happyhorse-1.1-r2v",
             "video_generate_audio": True,
             "characters": {"A": {"character_sheet": "characters/A.png"}},
         }
@@ -213,7 +213,7 @@ class TestExtractProvider:
             "resource_id": "E1U1",
         }
 
-        assert await _extract_provider(task) == "minimax"
+        assert await _extract_provider(task) == "dashscope"
 
     async def test_reference_video_script_read_failure_falls_back_to_r2v(self, monkeypatch):
         """剧本读取失败时投影回退 r2v 代表桶，不冒泡阻断认领。"""
@@ -222,8 +222,8 @@ class TestExtractProvider:
             raise ScriptEditError("broken")
 
         project = {
-            "video_provider_i2v": "ark/doubao-seedance-1-5-pro-251215",
-            "video_provider_r2v": "minimax/S2V-01",
+            "video_provider_i2v": "ark/doubao-seedance-2-0-260128",
+            "video_provider_r2v": "dashscope/happyhorse-1.1-r2v",
         }
         pm_cls = type("PM", (), {"load_project": lambda self, name: project, "load_script": _load_script})
         for target in (
@@ -237,89 +237,7 @@ class TestExtractProvider:
             "task_type": "reference_video",
             "resource_id": "E1U1",
         }
-        assert await _extract_provider(task) == "minimax"
-
-    async def test_queued_reference_video_reprojects_provider_after_project_edit(
-        self, tmp_path, monkeypatch, patch_empty_db
-    ):
-        """队列行只保存 advisory provider；领取/执行前按项目最新 provider/model 重新投影。"""
-
-        from lib.generation.generation_queue import GenerationQueue, reference_projection_for_queued_task
-
-        holder = {"model": "ark/doubao-seedance-1-5-pro-251215"}
-        script = {"video_units": [{"unit_id": "E1U1", "text": "空镜", "duration_seconds": 5}]}
-        activated = activate_reference_project(tmp_path, {"video_generate_audio": True})
-
-        class _PM:
-            def load_project(self, _name):
-                return {**activated, "video_provider_i2v": holder["model"]}
-
-            def load_script(self, _name, _filename):
-                return script
-
-            def get_project_path(self, _name):
-                return tmp_path
-
-        for target in (
-            "lib.generation.generation_worker.get_project_manager",
-            "lib.config.resolver.get_project_manager",
-        ):
-            monkeypatch.setattr(target, _PM)
-        queue = GenerationQueue(session_factory=patch_empty_db)
-        enqueued = await queue.enqueue_task(
-            project_name="demo",
-            task_type="reference_video",
-            media_type="video",
-            resource_id="E1U1",
-            payload={"script_file": "ep1.json"},
-            script_file="ep1.json",
-        )
-        task = await queue.get_task(enqueued["task_id"])
-        assert task is not None
-        assert task["provider_id"] == "ark"
-        assert "video_provider_i2v" not in task["payload"]
-        assert "video_provider_r2v" not in task["payload"]
-
-        first = await reference_projection_for_queued_task(
-            project=_PM().load_project(task["project_name"]),
-            project_name=task["project_name"],
-            payload=task["payload"],
-            resource_id=task["resource_id"],
-        )
-        assert first is not None
-        assert (first.provider_id, first.model_id) == ("ark", "doubao-seedance-1-5-pro-251215")
-        assert await _extract_provider(task) == "ark"
-
-        holder["model"] = "ark/doubao-seedance-2-0-260128"
-        second = await reference_projection_for_queued_task(
-            project=_PM().load_project(task["project_name"]),
-            project_name=task["project_name"],
-            payload=task["payload"],
-            resource_id=task["resource_id"],
-        )
-        assert second is not None
-        assert (second.provider_id, second.model_id) == ("ark", "doubao-seedance-2-0-260128")
-
-        holder["model"] = "grok/grok-imagine-video"
-        third = await reference_projection_for_queued_task(
-            project=_PM().load_project(task["project_name"]),
-            project_name=task["project_name"],
-            payload=task["payload"],
-            resource_id=task["resource_id"],
-        )
-        assert third is not None
-        assert (third.provider_id, third.model_id) == ("grok", "grok-imagine-video")
-        assert await _extract_provider(task) == "grok"
-
-    async def test_current_project_provider_takes_precedence_over_stale_payload(self, monkeypatch):
-        """分镜视频在认领时重投影当前项目配置，不复用 enqueue payload 的旧 provider。"""
-        _patch_pm(monkeypatch, {"video_backend": "grok/grok-imagine-video"})
-        task = {
-            "payload": {"video_provider_i2v": "ark/doubao-seedance-2-0-260128"},
-            "project_name": "demo",
-            "task_type": "video",
-        }
-        assert await _extract_provider(task) == "grok"
+        assert await _extract_provider(task) == "dashscope"
 
     async def test_deleted_project_load_failure_falls_back_not_raises(self, monkeypatch):
         """指向已删除/不可读项目的残留任务：load_project 抛错也须回退 DEFAULT_PROVIDER，
@@ -359,7 +277,7 @@ class TestExtractProviderAlignsWithExecution:
         from lib.config.resolver import ConfigResolver
         from lib.db import async_session_factory
 
-        project = {"video_backend": "ark/doubao-seedance-1-5-pro-251215"}
+        project = {"video_backend": "ark/doubao-seedance-2-0-260128"}
         _patch_pm(monkeypatch, project)
         task = {"payload": {}, "project_name": "demo", "task_type": "video"}
 
@@ -443,14 +361,14 @@ class TestGenerationWorker:
             "generation",
             _fake_execute,
         )
-        await worker._process_task({"task_id": "t1"})
+        await worker._process_task({"task_id": "t1"}, claimed_provider_id="test")
         assert queue.succeeded == [("t1", {"ok": "t1"})]
 
         async def _raise(_task, **_kwargs):
             raise RuntimeError("boom")
 
         monkeypatch.setattr(stub_executors, "generation", _raise)
-        await worker._process_task({"task_id": "t2"})
+        await worker._process_task({"task_id": "t2"}, claimed_provider_id="test")
         assert queue.failed
         assert queue.failed[0][0] == "t2"
 
@@ -474,7 +392,7 @@ class TestGenerationWorker:
 
         monkeypatch.setattr(stub_executors, "generation", _fake_execute)
 
-        await worker._process_task({"task_id": "task-reuse", "task_type": "video"})
+        await worker._process_task({"task_id": "task-reuse", "task_type": "video"}, claimed_provider_id="test")
 
         assert queue.succeeded == [("task-reuse", reused)]
         assert queue.failed == []
@@ -606,7 +524,7 @@ class TestGenerationWorker:
             "generation",
             _raise_script_edit_error,
         )
-        await worker._process_task({"task_id": "t_script_edit"})
+        await worker._process_task({"task_id": "t_script_edit"}, claimed_provider_id="test")
         assert queue.failed
         assert queue.failed[0] == (
             "t_script_edit",
@@ -625,7 +543,7 @@ class TestGenerationWorker:
             return {"ok": True}
 
         monkeypatch.setattr(stub_executors, "generation", _project_deleted_before_return)
-        await worker._process_task({"task_id": "t_deleted", "project_name": "demo"})
+        await worker._process_task({"task_id": "t_deleted", "project_name": "demo"}, claimed_provider_id="test")
         assert queue.succeeded == []
         assert queue.failed == [("t_deleted", "[project_deleted_during_task]")]
 
@@ -647,7 +565,7 @@ class TestGenerationWorker:
             "generation",
             _raise_unregistered,
         )
-        await worker._process_task({"task_id": "t_unregistered"})
+        await worker._process_task({"task_id": "t_unregistered"}, claimed_provider_id="test")
         assert queue.failed
         assert queue.failed[0] == ("t_unregistered", "[script_edit_error]")
 
@@ -674,7 +592,7 @@ class TestGenerationWorker:
             "generation",
             _raise_circular_params,
         )
-        await worker._process_task({"task_id": "t_circular"})
+        await worker._process_task({"task_id": "t_circular"}, claimed_provider_id="test")
         assert queue.failed
         assert queue.failed[0] == ("t_circular", "[script_edit_error]")
 
@@ -693,7 +611,7 @@ class TestGenerationWorker:
             resume_executor=stub_executors.execute_resume,
         )
         with pytest.raises(asyncio.CancelledError):
-            await worker._process_task({"task_id": "tc", "media_type": "image"})
+            await worker._process_task({"task_id": "tc", "media_type": "image"}, claimed_provider_id="test")
 
         assert await task_status(worker_db, "tc") == "cancelled"
 
@@ -715,7 +633,7 @@ class TestGenerationWorker:
             executor=_execute,
             resume_executor=stub_executors.execute_resume,
         )
-        await worker._process_task({"task_id": "t0rows", "media_type": "video"})
+        await worker._process_task({"task_id": "t0rows", "media_type": "video"}, claimed_provider_id="test")
 
         assert await task_status(worker_db, "t0rows") == "queued"
 
@@ -742,7 +660,7 @@ class TestGenerationWorker:
         worker.heartbeat_interval = 0.01
         worker.poll_interval = 0.01
         running = asyncio.create_task(
-            worker._process_task({"task_id": "shutdown-run", "media_type": "image"}),
+            worker._process_task({"task_id": "shutdown-run", "media_type": "image"}, claimed_provider_id="test"),
             name="generation-image-shutdown-run",
         )
         worker._slots.register("test", "image", "shutdown-run", running)
@@ -855,18 +773,10 @@ class TestGenerationWorker:
 
     @pytest.mark.asyncio
     async def test_drain_lands_cancelled_when_interruption_hits_before_process_task_try(self, monkeypatch):
-        """打断落在 _process_task 进 try 之前（provider 投影 await）：drain 端兜底落终态。"""
+        """打断落在 _process_task 进 try 之前（协程尚未开始执行）：drain 端兜底落终态。"""
         queue = FakeWorkerQueue()
-        in_extract = asyncio.Event()
-
-        async def _blocking_projection(_task):
-            in_extract.set()
-            await asyncio.sleep(10)  # 停在入口解析，模拟打断落在 _process_task 的 try 之前
-            return "test"
-
         worker = GenerationWorker(
             queue=queue,
-            provider_projection=_blocking_projection,
             executor=stub_executors.execute,
             resume_executor=stub_executors.execute_resume,
         )
@@ -874,19 +784,18 @@ class TestGenerationWorker:
         worker.poll_interval = 0.01
 
         async def _execute(_task, **_kwargs):
-            raise AssertionError("execute 不应被调用：打断在 provider 投影阶段就到")
+            raise AssertionError("execute 不应被调用：打断在协程开始执行之前就到")
 
         monkeypatch.setattr(stub_executors, "generation", _execute)
 
         t = asyncio.create_task(
-            worker._process_task({"task_id": "tid", "media_type": "video"}),
+            worker._process_task({"task_id": "tid", "media_type": "video"}, claimed_provider_id="test"),
             name="generation-video-tid",
         )
         worker._slots.register("test", "video", "tid", t)
+        t.cancel()  # 协程还没被调度过，打断落在 try 之前
 
         await worker.start()
-        await in_extract.wait()  # 确保停在 provider 投影（try 之前）
-        t.cancel()
         await asyncio.wait_for(queue.claim_after_interruption.wait(), timeout=2.0)
 
         # _process_task 没机会落终态（打断在 try 之前）→ drain 端兜底
@@ -916,7 +825,7 @@ class TestGenerationWorker:
         monkeypatch.setattr(stub_executors, "generation", _block)
 
         t = asyncio.create_task(
-            worker._process_task({"task_id": "tid", "media_type": "video"}),
+            worker._process_task({"task_id": "tid", "media_type": "video"}, claimed_provider_id="test"),
             name="generation-video-tid",
         )
         worker._slots.register("test", "video", "tid", t)
@@ -988,7 +897,7 @@ class TestGenerationWorker:
         running: list[asyncio.Task] = []
         for tid in vid_ids:
             t = asyncio.create_task(
-                worker._process_task({"task_id": tid, "media_type": "video"}),
+                worker._process_task({"task_id": tid, "media_type": "video"}, claimed_provider_id="test"),
                 name=f"generation-video-{tid}",
             )
             worker._slots.register("gemini-aistudio", "video", tid, t)
@@ -1087,76 +996,6 @@ class TestGenerationWorker:
         # Wait for tasks to complete
         await asyncio.gather(*worker._slots.all_active_tasks(), return_exceptions=True)
 
-    @pytest.mark.asyncio
-    async def test_claim_requeue_on_full_pool_refreshes_provider_projection(self, monkeypatch, worker_db):
-        """池满回队前把重派生的 provider 刷回投影列。
-
-        走到二次校验池满这条路，说明存量投影与现值分裂（NULL 兜底，或入队后剧本参考集 /
-        供应商配置被改）；不刷新的话存量值躲过 pool_full 的 SQL 过滤，满池期间每个 cycle
-        都重复 claim → requeue → break，同 lane 其他可跑任务被持续排头阻塞。
-        """
-
-        class _StaleProjectionQueue(FakeWorkerQueue):
-            def __init__(self):
-                super().__init__()
-                self._tasks = [
-                    {
-                        "task_id": "vid-ready",
-                        "task_type": "video",
-                        "media_type": "video",
-                        "provider_id": "ark",
-                        "payload": {"video_provider_i2v": "ark/model"},
-                    },
-                    {
-                        "task_id": "vid-stale",
-                        "task_type": "reference_video",
-                        "media_type": "video",
-                        "provider_id": "ark",  # 入队时的投影，与现值分裂
-                        "payload": {},
-                    },
-                ]
-                self.claim_kwargs: list[dict] = []
-
-            async def claim_next_task(self, media_type, **kwargs):
-                self.claim_kwargs.append(kwargs)
-                if media_type == "video" and self._tasks:
-                    return self._tasks.pop()
-                return None
-
-        queue = _StaleProjectionQueue()
-
-        async def _current_provider(task):
-            return "minimax" if task["task_id"] == "vid-stale" else "ark"
-
-        worker = GenerationWorker(
-            queue=queue,
-            capacity=capacity_table({"minimax": {"video": 1}, "ark": {"video": 1}}),
-            provider_projection=_current_provider,
-            executor=stub_executors.execute,
-            resume_executor=stub_executors.execute_resume,
-        )
-
-        async def _execute(_task, *, claimed_provider_id):
-            assert claimed_provider_id == "ark"
-            return {"ok": True}
-
-        monkeypatch.setattr(stub_executors, "generation", _execute)
-
-        # 永不完成的占位 future 把 minimax 的 video 槽占满；不用 sleep，避免真实时间等待
-        occupier = asyncio.get_running_loop().create_future()
-        worker._slots.register("minimax", "video", "vid-running", occupier)
-        await seed_running_task(worker_db, "vid-stale", task_type="reference_video", resource_id="E1U1")
-        try:
-            await worker._claim_tasks()
-            await asyncio.gather(*[t for t in worker._slots.all_active_tasks() if t is not occupier])
-        finally:
-            occupier.cancel()
-
-        assert await task_status(worker_db, "vid-stale") == "queued"
-        assert queue.persisted_providers == [("vid-stale", "minimax")]
-        assert queue.succeeded == [("vid-ready", {"ok": True})]
-        assert any(kwargs.get("exclude_task_ids") == frozenset({"vid-stale"}) for kwargs in queue.claim_kwargs)
-
     # ------------------------------------------------------------------
     # _pool_full_providers
     # ------------------------------------------------------------------
@@ -1200,6 +1039,248 @@ class TestGenerationWorker:
         # video lane 无任何占用 → 黑名单为空（无占用就不可能"满"）
         assert worker._pool_full_providers("video") == frozenset()
         loop.close()
+
+
+class _CountingProjection:
+    """按项目现状推算 provider 的替身：返回 ``current`` 并记下被推算的任务。"""
+
+    def __init__(self, current: str) -> None:
+        self.current = current
+        self.calls: list[str] = []
+
+    async def __call__(self, task: dict[str, Any]) -> str:
+        self.calls.append(task["task_id"])
+        return self.current
+
+
+async def _seed_queued(
+    factory, task_id: str, *, media_type: str, task_type: str, provider_id: str | None, order: int
+) -> None:
+    await seed_running_task(
+        factory,
+        task_id,
+        task_type=task_type,
+        media_type=media_type,
+        resource_id=f"E1U{order}",
+        status="queued",
+        started_at=None,
+        queued_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(seconds=order),
+        provider_id=provider_id,
+    )
+
+
+async def _task_row(factory, task_id: str) -> dict[str, Any]:
+    from lib.db.models.task import Task
+
+    async with factory() as session:
+        row = await session.get(Task, task_id)
+        assert row is not None
+        return {"status": row.status, "provider_id": row.provider_id, "queued_at": row.queued_at}
+
+
+# (media_type, task_type)：图片、音频、视频三种媒体类型的代表任务；视频再覆盖参考生视频。
+_MEDIA_TASKS = [
+    pytest.param("image", "storyboard", id="image"),
+    pytest.param("audio", "tts", id="audio"),
+    pytest.param("video", "video", id="video"),
+    pytest.param("video", "reference_video", id="reference_video"),
+]
+
+
+class _GatedExecution:
+    """执行替身：认领周期结束后才放行执行体，记录每次执行收到的认领槽。
+
+    内存库的 session 共用一条连接，执行体落库若与同一周期里的下一次认领交错，会被那次认领的回滚
+    一并撤销；放行握手让两者先后发生。``drift_to`` 给定时，认领槽与它不同即按执行入口漂移抛错。
+    """
+
+    def __init__(self, *, drift_to: str | None = None) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._drift_to = drift_to
+        self._released = asyncio.Event()
+
+    async def __call__(self, task: dict[str, Any], *, claimed_provider_id: str) -> dict[str, Any]:
+        from lib.generation.generation_queue import ensure_dispatch_provider
+
+        await self._released.wait()
+        self.calls.append((task["task_id"], claimed_provider_id))
+        if self._drift_to is not None:
+            ensure_dispatch_provider(claimed_provider_id, self._drift_to)
+        return {"ok": True}
+
+    async def cycle(self, worker: GenerationWorker, *, keep: tuple[asyncio.Future[Any], ...] = ()) -> None:
+        """跑一个认领周期，放行并等完本周期派发的执行体（``keep`` 是测试自己登记的占位占用）。"""
+        await worker._claim_tasks()
+        self._released.set()
+        await asyncio.gather(*[t for t in worker._slots.all_active_tasks() if t not in keep])
+        await worker._drain_finished_tasks()
+        self._released.clear()
+
+
+class TestClaimByRecordedProvider:
+    """图片、音频、视频认领只按排队时记录的 provider 做池满过滤与槽位归属；项目现状由执行入口核对。"""
+
+    @staticmethod
+    def _worker(queue, projection, limits: dict[str, dict[str, int]], media_type: str) -> GenerationWorker:
+        return GenerationWorker(
+            queue=queue,
+            capacity=capacity_table(limits),
+            provider_projection=projection,
+            lanes=(media_type,),
+            executor=stub_executors.execute,
+            resume_executor=stub_executors.execute_resume,
+        )
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    @pytest.mark.parametrize("queued", [5, 50])
+    async def test_full_pool_claim_cycle_projects_no_queued_task(
+        self, worker_db, media_type: str, task_type: str, queued: int
+    ):
+        projection = _CountingProjection("ark")
+        worker = self._worker(db_queue(worker_db), projection, {"ark": {media_type: 1}}, media_type)
+        occupier = asyncio.get_running_loop().create_future()
+        worker._slots.register("ark", media_type, "running", occupier)
+        for n in range(queued):
+            await _seed_queued(
+                worker_db, f"task-{n}", media_type=media_type, task_type=task_type, provider_id="ark", order=n
+            )
+        try:
+            claimed = await worker._claim_tasks()
+        finally:
+            occupier.cancel()
+
+        assert claimed is False
+        assert projection.calls == []
+        assert {(await _task_row(worker_db, f"task-{n}"))["status"] for n in range(queued)} == {"queued"}
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    async def test_claim_runs_recorded_provider_without_projecting(
+        self, monkeypatch, worker_db, media_type: str, task_type: str
+    ):
+        execution = _GatedExecution()
+        monkeypatch.setattr(stub_executors, "generation", execution)
+        projection = _CountingProjection("minimax")
+        worker = self._worker(db_queue(worker_db), projection, {"ark": {media_type: 1}}, media_type)
+        await _seed_queued(
+            worker_db, "task-recorded", media_type=media_type, task_type=task_type, provider_id="ark", order=0
+        )
+
+        await execution.cycle(worker)
+
+        assert projection.calls == []
+        assert execution.calls == [("task-recorded", "ark")]
+        assert (await _task_row(worker_db, "task-recorded"))["status"] == "succeeded"
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    async def test_legacy_task_without_recorded_provider_is_projected_once_and_recorded(
+        self, monkeypatch, worker_db, media_type: str, task_type: str
+    ):
+        execution = _GatedExecution()
+        monkeypatch.setattr(stub_executors, "generation", execution)
+        projection = _CountingProjection("minimax")
+        worker = self._worker(db_queue(worker_db), projection, {"minimax": {media_type: 1}}, media_type)
+        await _seed_queued(
+            worker_db, "task-legacy", media_type=media_type, task_type=task_type, provider_id=None, order=0
+        )
+
+        await execution.cycle(worker)
+
+        assert projection.calls == ["task-legacy"]
+        assert execution.calls == [("task-legacy", "minimax")]
+        row = await _task_row(worker_db, "task-legacy")
+        assert (row["status"], row["provider_id"]) == ("succeeded", "minimax")
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    async def test_legacy_task_projected_into_full_pool_is_recorded_and_not_projected_again(
+        self, monkeypatch, worker_db, media_type: str, task_type: str
+    ):
+        execution = _GatedExecution()
+        monkeypatch.setattr(stub_executors, "generation", execution)
+        projection = _CountingProjection("minimax")
+        worker = self._worker(
+            db_queue(worker_db), projection, {"minimax": {media_type: 1}, "ark": {media_type: 1}}, media_type
+        )
+        occupier = asyncio.get_running_loop().create_future()
+        worker._slots.register("minimax", media_type, "running", occupier)
+        await _seed_queued(
+            worker_db, "task-legacy", media_type=media_type, task_type=task_type, provider_id=None, order=0
+        )
+        await _seed_queued(
+            worker_db, "task-ready", media_type=media_type, task_type=task_type, provider_id="ark", order=1
+        )
+        try:
+            for _cycle in range(2):
+                await execution.cycle(worker, keep=(occupier,))
+        finally:
+            occupier.cancel()
+
+        assert projection.calls == ["task-legacy"]
+        legacy = await _task_row(worker_db, "task-legacy")
+        assert (legacy["status"], legacy["provider_id"]) == ("queued", "minimax")
+        assert execution.calls == [("task-ready", "ark")]
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    async def test_recorded_provider_that_no_longer_supports_the_media_is_projected_once_and_recorded(
+        self, monkeypatch, worker_db, media_type: str, task_type: str
+    ):
+        """记录的供应商排队期间去掉了该媒体能力：按现状推算一次并写回，任务不判 provider_unsupported_media。"""
+        execution = _GatedExecution()
+        monkeypatch.setattr(stub_executors, "generation", execution)
+        projection = _CountingProjection("minimax")
+        worker = self._worker(
+            db_queue(worker_db), projection, {"custom": {media_type: 0}, "minimax": {media_type: 1}}, media_type
+        )
+        await _seed_queued(
+            worker_db, "task-stale", media_type=media_type, task_type=task_type, provider_id="custom", order=0
+        )
+
+        await execution.cycle(worker)
+
+        assert projection.calls == ["task-stale"]
+        assert execution.calls == [("task-stale", "minimax")]
+        row = await _task_row(worker_db, "task-stale")
+        assert (row["status"], row["provider_id"]) == ("succeeded", "minimax")
+
+    @pytest.mark.parametrize(("media_type", "task_type"), _MEDIA_TASKS)
+    async def test_provider_edited_while_queued_is_requeued_by_execution_entry_then_runs_on_new_slot(
+        self, monkeypatch, worker_db, media_type: str, task_type: str
+    ):
+        """项目改了供应商：认领仍占记录的槽，执行入口发现漂移后改记录并原位回队，下一周期走新槽。"""
+        execution = _GatedExecution(drift_to="grok")
+        monkeypatch.setattr(stub_executors, "generation", execution)
+        projection = _CountingProjection("grok")
+        worker = self._worker(
+            db_queue(worker_db), projection, {"ark": {media_type: 1}, "grok": {media_type: 1}}, media_type
+        )
+        await _seed_queued(
+            worker_db, "task-edited", media_type=media_type, task_type=task_type, provider_id="ark", order=1
+        )
+        # 排在它后面、已记录新供应商的任务：回队后被编辑的任务仍排在它前面，先占到新槽。
+        await _seed_queued(
+            worker_db, "task-later", media_type=media_type, task_type=task_type, provider_id="grok", order=2
+        )
+        queued_at = (await _task_row(worker_db, "task-edited"))["queued_at"]
+        occupier = asyncio.get_running_loop().create_future()
+        worker._slots.register("grok", media_type, "running", occupier)
+
+        try:
+            await execution.cycle(worker, keep=(occupier,))
+        finally:
+            occupier.cancel()
+        await worker._drain_finished_tasks()
+
+        assert await _task_row(worker_db, "task-edited") == {
+            "status": "queued",
+            "provider_id": "grok",
+            "queued_at": queued_at,
+        }
+
+        await execution.cycle(worker)
+
+        assert execution.calls == [("task-edited", "ark"), ("task-edited", "grok")]
+        assert projection.calls == []
+        assert (await _task_row(worker_db, "task-edited"))["status"] == "succeeded"
+        assert (await _task_row(worker_db, "task-later"))["status"] == "queued"
 
 
 class TestOrphanOnceAndLeaseFlap:

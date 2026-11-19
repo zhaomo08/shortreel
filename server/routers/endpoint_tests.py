@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
@@ -35,7 +36,8 @@ from starlette.datastructures import FormData, UploadFile
 
 from arcreel_market_core.endpoint_definition import AssetData, DefinitionDiagnostics, validate_definition
 from lib.backends.backend_assembly.specs import builtin_declarative_video_diagnostics
-from lib.config.registry import PROVIDER_REGISTRY, ProviderMeta, model_info_for
+from lib.catalog import query as catalog
+from lib.config.registry import PROVIDER_REGISTRY, ProviderMeta
 from lib.config.resolver import ConfigResolver
 from lib.custom_provider import is_custom_provider, parse_provider_id
 from lib.custom_provider.comfyui.failures import ComfyuiError
@@ -61,6 +63,7 @@ from lib.custom_provider.endpoint_test import (
     supports_test_mode,
     trial_run_manager,
 )
+from lib.custom_provider.path_overrides import NO_PATH_OVERRIDES, PathOverrides, effective_path_overrides
 from lib.db import async_session_factory, get_async_session
 from lib.db.models.custom_provider import CustomProvider
 from lib.db.repositories.custom_endpoint_repo import CustomEndpointRepository
@@ -69,6 +72,7 @@ from lib.generation.generation_result import problem_from_task_failure
 from lib.generation.task_failure import encode_failure, parse_failure, render_failure
 from lib.i18n.display_names import DisplayNames
 from lib.infra.api_errors import BadRequestError, ConflictError, NotFoundError, UnprocessableError
+from lib.infra.async_thread import run_sync_transaction
 from server.i18n import DisplayNamesCatalog, Translator
 
 logger = logging.getLogger(__name__)
@@ -430,11 +434,12 @@ async def start_trial_run(
         # 两种目标形态并存时静默取其一会让付费请求打到调用方没选中的那个目标上。
         raise BadRequestError("endpoint_test_definition_and_model_ref_exclusive")
     if body.model_ref is not None:
-        target, credentials, definition = await _model_ref_target(body.model_ref, session, resolver, _t)
+        target, credentials, definition, path_overrides = await _model_ref_target(body.model_ref, session, resolver, _t)
         # 结果体记录的模型与实际执行、记账的必须是同一个：model_ref 路径以模型行为准，
         # 覆盖 parameters 里独立携带的 model。
         parameters = replace(parameters, model=body.model_ref.model_id)
     elif body.definition is not None:
+        path_overrides = NO_PATH_OVERRIDES
         definition = _accepted_definition(body.definition, _t, mode=EndpointTestMode.TRIAL_RUN)
         support = _support(definition)
         require_base_url, require_api_key = support.credential_needs(definition)
@@ -445,22 +450,24 @@ async def start_trial_run(
     else:
         raise BadRequestError("endpoint_test_definition_or_model_ref_required")
 
-    preview_payload = _preview_payload(definition, parameters, credentials, assets, _t)
-    staging = Path(tempfile.mkdtemp(prefix="arcreel-trial-run-"))
+    preview_payload = _preview_payload(definition, parameters, credentials, assets, _t, path_overrides)
+    # 临时目录在线程里建好就登记进来：取消落在落素材那一程时返回值会丢，靠它回收。
+    staged: list[Path] = []
     try:
+        persisted = await run_sync_transaction(_stage_assets, assets, staged)
         run = await manager.start(
             target,
             parameters,
-            assets=_persist_assets(assets, staging),
-            staging=staging,
+            assets=persisted,
+            staging=staged[0],
             request_preview=preview_payload,
         )
     except TrialRunBusyError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+        await run_sync_transaction(_remove_staging, staged)
         raise ConflictError("trial_run_already_running") from exc
-    except Exception:
+    except BaseException:
         # manager 接手前失败（落素材、建结果目录）时临时目录还没有主人，留在盘上没人会回来删。
-        shutil.rmtree(staging, ignore_errors=True)
+        await run_sync_transaction(_remove_staging, staged)
         raise
     return _run_response(run, _t, names)
 
@@ -473,7 +480,7 @@ async def get_trial_run(
     manager: TrialRunManager = Depends(get_trial_run_manager),
 ) -> TrialRunResponse:
     """读一次测试连接。运行中读内存、终态读盘；取消或被重启打断的 run 不留结果。"""
-    run = manager.get(run_id)
+    run = await asyncio.to_thread(manager.get, run_id)
     if run is None:
         raise NotFoundError("trial_run_not_found")
     return _run_response(run, _t, names)
@@ -501,10 +508,11 @@ async def get_trial_run_artifact(
     ``artifact.png``），而 ComfyUI 那一侧导出的容器可以是同族里的另一个，按名字声明会让浏览器
     按一个错误的类型解。
     """
-    path = manager.artifact_path(run_id)
-    if path is None:
+    located = await asyncio.to_thread(_locate_artifact, manager, run_id)
+    if located is None:
         raise NotFoundError("trial_run_artifact_not_found")
-    return FileResponse(path, media_type=artifact_media_type(path))
+    path, media_type = located
+    return FileResponse(path, media_type=media_type)
 
 
 # ---------------------------------------------------------------------------
@@ -548,12 +556,15 @@ async def _model_ref_target(
     session: AsyncSession,
     resolver: ConfigResolver,
     _t: Translator,
-) -> tuple[TrialRunTarget, EndpointTestCredentials | None, dict[str, Any] | None]:
-    """按模型行解析目标。解析出声明式定义时连凭证一起取出，好让结果体有请求与提取两段。"""
+) -> tuple[TrialRunTarget, EndpointTestCredentials | None, dict[str, Any] | None, PathOverrides]:
+    """按模型行解析目标。解析出声明式定义时连凭证一起取出，好让结果体有请求与提取两段。
+
+    自定义供应商的模型行还带出它生效的路径覆盖（``docs/adr/0101``），渲染请求段与真发一致。
+    """
     if not is_custom_provider(model_ref.provider_id):
         # 内置供应商同样要先核模型行：未登记的 model 会让装配层落到该供应商的默认视频模型，
         # 已登记的非视频 model（如文本档）则会被派发到视频端点——两种都会付费打给另一个模型。
-        info = model_info_for(model_ref.provider_id, model_ref.model_id)
+        info = catalog.get_model(model_ref.provider_id, model_ref.model_id)
         if info is None:
             raise NotFoundError("model_not_found")
         if info.media_type != "video":
@@ -573,7 +584,7 @@ async def _model_ref_target(
             definition = _accepted_definition(dict(builtin_definition), _t, mode=EndpointTestMode.TRIAL_RUN)
             credentials = EndpointTestCredentials(base_url=base_url, api_key=api_key)
         target = model_ref_target(model_ref.provider_id, model_ref.model_id, resolver=resolver, definition=definition)
-        return target, credentials, definition
+        return target, credentials, definition, NO_PATH_OVERRIDES
     provider = await _custom_provider(model_ref.provider_id, session)
     model = await CustomProviderRepository(session).get_model_by_ids(provider.id, model_ref.model_id)
     if model is None:
@@ -610,7 +621,7 @@ async def _model_ref_target(
         definition=definition,
         media_type=endpoint_spec.media_type,
     )
-    return target, credentials, definition
+    return target, credentials, definition, effective_path_overrides(model.path_overrides, endpoint_spec.requests)
 
 
 def _preview_payload(
@@ -619,6 +630,7 @@ def _preview_payload(
     credentials: EndpointTestCredentials | None,
     assets: EndpointTestAssets,
     _t: Translator,
+    path_overrides: PathOverrides = NO_PATH_OVERRIDES,
 ) -> dict[str, Any] | None:
     """结果体里的「渲染请求」段。
 
@@ -633,7 +645,12 @@ def _preview_payload(
         return None
     try:
         preview = support.preview(
-            definition, parameters, credentials=credentials, assets=assets, placeholder_missing_assets=False
+            definition,
+            parameters,
+            credentials=credentials,
+            assets=assets,
+            placeholder_missing_assets=False,
+            path_overrides=path_overrides,
         )
     except EndpointTestDefinitionError as exc:
         raise _invalid(exc.diagnostics, _t) from exc
@@ -643,6 +660,22 @@ def _preview_payload(
         "headers": preview.submit.headers,
         "body": preview.submit.body,
     }
+
+
+def _locate_artifact(manager: TrialRunManager, run_id: str) -> tuple[Path, str] | None:
+    path = manager.artifact_path(run_id)
+    return None if path is None else (path, artifact_media_type(path))
+
+
+def _stage_assets(assets: EndpointTestAssets, staged: list[Path]) -> dict[str, Path | list[Path] | None]:
+    staging = Path(tempfile.mkdtemp(prefix="arcreel-trial-run-"))
+    staged.append(staging)
+    return _persist_assets(assets, staging)
+
+
+def _remove_staging(staged: list[Path]) -> None:
+    for staging in staged:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _persist_assets(assets: EndpointTestAssets, staging: Path) -> dict[str, Path | list[Path] | None]:

@@ -1,11 +1,17 @@
 """GrokTextBackend tests."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from xai_sdk.proto import usage_pb2
 
 from lib.backends.text_backends.base import TextCapability, TextGenerationRequest, TextGenerationResult
+from tests.unit.lib.backends.text_backends.response_schema_support import (
+    leaked_class_docstrings,
+    response_schema_params,
+)
 
 
 @pytest.fixture
@@ -32,7 +38,7 @@ class TestProperties:
             from lib.backends.text_backends.grok import GrokTextBackend
 
             b = GrokTextBackend(api_key="k")
-        assert b.model == "grok-4-1-fast-reasoning"
+        assert b.model == "grok-4.3"
 
     def test_capabilities(self, mock_xai):
         with patch("lib.backends.text_backends.grok.create_grok_client"):
@@ -76,6 +82,19 @@ class TestGenerate:
         assert result.text == "grok output"
         assert result.provider == "grok"
 
+    async def test_usage_deducts_cache_hits_and_bills_reasoning_as_output(self, backend):
+        # xAI 的 completion_tokens 不含推理 token，推理 token 另报且按输出价计费
+        usage = usage_pb2.SamplingUsage(
+            prompt_tokens=1_000, cached_prompt_text_tokens=600, completion_tokens=50, reasoning_tokens=200
+        )
+        mock_chat = MagicMock()
+        mock_chat.sample = AsyncMock(return_value=SimpleNamespace(content="x", usage=usage))
+        backend._test_client.chat.create.return_value = mock_chat
+
+        result = await backend.generate(TextGenerationRequest(prompt="hello"))
+
+        assert (result.input_tokens, result.cache_read_tokens, result.output_tokens) == (1_000, 600, 250)
+
     async def test_structured_output(self, backend):
         mock_chat = MagicMock()
         mock_response = SimpleNamespace(content='{"name": "test"}')
@@ -91,6 +110,24 @@ class TestGenerate:
         name_field = dynamic_model.model_fields["name"]
         assert name_field.annotation == (str | None)
         assert name_field.is_required() is False
+
+    @pytest.mark.parametrize("model", response_schema_params())
+    async def test_pydantic_response_format_schema_has_no_class_docstrings(self, backend, model):
+        """xai_sdk 用 response_format.model_json_schema() 生成下发的 schema，其中不带类 docstring。"""
+        from pydantic import ValidationError
+
+        mock_chat = MagicMock()
+        mock_chat.sample = AsyncMock(return_value=SimpleNamespace(content="{}"))
+        backend._test_client.chat.create.return_value = mock_chat
+
+        # 回包只是空对象，过不了模型校验；本用例只看下发的 schema
+        with pytest.raises(ValidationError):
+            await backend.generate(TextGenerationRequest(prompt="gen", response_schema=model))
+
+        response_format = backend._test_client.chat.create.call_args.kwargs["response_format"]
+        assert issubclass(response_format, model)
+        wire_json = json.dumps(response_format.model_json_schema(), ensure_ascii=False)
+        assert leaked_class_docstrings(model, wire_json) == []
 
     async def test_max_output_tokens_passed_to_chat_create(self, backend):
         """max_output_tokens 透传为 xai_sdk chat.create(max_tokens=)。"""

@@ -24,7 +24,7 @@ import shutil
 import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -38,6 +38,7 @@ from arcreel_market_core.video_backend_contract import (
     VideoCapabilityError,
     VideoGenerationRequest,
 )
+from lib.backends.backend_assembly.specs import apply_user_added_video_overrides
 from lib.backends.container_sniff import CONTAINER_HEAD_BYTES, sniff_container
 from lib.backends.image_backends.base import (
     ImageCapability,
@@ -49,12 +50,14 @@ from lib.backends.providers import CALL_TYPE_IMAGE, CALL_TYPE_VIDEO, CallPurpose
 from lib.backends.video_frame_slots import resolve_first_frame_aspect_ratio, resolve_video_capabilities
 from lib.billing.ledger import Ledger
 from lib.config.resolver import ConfigResolver
+from lib.custom_provider import is_custom_provider
 from lib.custom_provider.comfyui.failures import ComfyuiError
 from lib.custom_provider.declarative_backend import DeclarativeRuntimeError, DeclarativeVideoBackend
 from lib.custom_provider.declarative_image_backend import DeclarativeImageBackend
 from lib.db.base import DEFAULT_USER_ID
 from lib.db.repositories.usage_repo import bound_provider_response
 from lib.generation.task_failure import encode_failure
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.data_root_layout import DataRootLayout
 
 from .check import STAGES, check_response, stage_report_payload
@@ -114,6 +117,9 @@ class TrialRunTarget:
     #: 固定 0，且能力由节点绑定推导而内联定义这条入口拿不到推导结果，跑闸只会把「绑定漏了首帧」
     #: 说成一条能力拒绝——而用户点测试连接正是为了看 ComfyUI 自己怎么说。
     gate_capabilities: bool = True
+    #: 解析出的视频能力上要不要叠加内置供应商下用户添加的模型的能力覆盖（docs/adr/0104）。
+    #: 只有内置供应商的模型行为真；自定义供应商的覆盖由 CustomVideoBackend 自己叠加，内联定义没有模型行。
+    user_added_overrides: bool = False
 
 
 def _as_float(value: object) -> float | None:
@@ -278,10 +284,13 @@ class TrialRunManager:
 
     def purge_expired(self, *, now: float | None = None) -> int:
         """清掉过了 TTL 的结果目录，返回清理条数。进程启动与每次新建各扫一遍。"""
-        moment = now if now is not None else time.time()
+        return self._purge_expired(frozenset(self._runs), now if now is not None else time.time())
+
+    def _purge_expired(self, active: Collection[str], moment: float) -> int:
+        """``purge_expired`` 的扫描本体。在跑的 run 由调用方在事件循环上取快照传入，供线程里调用。"""
         removed = 0
         for entry in self.root.iterdir():
-            if not entry.is_dir() or entry.name in self._runs:
+            if not entry.is_dir() or entry.name in active:
                 continue
             try:
                 if not _expired(entry, moment):
@@ -321,7 +330,6 @@ class TrialRunManager:
         """
         if user_id in self._owners.values():
             raise TrialRunBusyError(user_id)
-        self.purge_expired()
         run_id = uuid.uuid4().hex
         run = TrialRun(
             id=run_id,
@@ -338,12 +346,12 @@ class TrialRunManager:
             self._staging[run_id] = staging
         # 名额与素材目录先占后建目录：建目录失败（盘满、只读挂载）时占位不还，后续测试永远
         # 被拒成 busy，而取消又因 task 尚未登记而 404——与结算失败那条路同一种死锁。
+        # 占位也必须在第一次 await 之前：并发闸靠的是「查 busy」与「占位」之间没有让出点。
         try:
-            (self.root / run_id).mkdir(parents=True, exist_ok=True)
-            task = asyncio.create_task(self._execute(run, target, parameters, assets or {}))
-        except Exception:
-            self._release(run_id)
-            _remove_tree(self.root / run_id)
+            run_dir = await run_sync_transaction(self._prepare_run_dir, run_id, frozenset(self._runs))
+            task = asyncio.create_task(self._execute(run, run_dir, target, parameters, assets or {}))
+        except BaseException:
+            await run_sync_transaction(self._discard, run_id, self._release(run_id))
             raise
         self._tasks[run_id] = task
         task.add_done_callback(lambda _task: self._tasks.pop(run_id, None))
@@ -375,7 +383,7 @@ class TrialRunManager:
         if task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        return self.get(run_id)
+        return await asyncio.to_thread(self.get, run_id)
 
     def artifact_path(self, run_id: str) -> Path | None:
         """这次 run 落盘的产物；两类各有自己的文件名，读接口不必先读一遍结果体才知道找哪个。"""
@@ -416,13 +424,13 @@ class TrialRunManager:
             if run.api_call_id is not None:
                 await self._ledger.resume_cancelled(call_id=run.api_call_id)
         finally:
-            self._release(run_id)
-            _remove_tree(self.root / run_id)
+            await run_sync_transaction(self._discard, run_id, self._release(run_id))
         return True
 
     async def _execute(
         self,
         run: TrialRun,
+        run_dir: Path,
         target: TrialRunTarget,
         parameters: EndpointTestParameters,
         assets: Mapping[str, Path | list[Path] | None],
@@ -439,6 +447,9 @@ class TrialRunManager:
             # ``video_capabilities_for_tier`` 的端点按分辨率收窄，读未收窄的属性会比生产放得更宽。
             # 测试请求不带 ``service_tier``，下发的就是请求缺省档，解析也取缺省档。
             video_caps = resolve_video_capabilities(backend, resolution=parameters.resolution) if is_video else None
+            # 与生产执行闸门同一口径：叠加后的能力既过闸，也随请求带给后端。
+            if video_caps is not None and target.user_added_overrides:
+                video_caps = apply_user_added_video_overrides(video_caps, target.provider, target.model)
             # 生产路径在记账括号前跑同一道能力闸（声明的违约在付费前拒绝，不发给供应商）；
             # 测试连接跑的是生产那条路，闸也一致。免闸的目标见 ``TrialRunTarget.gate_capabilities``。
             if target.gate_capabilities:
@@ -472,16 +483,17 @@ class TrialRunManager:
                 on_response = self._response_writer(run, capture, call.call_id)
                 request = (
                     self._video_request(
-                        run,
+                        run_dir,
                         parameters,
                         assets,
                         poll_timeout,
                         aspect_ratio=request_aspect_ratio,
+                        video_capabilities=video_caps,
                         on_provider_response=on_response,
                     )
                     if is_video
                     else self._image_request(
-                        run, parameters, assets, aspect_ratio=request_aspect_ratio, on_provider_response=on_response
+                        run_dir, parameters, assets, aspect_ratio=request_aspect_ratio, on_provider_response=on_response
                     )
                 )
                 result = await backend.generate(request)
@@ -490,8 +502,8 @@ class TrialRunManager:
                 # 产物在供应商那儿的地址：两类结果各叫一个名字，落进同一格。
                 run.video_url = getattr(result, "video_uri", None) or getattr(result, "image_uri", None)
                 run.duration_seconds = getattr(result, "duration_seconds", None)
-                run.has_artifact = self._artifact_file(run.id, target.media_type).is_file()
-            self._finish(run, target, capture, TrialRunStatus.SUCCEEDED)
+                run.has_artifact = await asyncio.to_thread(_artifact_file(run_dir, target.media_type).is_file)
+            await self._finish(run, run_dir, target, capture, TrialRunStatus.SUCCEEDED)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -501,7 +513,7 @@ class TrialRunManager:
                 exc, DeclarativeRuntimeError | ComfyuiError | VideoCapabilityError | ImageCapabilityError
             )
             run.error = encode_failure(exc.code, **exc.params) if structured else str(exc)
-            self._finish(run, target, capture, TrialRunStatus.FAILED)
+            await self._finish(run, run_dir, target, capture, TrialRunStatus.FAILED)
 
     def _response_writer(
         self, run: TrialRun, capture: _ResponseCapture, call_id: int
@@ -527,19 +539,20 @@ class TrialRunManager:
 
     def _video_request(
         self,
-        run: TrialRun,
+        run_dir: Path,
         parameters: EndpointTestParameters,
         assets: Mapping[str, Path | list[Path] | None],
         poll_timeout: int,
         *,
         aspect_ratio: str,
+        video_capabilities: VideoCapabilities | None,
         on_provider_response: Callable[[ProviderResponseStage, object], Awaitable[None]],
     ) -> VideoGenerationRequest:
         reference_images = assets.get("reference_images")
         reference_audio = assets.get("reference_audio_files")
         return VideoGenerationRequest(
             prompt=parameters.prompt,
-            output_path=self._artifact_file(run.id, "video"),
+            output_path=_artifact_file(run_dir, "video"),
             aspect_ratio=aspect_ratio,
             duration_seconds=parameters.duration_seconds,
             resolution=parameters.resolution,
@@ -550,11 +563,12 @@ class TrialRunManager:
             generate_audio=parameters.generate_audio,
             poll_timeout_seconds=poll_timeout,
             on_provider_response=on_provider_response,
+            video_capabilities=video_capabilities,
         )
 
     def _image_request(
         self,
-        run: TrialRun,
+        run_dir: Path,
         parameters: EndpointTestParameters,
         assets: Mapping[str, Path | list[Path] | None],
         *,
@@ -570,7 +584,7 @@ class TrialRunManager:
         reference_images = assets.get("reference_images")
         return ImageGenerationRequest(
             prompt=parameters.prompt,
-            output_path=self._artifact_file(run.id, "image"),
+            output_path=_artifact_file(run_dir, "image"),
             reference_images=[
                 ReferenceImage(path=str(path))
                 for path in (reference_images if isinstance(reference_images, list) else [])
@@ -587,9 +601,10 @@ class TrialRunManager:
 
         return await read_video_poll_timeout_seconds()
 
-    def _finish(
+    async def _finish(
         self,
         run: TrialRun,
+        run_dir: Path,
         target: TrialRunTarget,
         capture: _ResponseCapture,
         status: TrialRunStatus,
@@ -600,12 +615,9 @@ class TrialRunManager:
         if run.provider_job_id is None:
             run.provider_job_id = _submitted_prompt_id(capture.submit)
         run.extractions = _stage_reports(target.definition, capture)
-        try:
-            self._result_file(run.id).write_text(
-                json.dumps(run.to_payload(), ensure_ascii=False, default=str), encoding="utf-8"
-            )
-        except OSError:
-            logger.warning("测试连接结果写盘失败 run_id=%s", run.id, exc_info=True)
+        payload = json.dumps(run.to_payload(), ensure_ascii=False, default=str)
+        # 先写盘再让出内存里的 run：读接口在内存里查不到才读盘，倒过来会有一段读成 404。
+        await run_sync_transaction(_settle_files, run_dir / _RESULT_FILE, payload, self._staging.get(run.id))
         self._release(run.id)
 
     async def shutdown(self) -> None:
@@ -623,20 +635,39 @@ class TrialRunManager:
             except Exception:
                 logger.warning("关停时结算测试连接失败：%s", run_id, exc_info=True)
 
-    def _release(self, run_id: str) -> None:
-        """让出用户的并发名额，并删掉素材临时目录——素材用完即丢，不留在盘上。"""
+    def _release(self, run_id: str) -> Path | None:
+        """让出用户的并发名额，交回素材临时目录由调用方删——素材用完即丢，不留在盘上。"""
         self._runs.pop(run_id, None)
         self._owners.pop(run_id, None)
         self._response_writes.pop(run_id, None)
-        staging = self._staging.pop(run_id, None)
+        return self._staging.pop(run_id, None)
+
+    def _prepare_run_dir(self, run_id: str, active: Collection[str]) -> Path:
+        """新建前扫一遍过期目录，再建这次 run 的结果目录。线程里跑。"""
+        self._purge_expired(active, time.time())
+        run_dir = self.root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def _discard(self, run_id: str, staging: Path | None) -> None:
+        """删掉一次没跑到终态的 run 在盘上的素材临时目录与结果目录。线程里跑。"""
         if staging is not None:
             _remove_tree(staging)
+        _remove_tree(self.root / run_id)
 
-    def _result_file(self, run_id: str) -> Path:
-        return self.root / run_id / _RESULT_FILE
 
-    def _artifact_file(self, run_id: str, media_type: str) -> Path:
-        return self.root / run_id / _ARTIFACT_FILE_BY_MEDIA_TYPE[media_type]
+def _artifact_file(run_dir: Path, media_type: str) -> Path:
+    return run_dir / _ARTIFACT_FILE_BY_MEDIA_TYPE[media_type]
+
+
+def _settle_files(result_file: Path, payload: str, staging: Path | None) -> None:
+    """终态落盘：写结果体并删掉素材临时目录。线程里跑。"""
+    try:
+        result_file.write_text(payload, encoding="utf-8")
+    except OSError:
+        logger.warning("测试连接结果写盘失败 run_id=%s", result_file.parent.name, exc_info=True)
+    if staging is not None:
+        _remove_tree(staging)
 
 
 async def _gate_trial_video_request(
@@ -674,6 +705,7 @@ async def _gate_trial_video_request(
         model=target.model,
         prompt=parameters.prompt,
         has_image=bool(slot_plan.specs),
+        has_first_frame=slot_plan.start_index is not None,
         end_image=end_image,
         reference_images=images,
         reference_audio_files=audio_files,
@@ -768,6 +800,7 @@ def model_ref_target(
         build_backend=build,
         definition=definition,
         media_type=media_type,
+        user_added_overrides=not is_custom_provider(provider_id),
     )
 
 

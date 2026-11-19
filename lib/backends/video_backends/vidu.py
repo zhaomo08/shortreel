@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from arcreel_market_core.video_backend_contract import (
@@ -27,6 +28,9 @@ from lib.backends.backend_runtime import (
     submit_post,
 )
 from lib.backends.providers import PROVIDER_VIDU
+from lib.backends.transport_layer import TransportLayer
+from lib.backends.video_backends.metering import video_usage
+from lib.backends.video_backends.name_family import UNRECOGNIZED_MODEL_CAPABILITIES, match_by_names
 from lib.backends.vidu_shared import (
     VIDU_RETRYABLE_ERRORS,
     assert_vidu_body_size,
@@ -38,6 +42,7 @@ from lib.backends.vidu_shared import (
     safe_body_for_log,
     vidu_failure_reason,
 )
+from lib.billing.metering import Usage
 from lib.infra.logging_utils import format_kwargs_for_log
 from lib.infra.retry import with_retry_async
 
@@ -132,22 +137,16 @@ _ENDPOINT_MODELS: dict[str, frozenset[str]] = {
 # 端点是否接受 aspect_ratio
 _ENDPOINTS_WITH_ASPECT_RATIO = frozenset({"/text2video", "/reference2video"})
 
-# 按 model 列分辨率白名单（按 /img2video & /reference2video 的并集，最宽松）
-_RESOLUTION_WHITELIST: dict[str, list[str]] = {
-    "viduq3-pro": ["540p", "720p", "1080p"],
-    "viduq3-pro-fast": ["540p", "720p", "1080p"],
-    "viduq3-turbo": ["540p", "720p", "1080p"],
-    "viduq3": ["540p", "720p", "1080p"],
-    "viduq3-mix": ["720p", "1080p"],
-    "viduq2": ["540p", "720p", "1080p"],
-    "viduq2-pro": ["540p", "720p", "1080p"],
-    "viduq2-pro-fast": ["720p", "1080p"],
-    "viduq2-turbo": ["540p", "720p", "1080p"],
-    "viduq1": ["1080p"],
-    "viduq1-classic": ["1080p"],
-    "vidu2.0": ["360p", "720p", "1080p"],
-}
-_DEFAULT_RESOLUTION = "720p"
+
+_KNOWN_MODELS = frozenset().union(*_ENDPOINT_MODELS.values())
+
+
+def _known_model(model: str) -> str | None:
+    """模型按名字认得的 Vidu 型号，即端点白名单与逐型号规则表的键；认不得时为 ``None``。
+
+    名字按 name_family 的规则取，逐个精确比对端点白名单。
+    """
+    return match_by_names(model, lambda name: name if name in _KNOWN_MODELS else None)
 
 
 def _serves_only_reference2video(model: str) -> bool:
@@ -170,10 +169,14 @@ class ViduVideoBackend:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
+        transport_layer: TransportLayer | None = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
+        self._transport_layer = transport_layer
         self._model = model or DEFAULT_MODEL
+        # 端点白名单与逐型号规则按认得的型号查；认不得的模型不做型号级校正，原样发给上游。
+        self._known_model = _known_model(self._model)
 
     @property
     def name(self) -> str:
@@ -185,7 +188,10 @@ class ViduVideoBackend:
 
     @staticmethod
     def video_capabilities_for_model(model: str) -> VideoCapabilities:
-        """按 model_id 纯计算 caps —— 不构造 client。first_frame/last_frame/reference_images
+        """按模型名纯计算 caps —— 不构造 client。认不得的型号（见 ``_known_model``）取 name_family 的
+        统一回落，音轨按恒无声声明（只有 q3 系列下发音轨开关），prompt 上限取宽值。
+
+        认得的型号 first_frame/last_frame/reference_images
         直接查 `_ENDPOINT_MODELS` 的端点白名单，与 `_select_endpoint`/`_build_request` 实际能否
         派发到 /img2video、/start-end2video、/reference2video 同源：例如 `viduq3` 不在
         /img2video、/start-end2video 白名单内（只支持 /reference2video），若恒为 True，
@@ -194,28 +200,34 @@ class ViduVideoBackend:
         白名单的 model 不可能提交参考图，声明非零容量会误导展示层（如自定义供应商的
         `/video-capabilities`）。
         """
-        reference_images = model in _ENDPOINT_MODELS["/reference2video"]
-        first_frame = model in _ENDPOINT_MODELS["/img2video"]
-        last_frame = model in _ENDPOINT_MODELS["/start-end2video"]
+        known = _known_model(model)
+        if known is None:
+            return replace(
+                UNRECOGNIZED_MODEL_CAPABILITIES,
+                max_prompt_chars=_PROMPT_MAX_TEXT2VIDEO,
+                audio_track=VideoAudioMode.ALWAYS_OFF,
+            )
+        reference_images = known in _ENDPOINT_MODELS["/reference2video"]
+        first_frame = known in _ENDPOINT_MODELS["/img2video"]
+        last_frame = known in _ENDPOINT_MODELS["/start-end2video"]
         return VideoCapabilities(
-            text_to_video=model in _ENDPOINT_MODELS["/text2video"],
+            text_to_video=known in _ENDPOINT_MODELS["/text2video"],
             first_frame=first_frame,
             last_frame=last_frame,
             max_reference_images=_MAX_REFERENCE_IMAGES if reference_images else 0,
-            # 参考图与首帧在 Vidu 上是互斥模式：_select_endpoint 见参考图即切 /reference2video，
-            # start_image 不进请求体（首帧被丢弃）。
+            # 参考图与首尾帧在 Vidu 上是互斥模式：_select_endpoint 见参考图即切 /reference2video，
+            # 该端点不收首尾帧，_build_request 拒绝两者同带的请求。
             #
             # prompt 上限按端点分档（/reference2video 更窄），而本函数无端点上下文，只能声明
             # 「该 model 无论走哪条端点都成立」的值，不在此处按最窄值误拒多端点 model 合法的
-            # t2v/i2v 请求。未登记 model（中转自定义命名）不在任何白名单内，取宽值：静态声明只该
-            # 拒绝必然违约的请求，对能力不明的 model 误拒是更糟的降级。
+            # t2v/i2v 请求。
             max_prompt_chars=(
-                _PROMPT_MAX_REFERENCE2VIDEO if _serves_only_reference2video(model) else _PROMPT_MAX_TEXT2VIDEO
+                _PROMPT_MAX_REFERENCE2VIDEO if _serves_only_reference2video(known) else _PROMPT_MAX_TEXT2VIDEO
             ),
             # 音轨开关 body["audio"] 只对 q3 系列下发（_build_request），其余系列默认静音且无
-            # 开关可下发，故恒无声。未登记 model 不在 _Q3_MODELS 内，同样按恒无声声明——与
-            # `generate_audio=... if self._model in _Q3_MODELS else False` 的结算口径同源。
-            audio_track=(VideoAudioMode.CONTROLLABLE if model in _Q3_MODELS else VideoAudioMode.ALWAYS_OFF),
+            # 开关可下发，故恒无声——与 `generate_audio=... if self._known_model in _Q3_MODELS else False`
+            # 的结算口径同源。
+            audio_track=(VideoAudioMode.CONTROLLABLE if known in _Q3_MODELS else VideoAudioMode.ALWAYS_OFF),
         )
 
     @property
@@ -232,7 +244,9 @@ class ViduVideoBackend:
         # _build_request 已把 duration 归一化到 body["duration"]，统一使用以避免 None 崩溃及结果不一致。
         coerced_duration = int(body["duration"])
 
-        async with create_vidu_client(api_key=self._api_key, base_url=self._base_url) as client:
+        async with create_vidu_client(
+            api_key=self._api_key, base_url=self._base_url, transport_layer=self._transport_layer
+        ) as client:
             payload = await self._create_task(client, endpoint, body, request)
             task_id = payload["task_id"]
             if request.on_provider_resubmit_unsafe is not None:
@@ -273,7 +287,7 @@ class ViduVideoBackend:
             seed=request.seed,
             usage_tokens=int(actual_credits) if actual_credits is not None else None,
             task_id=task_id,
-            generate_audio=request.generate_audio if self._model in _Q3_MODELS else False,
+            generate_audio=request.generate_audio if self._known_model in _Q3_MODELS else False,
         )
 
     # ── request building ────────────────────────────────────────────────
@@ -281,13 +295,27 @@ class ViduVideoBackend:
     def _build_request(self, request: VideoGenerationRequest) -> tuple[str, dict]:
         endpoint = self._select_endpoint(request)
 
-        # 1) 校验模型 × 端点（提前失败比 400 含义更清晰）
+        # 0) 端点发不出的输入付费前拒绝，不静默丢弃：能力被用户覆盖放宽时 gate 会放行它们。
+        if request.reference_audio_files:
+            raise VideoCapabilityError("video_reference_audio_unsupported", provider=self.name, model=self._model)
+        if endpoint == "/reference2video":
+            if request.start_image is not None or request.end_image is not None:
+                raise VideoCapabilityError("video_reference_images_with_frames_unsupported", model=self._model)
+            count = len(_reference_images(request))
+            if count > _MAX_REFERENCE_IMAGES:
+                raise VideoCapabilityError(
+                    "video_reference_images_exceeded", model=self._model, limit=_MAX_REFERENCE_IMAGES, count=count
+                )
+        if endpoint == "/text2video" and request.end_image is not None:
+            raise VideoCapabilityError("video_end_image_requires_start_image", model=self._model)
+
+        # 1) 校验认得的型号 × 端点（提前失败比 400 含义更清晰）；认不得的模型由上游判定
         endpoint_models = _ENDPOINT_MODELS.get(endpoint, frozenset())
-        if endpoint_models and self._model not in endpoint_models:
+        if self._known_model is not None and endpoint_models and self._known_model not in endpoint_models:
             raise RuntimeError(f"Vidu 模型 {self._model} 不支持 {endpoint} 端点；该端点支持: {sorted(endpoint_models)}")
 
         # 2) duration 在合法集合内取最近值
-        duration = _coerce_duration(self._model, endpoint, request.duration_seconds)
+        duration = _coerce_duration(self._known_model or self._model, endpoint, request.duration_seconds)
 
         # 3) prompt 长度（reference2video 上限 2000，其他 5000）
         # 超限一律拒绝，不再客户端截断：截断会产出与意图不符的成片却照常计费、用户无从知情，
@@ -311,17 +339,16 @@ class ViduVideoBackend:
             "duration": duration,
         }
 
-        # 4) resolution 白名单兜底
-        resolution = _coerce_resolution(self._model, request.resolution)
-        if resolution:
-            body["resolution"] = resolution
+        # 4) resolution 以模型目录条目为准，原样透传；越界档位由上游拒绝（docs/adr/0104）
+        if request.resolution:
+            body["resolution"] = request.resolution
 
         # 5) seed
         if request.seed is not None:
             body["seed"] = request.seed
 
         # 6) audio 仅 q3 系列接受
-        if self._model in _Q3_MODELS:
+        if self._known_model in _Q3_MODELS:
             body["audio"] = bool(request.generate_audio)
 
         # 7) aspect_ratio 仅 text2video / reference2video 接受
@@ -330,11 +357,7 @@ class ViduVideoBackend:
 
         # 8) images 按端点形态填充
         if endpoint == "/reference2video":
-            refs = [Path(p) for p in (request.reference_images or []) if p]
-            if len(refs) > _MAX_REFERENCE_IMAGES:
-                logger.warning("Vidu 参考图数量 %d 超过上限 %d，截断", len(refs), _MAX_REFERENCE_IMAGES)
-                refs = refs[:_MAX_REFERENCE_IMAGES]
-            body["images"] = [image_to_data_uri(p) for p in refs]
+            body["images"] = [image_to_data_uri(p) for p in _reference_images(request)]
         elif endpoint == "/start-end2video":
             assert request.start_image is not None
             assert request.end_image is not None
@@ -350,21 +373,34 @@ class ViduVideoBackend:
         return endpoint, body
 
     def _select_endpoint(self, request: VideoGenerationRequest) -> str:
-        refs = [p for p in (request.reference_images or []) if p]
         # 若用户显式传了 start/end_image 但文件不存在，应直接失败而不是静默降级到 text2video。
         if request.start_image is not None and not Path(request.start_image).exists():
             raise FileNotFoundError(f"start_image 文件不存在: {request.start_image}")
         if request.end_image is not None and not Path(request.end_image).exists():
             raise FileNotFoundError(f"end_image 文件不存在: {request.end_image}")
-        has_start = request.start_image is not None
-        has_end = request.end_image is not None
-        if refs:
-            return "/reference2video"
-        if has_start and has_end:
-            return "/start-end2video"
-        if has_start:
-            return "/img2video"
-        return "/text2video"
+        return _endpoint_for(request)
+
+    @staticmethod
+    def metered_usage(
+        model: str, request: VideoGenerationRequest, result: VideoGenerationResult | None = None
+    ) -> Usage:
+        """这次请求的计量（见 :mod:`lib.backends.video_backends.metering`）。
+
+        时长与参考图张数取 ``_build_request`` 校正后的发送值，分辨率取请求原值；参考生视频按端点判定，Vidu 的
+        参考生视频与图生、文生视频单价不同。是否有声只对 q3 系列成立（只有它们发送 ``audio``）。
+        """
+        known = _known_model(model)
+        endpoint = _endpoint_for(request)
+        seconds = _coerce_duration(known or model, endpoint, request.duration_seconds)
+        return video_usage(
+            request,
+            result,
+            seconds=seconds,
+            resolution=request.resolution or None,
+            audio=bool(request.generate_audio) if known in _Q3_MODELS else False,
+            reference_images=len(_reference_images(request)) if endpoint == "/reference2video" else 0,
+            reference_to_video=endpoint == "/reference2video",
+        )
 
     # ── HTTP wrappers ───────────────────────────────────────────────────
 
@@ -398,6 +434,22 @@ class ViduVideoBackend:
         await download_video(url, output_path, label="Vidu", retryable_errors=VIDU_RETRYABLE_ERRORS)
 
 
+def _endpoint_for(request: VideoGenerationRequest) -> str:
+    """请求派发到哪个端点：有参考图 → 参考生视频；首尾帧 → 首尾帧生视频；首帧 → 图生视频；否则文生视频。"""
+    if any(request.reference_images or []):
+        return "/reference2video"
+    if request.start_image is not None and request.end_image is not None:
+        return "/start-end2video"
+    if request.start_image is not None:
+        return "/img2video"
+    return "/text2video"
+
+
+def _reference_images(request: VideoGenerationRequest) -> list[Path]:
+    """参考生视频发出的参考图（张数上限由 ``_build_request`` 校验）。"""
+    return [Path(p) for p in (request.reference_images or []) if p]
+
+
 def _coerce_duration(model: str, endpoint: str, requested: int | None) -> int:
     """按 (model, endpoint) 的合法集合，把请求时长校正到最近值。"""
     allowed = _DURATION_RULES.get((model, endpoint))
@@ -418,20 +470,3 @@ def _coerce_duration(model: str, endpoint: str, requested: int | None) -> int:
         nearest,
     )
     return int(nearest)
-
-
-def _coerce_resolution(model: str, requested: str | None) -> str | None:
-    """白名单内透传，否则降级到模型默认 720p（viduq1 默认 1080p）。"""
-    whitelist = _RESOLUTION_WHITELIST.get(model)
-    if not whitelist:
-        return requested
-    if requested and requested in whitelist:
-        return requested
-    if requested:
-        logger.warning(
-            "Vidu resolution %s 不在 model=%s 白名单 %s，降级",
-            requested,
-            model,
-            whitelist,
-        )
-    return _DEFAULT_RESOLUTION if _DEFAULT_RESOLUTION in whitelist else whitelist[0]

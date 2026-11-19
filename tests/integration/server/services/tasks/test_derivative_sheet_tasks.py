@@ -14,12 +14,14 @@ import pytest
 from lib.artifacts.artifact_activation import active_artifact_currency_resolver
 from lib.artifacts.artifact_manifest import ArtifactStatus, ProjectArtifactManifestAdapter
 from lib.backends.image_backends.dashscope import DashScopeImageBackend
+from lib.generation.generation_queue import DispatchProviderChanged
 from lib.infra.api_errors import BadRequestError
 from lib.project.asset_derivatives import derivative_artifact_key, derivative_sheet_relative_path
 from lib.project.resource_paths import CHARACTER_DERIVATIVE_RESOURCE_TYPE
-from server.services.tasks import derivative_sheet_tasks, formal_image_commit, image_edit_tasks
+from server.services.tasks import derivative_sheet_tasks
 from server.services.tasks.derivative_sheet_tasks import execute_character_derivative_task
 from server.services.tasks.image_edit_tasks import execute_image_edit_task
+from tests.fakes import use_generation_context, use_project_manager
 from tests.http_capture import capture_http, only_request, request_json
 from tests.integration.server.derivative_sheet_support import (
     GENERATION_URL,
@@ -46,7 +48,7 @@ def _wire(monkeypatch, pm, generator) -> None:
     """把任务的项目管理器与生成上下文接到本用例自己的真实项目/生成器上。"""
     monkeypatch.setattr(derivative_sheet_tasks, "get_project_manager", lambda: pm)
     monkeypatch.setattr(derivative_sheet_tasks, "resolve_generation_context", fake_resolve_ctx(generator))
-    monkeypatch.setattr(formal_image_commit, "resolve_generation_context", fake_resolve_ctx(generator))
+    use_generation_context(monkeypatch, fake_resolve_ctx(generator))
 
 
 def _backend() -> DashScopeImageBackend:
@@ -90,6 +92,22 @@ class TestDerivativeSheetGeneration:
         assert sent.size == OWNER_SHEET_SIZE
         assert close_to(sent.convert("RGB").getpixel((8, 8)), OWNER_LEFT_RGB)
         assert close_to(sent.convert("RGB").getpixel((88, 40)), OWNER_RIGHT_RGB)
+
+    async def test_provider_changed_since_claim_is_raised_before_any_paid_call(self, tmp_path, monkeypatch):
+        """执行入口解析出的 i2i 供应商与认领槽不一致：不发请求，交给 worker 改记录并回队。"""
+        pm, project_path = seed_derivative_project(tmp_path)
+        generator = build_generator(project_path, _backend())
+        _wire(monkeypatch, pm, generator)
+
+        with capture_http() as router:
+            submit = _routes(router, result_bytes=solid_png_bytes(RESULT_IMAGE_RGB))
+            with pytest.raises(DispatchProviderChanged) as caught:
+                await execute_character_derivative_task(
+                    "demo", "阿岚/战斗装", {}, task_id="task-1", claimed_provider_id="dashscope"
+                )
+
+        assert (caught.value.claimed_provider_id, caught.value.actual_provider_id) == ("dashscope", "openai")
+        assert not submit.called
 
     async def test_result_lands_on_the_derivative_coordinates(self, tmp_path, monkeypatch):
         pm, project_path = seed_derivative_project(tmp_path)
@@ -180,7 +198,7 @@ class TestDerivativeImageEdit:
         pm, project_path = seed_derivative_project(tmp_path)
         generator = build_generator(project_path, _backend())
         _wire(monkeypatch, pm, generator)
-        monkeypatch.setattr(image_edit_tasks, "get_project_manager", lambda: pm)
+        use_project_manager(monkeypatch, pm)
 
         generated = solid_png_bytes(RESULT_IMAGE_RGB)
         with capture_http() as router:

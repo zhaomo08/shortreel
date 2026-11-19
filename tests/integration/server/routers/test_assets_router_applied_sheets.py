@@ -19,14 +19,15 @@ from lib.project.resource_paths import CHARACTER_DERIVATIVE_RESOURCE_TYPE
 from lib.workflow.workflow_state import WorkflowStateService
 from server.routers import assets, versions
 from server.services.currency.upload_finalize import install_manual_asset_sheet_upload
-from server.services.tasks import formal_image_commit, generation_tasks
+from server.services.tasks import generation_tasks
+from tests.fakes import use_generation_context, use_project_manager
 from tests.integration.server.asset_library_support import (
     LIBRARY_SHEETS_ALL_CURRENT,
     character_sheet_statuses,
     store_character_with_derivatives,
 )
 from tests.integration.server.derivative_sheet_support import run_derivative_generation, solid_png_bytes
-from tests.integration.server.services.tasks.generation_tasks_support import fake_resolve_ctx
+from tests.integration.server.services.tasks.generation_tasks_support import SheetGenerator, fake_resolve_ctx
 
 _KEY = ArtifactKey.asset_sheet("character", "Alice")
 
@@ -156,29 +157,13 @@ def test_round_trip_derivative_sheets_stay_current_when_descriptions_and_style_c
     assert character_sheet_statuses(pm, "demo", "王") == _ALL_CURRENT
 
 
-class _SheetGenerator:
-    """按生产口径经正式图活化回调提交一张生成的资产图。"""
-
-    def __init__(self, project_dir: Path, content: bytes) -> None:
-        self.versions = VersionManager(project_dir)
-        self._project_dir = project_dir
-        self._content = content
-
-    async def generate_image_async(self, *, resource_type, resource_id, commit_formal_output, **_kwargs):
-        current = self._project_dir / resource_type / f"{resource_id}.png"
-        staged = self._project_dir / resource_type / f".{resource_id}.staged.png"
-        staged.write_bytes(self._content)
-        return current, commit_formal_output(staged, current, {})
-
-
 async def test_regenerating_the_owner_sheet_returns_it_to_its_generation_basis(library, monkeypatch):
     client, pm = library
     _apply(client, store_character_with_derivatives(client, pm, owner_description="白衣少年"))
     project_dir = pm.get_project_path("demo")
-    resolve_ctx = fake_resolve_ctx(_SheetGenerator(project_dir, solid_png_bytes((90, 90, 90))))
-    monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: pm)
-    monkeypatch.setattr(generation_tasks, "resolve_generation_context", resolve_ctx)
-    monkeypatch.setattr(formal_image_commit, "resolve_generation_context", resolve_ctx)
+    resolve_ctx = fake_resolve_ctx(SheetGenerator(project_dir, solid_png_bytes((90, 90, 90))))
+    use_project_manager(monkeypatch, pm)
+    use_generation_context(monkeypatch, resolve_ctx)
 
     await generation_tasks.execute_character_task("demo", "王", {})
     assert character_sheet_statuses(pm, "demo", "王") == _ALL_CURRENT
@@ -331,13 +316,91 @@ def test_overwrite_onto_an_nfd_key_records_the_history_under_the_existing_key(li
     }
 
 
+def test_overwrite_folds_a_case_only_derivative_into_the_existing_one(library):
+    client, pm = library
+    pm.create_project("source")
+    pm.create_project_metadata("source", "Source", "Anime", "narration")
+    pm.add_character("source", "王", "白衣少年")
+    library_sheet = solid_png_bytes((0, 0, 160))
+    relative = derivative_sheet_relative_path("王", "Coat")
+    (pm.get_project_path("source") / relative).parent.mkdir(parents=True, exist_ok=True)
+    (pm.get_project_path("source") / relative).write_bytes(library_sheet)
+    pm.update_asset_entry(
+        "character",
+        "source",
+        "王",
+        lambda entry: entry.__setitem__(
+            DERIVATIVES_FIELD, {"Coat": {"description": "新大衣", "character_sheet": relative}}
+        ),
+    )
+    stored = client.post(
+        "/api/v1/assets/from-project",
+        json={"project_name": "source", "resource_type": "character", "resource_id": "王"},
+    )
+    assert stored.status_code == 200, stored.text
+    pm.add_character("demo", "王", "项目里的")
+    pm.update_asset_entry(
+        "character",
+        "demo",
+        "王",
+        lambda entry: entry.__setitem__(DERIVATIVES_FIELD, {"coat": {"description": "旧大衣", "character_sheet": ""}}),
+    )
+
+    _apply(client, stored.json()["asset"]["id"], policy="overwrite")
+
+    project_dir = pm.get_project_path("demo")
+    existing = derivative_sheet_relative_path("王", "coat")
+    assert pm.load_project("demo")["characters"]["王"][DERIVATIVES_FIELD] == {
+        "coat": {"description": "新大衣", "character_sheet": existing}
+    }
+    assert (project_dir / existing).read_bytes() == library_sheet
+    assert sorted(path.name for path in (project_dir / existing).parent.iterdir()) == ["coat.png"]
+    history = json.loads((project_dir / "versions/versions.json").read_text(encoding="utf-8"))
+    assert list(history[CHARACTER_DERIVATIVE_RESOURCE_TYPE]) == ["王/coat"]
+    entry = ProjectArtifactManifestAdapter(project_dir).get_entry(derivative_artifact_key("王", "coat"))
+    assert entry is not None
+    assert entry.artifact_path == existing
+    assert ProjectArtifactManifestAdapter(project_dir).get_entry(derivative_artifact_key("王", "Coat")) is None
+
+
+def test_case_only_derivatives_from_the_library_land_as_one(library):
+    client, pm = library
+    pm.create_project("source")
+    pm.create_project_metadata("source", "Source", "Anime", "narration")
+    pm.add_character("source", "王", "白衣少年")
+    table = {}
+    for name, description, color in (("Coat", "蓝大衣", (0, 0, 160)), ("coat", "绿大衣", (0, 160, 0))):
+        relative = derivative_sheet_relative_path("王", name)
+        (pm.get_project_path("source") / relative).parent.mkdir(parents=True, exist_ok=True)
+        (pm.get_project_path("source") / relative).write_bytes(solid_png_bytes(color))
+        table[name] = {"description": description, "character_sheet": relative}
+    pm.update_asset_entry("character", "source", "王", lambda entry: entry.__setitem__(DERIVATIVES_FIELD, table))
+    stored = client.post(
+        "/api/v1/assets/from-project",
+        json={"project_name": "source", "resource_type": "character", "resource_id": "王"},
+    )
+    assert stored.status_code == 200, stored.text
+    assert sorted(item["name"] for item in stored.json()["asset"]["derivatives"]) == ["Coat", "coat"]
+
+    _apply(client, stored.json()["asset"]["id"])
+
+    project_dir = pm.get_project_path("demo")
+    landed = derivative_sheet_relative_path("王", "Coat")
+    assert pm.load_project("demo")["characters"]["王"][DERIVATIVES_FIELD] == {
+        "Coat": {"description": "绿大衣", "character_sheet": landed}
+    }
+    assert (project_dir / landed).read_bytes() == solid_png_bytes((0, 160, 0))
+    history = json.loads((project_dir / "versions/versions.json").read_text(encoding="utf-8"))
+    assert list(history[CHARACTER_DERIVATIVE_RESOURCE_TYPE]) == ["王/Coat"]
+
+
 async def test_restoring_the_applied_derivative_version_claims_it_by_the_image_again(library, monkeypatch):
     client, pm = library
     _apply(client, store_character_with_derivatives(client, pm, owner_description="白衣少年"))
     project_dir = pm.get_project_path("demo")
     applied = (project_dir / derivative_sheet_relative_path("王", "战斗装")).read_bytes()
     await asyncio.to_thread(run_derivative_generation, pm, project_dir, monkeypatch, owner="王", derivative="战斗装")
-    monkeypatch.setattr(versions, "get_project_manager", lambda: pm)
+    use_project_manager(monkeypatch, pm)
 
     restored = await versions.restore_derivative_version("demo", "王", "战斗装", 1)
 

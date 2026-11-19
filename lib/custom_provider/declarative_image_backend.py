@@ -34,6 +34,8 @@ from lib.custom_provider.declarative_backend import (
     extract_text,
     response_extract_guard,
 )
+from lib.custom_provider.path_overrides import NO_PATH_OVERRIDES, PathOverrides
+from lib.infra.async_thread import run_sync_transaction
 
 _HTTP_TIMEOUT_SECONDS = 60
 
@@ -130,6 +132,7 @@ class DeclarativeImageBackend:
         model: str,
         definition: Mapping[str, Any],
         provider: str,
+        path_overrides: PathOverrides = NO_PATH_OVERRIDES,
     ) -> None:
         self._engine = DeclarativeJobEngine(
             api_key=api_key,
@@ -139,6 +142,7 @@ class DeclarativeImageBackend:
             provider=provider,
             read_state=extract_image_state,
             log_label="声明式图片请求",
+            path_overrides=path_overrides,
         )
         self._model = model
         self._definition = definition
@@ -156,19 +160,23 @@ class DeclarativeImageBackend:
     def capabilities(self) -> set[ImageCapability]:
         return set(image_capabilities_from_definition(self._definition))
 
+    async def reference_image_limit(self) -> int:
+        return self._reference_limit
+
     @property
-    def max_reference_images(self) -> int:
+    def _reference_limit(self) -> int:
         """定义声明的参考图上限；未声明时为 ``0``。校验器保证声明了图生图就有正数上限。"""
         value = (self._definition.get("capabilities") or {}).get("max_reference_images")
         return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
     async def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
-        # 编排层已按 max_reference_images 裁剪并提示；这里的截断只是兜底，超出的图没有落点。上限为 0
+        # 编排层已按 reference_image_limit 裁剪并提示；这里的截断只是兜底，超出的图没有落点。上限为 0
         # 时按协议不裁剪。
         references = request.reference_images
-        if self.max_reference_images:
-            references = references[: self.max_reference_images]
-        context = self._engine.request_context(
+        if self._reference_limit:
+            references = references[: self._reference_limit]
+        context = await asyncio.to_thread(
+            self._engine.request_context,
             {
                 "prompt": request.prompt,
                 "aspect_ratio": request.aspect_ratio,
@@ -244,7 +252,7 @@ async def _write_inline_image(state: ImageJobState, output_path: Path) -> None:
 
     try:
         # 解码大图是 CPU 密集操作，放到线程里免得卡住事件循环。
-        await asyncio.to_thread(decode_and_save)
+        await run_sync_transaction(decode_and_save)
     except ValueError as exc:
         raise DeclarativeRuntimeError("declarative_response_extract_failed", detail=str(exc)) from exc
     except OSError as exc:

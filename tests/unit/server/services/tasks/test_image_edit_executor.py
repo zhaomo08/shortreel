@@ -1,8 +1,10 @@
 """image_edit executor 的编辑独有语义：底图即当前图且是唯一参考图、prompt 即指令、
 按资源类型写回、版本带编辑标记、失败不写回；image_size 解析迁移前后同源。"""
 
+import asyncio
 import json
 import tempfile
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,7 @@ from lib.artifacts.artifact_manifest import (
 )
 from lib.artifacts.version_manager import VersionManager
 from lib.config.resolver import ConfigResolver, ProviderModel
+from lib.generation.generation_queue import DispatchProviderChanged
 from lib.project.project_manager import ProjectManager
 from lib.project.project_migration_failure import ProjectMigrationError
 from lib.project.project_schema import CURRENT_PROJECT_SCHEMA_VERSION
@@ -39,6 +42,13 @@ from server.services.tasks.image_edit_tasks import (
     execute_image_edit_task,
     resolve_current_image_rel,
 )
+from tests.fakes import (
+    bind_session_factory,
+    stage_and_commit,
+    use_backend_assembler,
+    use_generation_context,
+    use_project_manager,
+)
 
 
 @pytest.fixture
@@ -48,7 +58,7 @@ async def patched_session_factory(db_factory, monkeypatch):
     供 image_size 解析等价用例的真实 ConfigResolver 使用（预置供应商无 DB 行，自定义供应商
     默认 resolution 才落 DB）。
     """
-    monkeypatch.setattr("lib.db.async_session_factory", db_factory)
+    bind_session_factory(monkeypatch, db_factory)
     return db_factory
 
 
@@ -66,8 +76,13 @@ class _FakeGenerator:
     async def generate_image_async(self, **kwargs):
         if self.fail:
             raise RuntimeError("backend boom")
-        self.reference_bytes = [Path(reference).read_bytes() for reference in kwargs["reference_images"]]  # noqa: ASYNC240 -- 测试内本地小文件读写/断言，不在生产事件循环上
         self.image_calls.append(kwargs)
+        # 读参考图、落盘产出与提交版本都在工作线程里：真实后端在线程里写产物，
+        # 正式提交回调经 run_noninterruptible_sync 执行
+        return await asyncio.to_thread(self._produce_and_commit, kwargs)
+
+    def _produce_and_commit(self, kwargs) -> tuple[Path, int]:
+        self.reference_bytes = [Path(reference).read_bytes() for reference in kwargs["reference_images"]]
         if self.project_path is not None:
             canonical = self.project_path / resource_relative_path(kwargs["resource_type"], kwargs["resource_id"])
             canonical.parent.mkdir(parents=True, exist_ok=True)
@@ -197,7 +212,7 @@ def _patch_common(monkeypatch, fake_pm, fake_generator, *, resolution=None, regi
         else:
             fake_pm.sync_disk()
         fake_generator.project_path = fake_pm.project_path
-    monkeypatch.setattr(image_edit_tasks, "get_project_manager", lambda: fake_pm)
+    use_project_manager(monkeypatch, fake_pm)
 
     async def _fake_resolve(project_name, payload, *, project, image=None, **_kwargs):
         assert image is not None
@@ -211,7 +226,7 @@ def _patch_common(monkeypatch, fake_pm, fake_generator, *, resolution=None, regi
         )
         return GenerationContext(generator=fake_generator, image_lane=lane)
 
-    monkeypatch.setattr(formal_image_commit, "resolve_generation_context", _fake_resolve)
+    use_generation_context(monkeypatch, _fake_resolve)
 
 
 class TestResolveCurrentImageRel:
@@ -288,13 +303,13 @@ class TestExecuteImageEditTask:
         class _ReplacingGenerator(_FakeGenerator):
             async def generate_image_async(self, **kwargs):
                 nonlocal provider_reached
-                current.write_bytes(b"same-basis-replacement")
+                await asyncio.to_thread(current.write_bytes, b"same-basis-replacement")
                 await kwargs["before_submit"]()
                 provider_reached = True
                 raise AssertionError("provider must not receive a replaced formal input")
 
         generator = _ReplacingGenerator()
-        monkeypatch.setattr(image_edit_tasks, "get_project_manager", lambda: pm)
+        use_project_manager(monkeypatch, pm)
 
         async def _resolve(*_args, **_kwargs):
             lane = ImageLaneResult(
@@ -306,7 +321,7 @@ class TestExecuteImageEditTask:
             )
             return GenerationContext(generator=generator, image_lane=lane)
 
-        monkeypatch.setattr(formal_image_commit, "resolve_generation_context", _resolve)
+        use_generation_context(monkeypatch, _resolve)
 
         with pytest.raises(ValueError, match="changed since it was selected"):
             await execute_image_edit_task(
@@ -337,7 +352,7 @@ class TestExecuteImageEditTask:
         pm.update_project("demo", lambda project: project.__setitem__("schema_version", 7))
 
         generator = _FakeGenerator()
-        monkeypatch.setattr(image_edit_tasks, "get_project_manager", lambda: pm)
+        use_project_manager(monkeypatch, pm)
 
         async def _resolve(*_args, **_kwargs):
             lane = ImageLaneResult(
@@ -349,7 +364,7 @@ class TestExecuteImageEditTask:
             )
             return GenerationContext(generator=generator, image_lane=lane)
 
-        monkeypatch.setattr(formal_image_commit, "resolve_generation_context", _resolve)
+        use_generation_context(monkeypatch, _resolve)
 
         with pytest.raises(ProjectMigrationError, match=f"did not reach v{CURRENT_PROJECT_SCHEMA_VERSION}"):
             await execute_image_edit_task(
@@ -383,10 +398,11 @@ class TestExecuteImageEditTask:
             async def generate_image_async(self, **kwargs):
                 assert kwargs["formal_output"] is True
                 staged = task_image_staging_path(current, kwargs["task_id"])
-                staged.write_bytes(b"edited-image")
-                version = kwargs["commit_formal_output"](
+                version = await stage_and_commit(
+                    kwargs["commit_formal_output"],
                     staged,
                     current,
+                    b"edited-image",
                     {"aspect_ratio": "16:9", "source": kwargs["source"]},
                 )
                 return current, version
@@ -517,28 +533,34 @@ class TestExecuteImageEditTask:
                 self.versions = manager
 
             async def generate_image_async(self, **kwargs):
-                current.write_bytes(b"source-changed-during-await")
                 provider_reference = Path(kwargs["reference_images"][0])
                 provider_references.append(provider_reference)
-                assert provider_reference.read_bytes() == b"source-before-await"  # noqa: ASYNC240 -- 测试内本地小文件读写/断言，不在生产事件循环上
 
-                def _mutate(project):
-                    project["style"] = "style-changed-during-await"
-                    if resource_type == "character":
-                        project["characters"][resource_id]["description"] = "description changed"
+                def _edit_concurrently() -> bytes:
+                    # 生成期间另一方改了底图、项目与剧本：供应商读到的仍是冻结时的字节
+                    current.write_bytes(b"source-changed-during-await")
 
-                pm.update_project("demo", _mutate)
-                if resource_type == "storyboard":
-                    script = pm.load_script("demo", script_file)
-                    script["segments"][0]["image_prompt"] = "prompt changed"
-                    pm.save_script("demo", script, script_file, validate=False)
+                    def _mutate(project):
+                        project["style"] = "style-changed-during-await"
+                        if resource_type == "character":
+                            project["characters"][resource_id]["description"] = "description changed"
+
+                    pm.update_project("demo", _mutate)
+                    if resource_type == "storyboard":
+                        script = pm.load_script("demo", script_file)
+                        script["segments"][0]["image_prompt"] = "prompt changed"
+                        pm.save_script("demo", script, script_file, validate=False)
+                    return provider_reference.read_bytes()
+
+                assert await asyncio.to_thread(_edit_concurrently) == b"source-before-await"
 
                 # 直接调用（非队列任务）没有 task_id：staging 身份由生成器内部造，替身自造一个。
                 staged = task_image_staging_path(current, kwargs["task_id"] or "inline-test")
-                staged.write_bytes(b"edited-image")
-                version = kwargs["commit_formal_output"](
+                version = await stage_and_commit(
+                    kwargs["commit_formal_output"],
                     staged,
                     current,
+                    b"edited-image",
                     {"aspect_ratio": kwargs["aspect_ratio"], "source": kwargs["source"]},
                 )
                 return current, version
@@ -568,7 +590,7 @@ class TestExecuteImageEditTask:
         assert not provider_references[0].exists()
 
         adapter.delete_entry(source_key)
-        monkeypatch.setattr(versions_router, "get_project_manager", lambda: pm)
+        use_project_manager(monkeypatch, pm)
         versions_router._restore_non_typed_version(
             versions=manager,
             resource_type=version_resource_type,
@@ -822,6 +844,41 @@ class TestExecuteImageEditTask:
         assert result["version"] == 2
         assert result["file_path"] == "characters/Alice.png"
 
+    async def test_reference_snapshot_is_cleaned_when_cancelled_while_preparing(self, tmp_path, monkeypatch):
+        """取消落在线程里准备底图快照的那一程：快照建好后照样回收，不调供应商。"""
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        fake_generator = _FakeGenerator()
+        _patch_common(monkeypatch, fake_pm, fake_generator)
+        freezing = threading.Event()
+        release = threading.Event()
+        snapshots: list[Path] = []
+        original_freeze = image_edit_tasks.freeze_image_references
+
+        def _blocking_freeze(*args, **kwargs):
+            freezing.set()
+            release.wait(5)
+            frozen = original_freeze(*args, **kwargs)
+            snapshots.extend(Path(ref).parent for ref in frozen.reference_images or ())
+            return frozen
+
+        monkeypatch.setattr(image_edit_tasks, "freeze_image_references", _blocking_freeze)
+        task = asyncio.create_task(
+            execute_image_edit_task("demo", "Alice", {"resource_type": "character", "prompt": "把头发改成红色"})
+        )
+        try:
+            assert await asyncio.to_thread(freezing.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert snapshots
+        assert not any(path.exists() for path in snapshots)
+        assert fake_generator.image_calls == []
+
     async def test_storyboard_edit_reads_pointer_writes_canonical(self, tmp_path, monkeypatch):
         project_path = _prepare_files(tmp_path)
         fake_pm = _FakePM(project_path)
@@ -844,6 +901,26 @@ class TestExecuteImageEditTask:
         assert fake_pm.script_commits == ["episode_1.json"]
         assert fake_pm.script["segments"][0]["generated_assets"]["storyboard_image"] == "storyboards/scene_E1S01.png"
         assert result["file_path"] == "storyboards/scene_E1S01.png"
+
+    async def test_provider_changed_since_claim_is_raised_before_the_provider_call(self, tmp_path, monkeypatch):
+        """执行入口解析出的 i2i 供应商与认领槽不一致：不补登旧图、不调供应商，交给 worker 改记录并回队。"""
+        project_path = _prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        fake_generator = _FakeGenerator()
+        _patch_common(monkeypatch, fake_pm, fake_generator)
+
+        with pytest.raises(DispatchProviderChanged) as caught:
+            await execute_image_edit_task(
+                "demo",
+                "Alice",
+                {"resource_type": "character", "prompt": "把头发改成红色"},
+                claimed_provider_id="openai",
+            )
+
+        assert (caught.value.claimed_provider_id, caught.value.actual_provider_id) == ("openai", "gemini-aistudio")
+        assert fake_generator.image_calls == []
+        assert fake_generator.tracked == []
+        assert fake_pm.project_commits == 0
 
     async def test_no_current_image_raises(self, tmp_path, monkeypatch):
         project_path = _prepare_files(tmp_path)
@@ -892,6 +969,9 @@ class _EchoBackend:
     model: str
     max_reference_images: int = 0
 
+    async def reference_image_limit(self) -> int:
+        return self.max_reference_images
+
 
 class TestImageSizeResolutionEquivalence:
     """image_size 同源：``ctx.image.resolution`` 等于「先 resolve_image_backend(i2i) 得
@@ -906,12 +986,12 @@ class TestImageSizeResolutionEquivalence:
         """真 ProjectManager（demo 项目目录）+ 回声 assemble 缝，避免 backend 构造触网。"""
         pm = ProjectManager(tmp_path)
         (pm.projects_dir / "demo").mkdir(parents=True)
-        monkeypatch.setattr(generation_context, "get_project_manager", lambda: pm)
+        use_project_manager(monkeypatch, pm)
 
         async def _assemble(*, provider_id, media_type, model_id, resolver, rate_limiter=None, generation_type=None):
             return _EchoBackend(name=provider_id, model=model_id or "default-model")
 
-        monkeypatch.setattr(generation_context, "assemble_backend", _assemble)
+        use_backend_assembler(monkeypatch, _assemble)
         generation_context.invalidate_backend_cache()
         yield
         generation_context.invalidate_backend_cache()
@@ -956,7 +1036,7 @@ class TestImageEditEventMapping:
 
         project_path = _prepare_files(tmp_path)
         fake_pm = _FakePM(project_path)
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
+        use_project_manager(monkeypatch, fake_pm)
 
         # 从公开订阅口接真实事件总线：断言落在订阅方（SSE 广播那一侧）实际收到的批次上。
         delivered: list[dict] = []

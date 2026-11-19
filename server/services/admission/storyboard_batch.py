@@ -30,9 +30,9 @@ from lib.artifacts.artifact_activation import (
     resolve_usable_storyboard_video_inputs,
 )
 from lib.artifacts.artifact_manifest import ArtifactKey
+from lib.artifacts.video_visual_provenance import resolve_video_aspect_ratio
 from lib.config.resolver import ConfigResolver
-from lib.db.repositories.custom_provider_repo import CustomProviderRepository
-from lib.generation.batch_admission import BatchAdmission
+from lib.generation.batch_admission import BatchAdmission, UnitAdmissionTicket
 from lib.generation.generation_batch import GenerationBatchReadModel, build_generation_batch_admission
 from lib.generation.generation_queue import GenerationQueue
 from lib.generation.generation_queue_client import (
@@ -55,6 +55,7 @@ from lib.generation.generation_result import (
     select_generation_targets,
 )
 from lib.generation.video_request_facts import VideoRequestCostFacts, VideoRequestFacts, VideoRequestFactsFailure
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.schema_guards import is_int
 from lib.project.project_manager import ProjectManager, find_episode, is_reference_video_project
 from lib.prompts.prompt_builders import render_storyboard_image_prompt
@@ -67,7 +68,12 @@ from lib.script.storyboard_sequence import (
     build_storyboard_dependency_plan,
     get_storyboard_items,
 )
-from server.services.admission.cost_estimation import ImageLane, quote_video_request_from_price
+from server.services.admission.cost_estimation import (
+    BatchCostEstimate,
+    ImageLane,
+    load_video_price_source,
+    quote_video_request_from_price,
+)
 from server.services.admission.reference_admission import reference_admission_problems
 from server.services.admission.video_batch_admission import (
     admit_storyboard_video_request,
@@ -386,7 +392,8 @@ async def load_storyboard_image_batch_plan(
         )
         return loaded, plan
 
-    loaded, plan = await asyncio.to_thread(_read)
+    # 读剧本可能顺带落盘迁移
+    loaded, plan = await run_sync_transaction(_read)
     generating = await _active_resource_ids(
         queue,
         project_name=project_name,
@@ -441,6 +448,8 @@ class StoryboardVideoBatchPlan:
     video_request_facts: VideoRequestFacts | VideoRequestFactsFailure | None
     #: 每个目标剧本上的计划秒数；不是正整数时为 ``None``，这一批就报不出价。
     durations: Mapping[str, int | None] = field(default_factory=dict)
+    #: 视频请求发出的画面比例，与生成任务同一个解析。
+    video_aspect_ratio: str = "16:9"
 
     @property
     def target_ids(self) -> list[str]:
@@ -491,18 +500,32 @@ async def load_storyboard_video_batch_plan(
     ``video_request_facts`` 缺省时按项目当前配置求值；准入与报价读同一份。
     """
 
-    loaded = await asyncio.to_thread(load_episode_storyboard_script, projects, project_name, episode_id)
-    items, id_field, *_fields = get_storyboard_items(loaded.script)
-    clean, screen_refused = screen_storyboard_items(items, id_field, requested_ids=None)
-    resolver = await asyncio.to_thread(active_artifact_currency_resolver, loaded.project_path, loaded.project)
-    states = video_target_states(clean, id_field, episode=loaded.episode, resolver=resolver)
-    selection = select_generation_targets(
-        candidates=[state.candidate for state in states.values()],
-        requested_ids=None,
-        resolver=resolver,
-    )
-    target_ids = set(selection.target_ids)
-    pending = [item for item in clean if str(storyboard_item_id(item, id_field) or "") in target_ids]
+    # 选目标与判跳过都要读产物清单（含等清单锁）、核对分镜图文件，各自整段放进工作线程。
+    # 选目标读剧本可能顺带落盘迁移，按写事务调用；判跳过只读。
+    def _select() -> tuple[
+        EpisodeStoryboardScript,
+        str,
+        list[UnitAdmissionTicket],
+        ArtifactCurrencyResolver,
+        dict[str, GenerationTargetState],
+        GenerationSelection,
+        list[dict[str, Any]],
+    ]:
+        loaded = load_episode_storyboard_script(projects, project_name, episode_id)
+        items, id_field, *_fields = get_storyboard_items(loaded.script)
+        clean, screen_refused = screen_storyboard_items(items, id_field, requested_ids=None)
+        resolver = active_artifact_currency_resolver(loaded.project_path, loaded.project)
+        states = video_target_states(clean, id_field, episode=loaded.episode, resolver=resolver)
+        selection = select_generation_targets(
+            candidates=[state.candidate for state in states.values()],
+            requested_ids=None,
+            resolver=resolver,
+        )
+        target_ids = set(selection.target_ids)
+        pending = [item for item in clean if str(storyboard_item_id(item, id_field) or "") in target_ids]
+        return loaded, id_field, screen_refused, resolver, states, selection, pending
+
+    loaded, id_field, screen_refused, resolver, states, selection, pending = await run_sync_transaction(_select)
     generating = await _active_resource_ids(
         queue,
         project_name=project_name,
@@ -511,31 +534,35 @@ async def load_storyboard_video_batch_plan(
         resource_ids=[str(storyboard_item_id(item, id_field)) for item in pending],
         user_id=user_id,
     )
-
-    skips: list[BatchSkip] = []
-    candidates: list[dict[str, Any]] = []
-    for item in pending:
-        unit_id = str(storyboard_item_id(item, id_field))
-        reason = _video_skip_reason(item, unit_id=unit_id, generating=generating, loaded=loaded, resolver=resolver)
-        if reason is None:
-            candidates.append(item)
-        else:
-            skips.append(BatchSkip(unit_id, reason))
-
     content_mode = resolve_content_mode(loaded.script, loaded.project)
-    specs, refused = build_storyboard_video_specs(
-        items=candidates,
-        id_field=id_field,
-        content_mode=content_mode,
-        skeleton_kind=resolve_script_kind(loaded.script),
-        script_filename=loaded.script_file,
-        project_dir=loaded.project_path,
-        project=loaded.project,
-        episode=loaded.episode,
-        resolver=resolver,
-        skip_ids=None,
-        voice_characters=await resolve_voice_context(loaded.project, content_mode),
-    )
+    voice_characters = await resolve_voice_context(loaded.project, content_mode)
+
+    def _build_specs() -> tuple[list[BatchSkip], list[dict[str, Any]], list[TaskSpec], list[UnitAdmissionTicket]]:
+        skips: list[BatchSkip] = []
+        candidates: list[dict[str, Any]] = []
+        for item in pending:
+            unit_id = str(storyboard_item_id(item, id_field))
+            reason = _video_skip_reason(item, unit_id=unit_id, generating=generating, loaded=loaded, resolver=resolver)
+            if reason is None:
+                candidates.append(item)
+            else:
+                skips.append(BatchSkip(unit_id, reason))
+        specs, refused = build_storyboard_video_specs(
+            items=candidates,
+            id_field=id_field,
+            content_mode=content_mode,
+            skeleton_kind=resolve_script_kind(loaded.script),
+            script_filename=loaded.script_file,
+            project_dir=loaded.project_path,
+            project=loaded.project,
+            episode=loaded.episode,
+            resolver=resolver,
+            skip_ids=None,
+            voice_characters=voice_characters,
+        )
+        return skips, candidates, specs, refused
+
+    skips, candidates, specs, refused = await asyncio.to_thread(_build_specs)
     facts = (
         (video_request_facts or await storyboard_video_request_facts(loaded.project, config_resolver))
         if specs
@@ -571,30 +598,50 @@ async def load_storyboard_video_batch_plan(
         admission=admission,
         video_request_facts=facts,
         durations=durations,
+        video_aspect_ratio=resolve_video_aspect_ratio(loaded.project),
     )
 
 
 async def estimate_storyboard_video_batch_cost(
     plan: StoryboardVideoBatchPlan, session_factory: async_sessionmaker[AsyncSession]
-) -> dict[str, float] | None:
-    """这一批视频按剧本计划秒数的预估费用；请求事实不成立或有目标缺秒数时返回 ``None``（算不出）。"""
+) -> BatchCostEstimate:
+    """这一批视频按剧本计划秒数的预估费用：合计已定价的部分，并数出未定价的目标数。
+
+    请求事实不成立、目标没写计划秒数、读库失败或价目表算不出价的目标，都计入未定价。
+    """
 
     facts = plan.video_request_facts
     if not plan.specs:
-        return {}
-    if not isinstance(facts, VideoRequestFacts) or any(value is None for value in plan.durations.values()):
-        return None
+        return BatchCostEstimate(total={}, unpriced_count=0)
+    durations = list(plan.durations.values())
+    if not isinstance(facts, VideoRequestFacts):
+        return BatchCostEstimate(total={}, unpriced_count=len(durations))
     try:
         async with session_factory() as session:
-            price = await CustomProviderRepository(session).resolve_price(facts.provider_id, facts.model_id)
-        total: dict[str, float] = {}
-        for duration in plan.durations.values():
-            assert duration is not None
-            quote = quote_video_request_from_price(VideoRequestCostFacts(facts, duration), price)
-            total[quote.currency] = round(total.get(quote.currency, 0.0) + quote.amount, 6)
-    except (SQLAlchemyError, ValueError):
-        return None
-    return {currency: amount for currency, amount in total.items() if amount > 0}
+            source = await load_video_price_source(session, facts.provider_id, facts.model_id)
+    except SQLAlchemyError:
+        return BatchCostEstimate(total={}, unpriced_count=len(durations))
+    total: dict[str, float] = {}
+    unpriced = 0
+    for duration in durations:
+        if duration is None:
+            unpriced += 1
+            continue
+        try:
+            quote = quote_video_request_from_price(
+                VideoRequestCostFacts(facts, duration, aspect_ratio=plan.video_aspect_ratio, has_first_frame=True),
+                source,
+            )
+        except ValueError:
+            unpriced += 1
+            continue
+        if quote.amount is None or quote.currency is None:
+            unpriced += 1
+            continue
+        total[quote.currency] = round(total.get(quote.currency, 0.0) + quote.amount, 6)
+    return BatchCostEstimate(
+        total={currency: amount for currency, amount in total.items() if amount > 0}, unpriced_count=unpriced
+    )
 
 
 async def submit_storyboard_video_batch(

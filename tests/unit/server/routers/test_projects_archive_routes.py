@@ -1,10 +1,14 @@
+import asyncio
 import json
 import os
 import re
+import shutil
+import threading
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -12,6 +16,7 @@ from lib.project.project_manager import ProjectManager
 from server.auth import CurrentUserInfo, create_download_token, create_token, get_current_user
 from server.routers import projects
 from tests.auth_deps import AUTH_DEPENDENCIES
+from tests.fakes import use_project_manager
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -79,7 +84,7 @@ def _create_demo_project(pm: ProjectManager) -> None:
 
 
 def _client(monkeypatch, pm: ProjectManager) -> TestClient:
-    monkeypatch.setattr(projects, "get_project_manager", lambda: pm)
+    use_project_manager(monkeypatch, pm)
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: CurrentUserInfo(id="default", sub="testuser", role="admin")
     app.include_router(projects.router, prefix="/api/v1", dependencies=AUTH_DEPENDENCIES)
@@ -155,6 +160,37 @@ class TestProjectArchiveRoutes:
         assert response.status_code == 409
         assert response.json()["detail"] == "检测到项目编号冲突"
         assert response.json()["conflict_project_name"] == "demo"
+
+    def test_import_route_asks_for_confirmation_before_the_project_appears(self, tmp_path, monkeypatch):
+        pm = ProjectManager(tmp_path / "projects")
+        _create_demo_project(pm)
+        project_dir = pm.get_project_path("demo")
+        script_path = project_dir / "scripts" / "episode_1.json"
+        script = json.loads(script_path.read_text(encoding="utf-8"))
+        script["segments"][0]["scenes"] = ["雨巷"]
+        _write_json(script_path, script)
+        archive_path = tmp_path / "manual.zip"
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            for path in sorted(project_dir.rglob("*")):
+                if path.is_file() and not path.name.startswith("."):
+                    archive.write(path, f"demo/{path.relative_to(project_dir).as_posix()}")
+        shutil.rmtree(project_dir)
+        client = _client(monkeypatch, pm)
+        upload = {"file": ("manual.zip", archive_path.read_bytes(), "application/zip")}
+
+        with client:
+            asked = client.post("/api/v1/projects/import", files=upload)
+            assert pm.list_projects() == []
+            confirmed = client.post("/api/v1/projects/import", data={"confirm_report": "true"}, files=upload)
+
+        assert asked.status_code == 409
+        payload = asked.json()
+        assert payload["confirmation_required"] is True
+        assert {"asset_type": "scene", "name": "雨巷"} in [
+            item["params"] for item in payload["migration_report"]["adjusted"]
+        ]
+        assert confirmed.status_code == 200
+        assert "雨巷" in confirmed.json()["project"]["scenes"]
 
     def test_export_token_endpoint(self, tmp_path, monkeypatch):
         pm = ProjectManager(tmp_path / "projects")
@@ -321,3 +357,43 @@ class TestProjectArchiveDiagnosticsLocalization:
             "Non-standard top-level directory/file 'notes.txt' was excluded from the export"
         ]
         assert not _has_cjk(diagnostics)
+
+
+async def test_export_cancelled_while_packing_leaves_no_archive(tmp_path, monkeypatch):
+    """打包进行中被取消：等线程打包完再传播取消，调用方按登记回收 zip。"""
+    started = threading.Event()
+    release = threading.Event()
+    packed = threading.Event()
+    archive_path = tmp_path / "demo-export.zip"
+
+    class _BlockingArchiveService:
+        def export_project(self, project_name: str, *, scope: str = "full") -> tuple[Path, str]:
+            started.set()
+            release.wait(5)
+            try:
+                archive_path.write_bytes(b"zip")
+                return archive_path, f"{project_name}.zip"
+            finally:
+                packed.set()
+
+    monkeypatch.setattr(projects, "verify_download_token", lambda *_args: None)
+    task = asyncio.create_task(
+        projects.export_project_archive(
+            name="demo",
+            _t=lambda key, **_kwargs: key,
+            archive_service=_BlockingArchiveService(),
+            download_token="token",
+            scope="full",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(packed.wait, 5)
+
+    assert not archive_path.exists()

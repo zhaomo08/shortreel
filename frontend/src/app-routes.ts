@@ -25,7 +25,12 @@ export const SETTINGS_SECTIONS = [
 ] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
-/** 全局设置某个分区的地址；`params` 是该分区自己的定位参数，如使用记录的 `record`。 */
+/**
+ * 全局设置某个分区的地址；`params` 是该分区自己的定位参数，如使用记录的 `record`。
+ * 分区名由 `SettingsSection` 校验，分区改名时 typecheck 报出全部旧链接。
+ * 在嵌套路由里跳转时在前面加 `~`：`` `~${settingsSectionPath("usage")}` ``。
+ * 供应商与调用端点的地址用 `providerSettingsPath` 与 `endpointSettingsPath`，不手拼查询参数。
+ */
 export function settingsSectionPath(section: SettingsSection, params: Record<string, string> = {}): string {
   return `${ROUTE_APP_SETTINGS}?${new URLSearchParams({ section, ...params }).toString()}`;
 }
@@ -55,19 +60,24 @@ export function marketSettingsPath(tab: MarketTab = "browse", options: { media?:
 
 /**
  * 「供应商」分区里要定位的对象，对应的地址参数：
- * - `{ preset }` → `provider=<预置供应商 id>`；
- * - `{ custom, model? }` → `custom=<自定义供应商 id>`，带 `model=<模型 ID>` 时展开并定位到这个模型；
+ * - `{ preset, model? }` → `provider=<预置供应商 id>`；
+ * - `{ custom, model? }` → `custom=<自定义供应商 id>`；
+ *   两者带 `model=<模型 ID>` 时打开这个模型的 Sheet；
  * - `{ newCustom }` → `custom=new`，可带 `endpoint=<端点 key>` 与 `base_url=<接口地址>` 预填新建表单
  *   （调用端点的「新建供应商并使用」）。
  */
 export type ProviderTarget =
-  | { preset: string }
+  | { preset: string; model?: string }
   | { custom: number; model?: string }
   | { newCustom: { endpoint?: string; baseUrl?: string } };
 
 /** 全局设置「供应商」分区中某个供应商（或某个自定义模型）的地址。 */
 export function providerSettingsPath(target: ProviderTarget): string {
-  if ("preset" in target) return settingsSectionPath("providers", { provider: target.preset });
+  if ("preset" in target) {
+    const params: Record<string, string> = { provider: target.preset };
+    if (target.model) params.model = target.model;
+    return settingsSectionPath("providers", params);
+  }
   if ("custom" in target) {
     const params: Record<string, string> = { custom: String(target.custom) };
     if (target.model) params.model = target.model;

@@ -46,6 +46,7 @@ import { referenceBatchOutcome } from "./batch-outcome";
 import { AdScriptButton, AdScriptProgress } from "@/components/canvas/shared/AdScriptDialog";
 import { BatchFillButton, useBatchGap } from "@/components/canvas/episode-page/BatchFillButton";
 import { EpisodeHeaderActions } from "@/components/canvas/episode-page/EpisodeHeaderActions";
+import { FlowExchange } from "@/components/canvas/episode-page/FlowExchange";
 import type { EpisodeCanvasContext } from "@/components/canvas/episode-page/EpisodePage";
 import { NoScriptBlankState } from "@/components/canvas/shared/StartBlankScriptButton";
 import { computeVoiceLegacyNotice, VoiceLegacyBanner } from "./VoiceLegacyBanner";
@@ -673,6 +674,20 @@ export function ReferenceVideoCanvas({
     [projectName, episode, loadUnits, isUnitLocked, setUploading, t],
   );
 
+  // Flow 导回逐个走成片上传：与单条上传同一套占用判定，导入期间该 unit 也算占用
+  const uploadFlowVideo = useCallback(
+    async (unitId: string, file: File) => {
+      if (isUnitLocked(unitId)) throw new Error(t("reference_generate_busy"));
+      setUploading(unitId, true);
+      try {
+        return await API.uploadReferenceUnitVideo(projectName, episode, unitId, file);
+      } finally {
+        setUploading(unitId, false);
+      }
+    },
+    [projectName, episode, isUnitLocked, setUploading, t],
+  );
+
   const handleUnitsRefresh = useCallback(
     () => loadUnits(projectName, episode),
     [loadUnits, projectName, episode],
@@ -1163,6 +1178,16 @@ export function ReferenceVideoCanvas({
             disabled={batchTargets.length === 0}
             onClick={() => void handleBatchGenerate()}
           />
+          {hasScript && (
+            <FlowExchange
+              projectName={projectName}
+              episode={episode}
+              ids={units.map((u) => u.unit_id)}
+              busyIds={busyUnitIds}
+              upload={uploadFlowVideo}
+              onImported={handleUnitsRefresh}
+            />
+          )}
         </EpisodeHeaderActions>
       )}
 

@@ -11,18 +11,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
 from lib.artifacts.artifact_manifest import ArtifactBasis, ArtifactKey
+from lib.artifacts.input_gap import InputGap
 from lib.artifacts.visual_artifact_provenance import VisualReference, build_asset_sheet_visual_basis
 from lib.infra.api_errors import BadRequestError, NotFoundError
 from lib.project.asset_types import (
     ASSET_SPECS,
     DERIVATIVES_FIELD,
     AssetSpec,
+    asset_name_comparison_key,
+    asset_name_namespace_key,
     resolve_asset_key,
     validate_asset_name,
 )
@@ -116,6 +119,32 @@ def ensure_derivative_table(entry: dict[str, Any]) -> dict[str, Any]:
     return table
 
 
+def find_derivative_name(table: object, name: str, *, exclude: str | None = None) -> str | None:
+    """在一个本体的衍生表里查找与 *name* 重名的衍生，返回落盘真名；未命中返回 ``None``。
+
+    与 :func:`lib.project.asset_types.find_project_asset_name` 同口径：按
+    :func:`asset_name_namespace_key` 判重，只差大小写也算重名（衍生图落在
+    ``characters/derivatives/{本体}/{衍生}.png``）；判等键相同的条目优先于只差大小写的条目，
+    旧版登记出的只差大小写的衍生仍各自可被就地更新。命中的是不是 *name* 本身，用判等键区分。
+    *exclude* 排除与它判等键相同的条目，供改名检查目标名时忽略自身。畸形表按空表处理。
+    """
+    if not isinstance(table, Mapping):
+        return None
+    excluded = asset_name_comparison_key(exclude) if exclude is not None else None
+    key = resolve_asset_key(table, name)
+    if key is not None and asset_name_comparison_key(key) != excluded:
+        return key
+    target = asset_name_namespace_key(name)
+    for key in table:
+        if (
+            isinstance(key, str)
+            and asset_name_namespace_key(key) == target
+            and asset_name_comparison_key(key) != excluded
+        ):
+            return key
+    return None
+
+
 def normalize_agent_derivatives(raw: object, *, spec: AssetSpec, field_path: str) -> dict[str, dict[str, Any]]:
     """把 Agent 写入路径收到的衍生表归一成落盘形状，非法输入 fail-loud。
 
@@ -157,12 +186,15 @@ def merge_agent_derivatives(entry: dict[str, Any], normalized: Mapping[str, dict
     """把归一化后的衍生表并入本体条目：同名改描述、新名整条加入，未提及的原样留下。
 
     整表替换会连带抹掉未提及衍生的资产图，故按名合并；已有条目的存量 key 可能是 NFD，
-    按 :func:`resolve_asset_key` 就地更新而非按 NFC 名新建第二条。
+    按 :func:`find_derivative_name` 就地更新而非按 NFC 名新建第二条。新名与已有衍生只差
+    大小写时按重名拒绝（``ValueError``）。
     """
 
     table = ensure_derivative_table(entry)
     for name, derivative in normalized.items():
-        key = resolve_asset_key(table, name)
+        key = find_derivative_name(table, name)
+        if key is not None and asset_name_comparison_key(key) != asset_name_comparison_key(name):
+            raise ValueError(f"衍生名 {name!r} 与已有衍生 {key!r} 冲突（按 strip + Unicode NFC、不区分大小写判定）")
         current = table.get(key) if key is not None else None
         if key is not None and isinstance(current, dict):
             current["description"] = derivative["description"]
@@ -263,14 +295,20 @@ def build_derivative_sheet_basis(
     derivative_name: str,
     description: str,
     aspect_ratio: str,
-    source: VisualReference,
+    source: VisualReference | None,
+    absent: Sequence[InputGap] = (),
 ) -> ArtifactBasis:
     """衍生资产图的规范依据：变化描述 + 本体资产图内容，不含项目画风。
 
     画风由本体资产图自身承载——衍生只是对它的一次编辑，编辑指令里不再注入项目 style
     （与图片编辑同口径）。规划侧与执行侧都经此构造，因此本体资产图一旦重生成、或变化
     描述被改写，衍生的登记依据即与规范状态不符，判为过期。
+
+    ``absent`` 记生成输入的缺口（``docs/adr/0098``）：本体资产图不可用时没有 ``source``，
+    变化描述可以为空，两者都只在记有缺口时接受。
     """
+    if source is None and not absent:
+        raise ValueError("a derivative sheet basis without its owner sheet must record the gap")
     return build_asset_sheet_visual_basis(
         asset_type=DERIVATIVE_ASSET_TYPE,
         asset_id=derivative_artifact_id(owner_name, derivative_name),
@@ -278,5 +316,6 @@ def build_derivative_sheet_basis(
         style="",
         style_description="",
         aspect_ratio=aspect_ratio,
-        references=(source,),
+        references=(source,) if source is not None else (),
+        absent=absent,
     )

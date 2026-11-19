@@ -29,7 +29,7 @@ from lib.generation.generation_batch import (
 )
 from lib.generation.render_lane import RENDER_MEDIA_TYPE, RENDER_PROVIDER_ID, is_render_task_type
 from lib.generation.task_terminal_events import TERMINAL_TASK_STATUSES, emit_task_terminal_events
-from lib.infra.async_thread import run_noninterruptible_async
+from lib.infra.async_thread import run_noninterruptible_async, run_sync_transaction
 from lib.project.asset_derivatives import DERIVATIVE_TASK_TYPE
 from lib.project.project_manager import ProjectManager
 from lib.project.project_migration_guard import assert_project_migration_ok
@@ -129,6 +129,16 @@ class DispatchProviderChanged(RuntimeError):
         super().__init__(f"dispatch provider changed: {claimed_provider_id} -> {actual_provider_id}")
 
 
+def ensure_dispatch_provider(claimed_provider_id: str | None, actual_provider_id: str) -> None:
+    """执行入口核对：按项目现状解析出的 provider 与认领时占用的槽不一致时抛 :class:`DispatchProviderChanged`。
+
+    调用方必须在任何供应商调用之前核对。``claimed_provider_id`` 为 None 表示调用方不经 worker
+    认领（直接调用），不核对。
+    """
+    if claimed_provider_id is not None and actual_provider_id != claimed_provider_id:
+        raise DispatchProviderChanged(claimed_provider_id=claimed_provider_id, actual_provider_id=actual_provider_id)
+
+
 def reference_video_enqueue_payload(
     payload: dict[str, Any] | None,
     *,
@@ -212,7 +222,7 @@ async def reference_projection_for_queued_task(
         return None
     try:
         pm = get_project_manager()
-        script = await asyncio.to_thread(pm.load_script, project_name, str(script_file))
+        script = await run_sync_transaction(pm.load_script, project_name, str(script_file))
         project_path = await asyncio.to_thread(pm.get_project_path, project_name)
         unit = find_reference_unit(script, str(resource_id))
         if unit is None:
@@ -282,10 +292,10 @@ async def _derive_execution_model_for_enqueue(
 ) -> tuple[ProviderModel, VideoGenerationType | None] | None:
     """入队时按 project + payload 派生任务的 advisory provider 与视频桶。
 
-    ``provider_id`` 落 task 行供 claim SQL 池过滤使用；两种视频生成模式都只保存 advisory provider，
-    worker 开始处理时重新投影当前状态。与 worker ``_extract_provider`` 同套解析逻辑，
-    但失败时返回 ``None``（不强行回 DEFAULT_PROVIDER）——让任务走 ``provider_id IS NULL``
-    兜底分支，由 worker claim 后做二次校验，比硬塞一个可能错误的 provider 安全。
+    ``provider_id`` 落 task 行，worker 认领时按它做池满过滤与槽位归属；两种视频生成模式都只保存
+    advisory provider，执行入口按项目现状核对，不一致时改写记录并回队。与 worker ``_extract_provider``
+    同套解析逻辑，但失败时返回 ``None``（不强行回 DEFAULT_PROVIDER）——让任务走 ``provider_id IS NULL``
+    兜底分支，由 worker claim 后推算，比硬塞一个可能错误的 provider 安全。
     """
     if media_type == RENDER_MEDIA_TYPE:
         from lib.config.resolver import ProviderModel
@@ -414,7 +424,7 @@ class GenerationQueue:
             payload = reference_video_enqueue_payload(payload, script_file=script_file)
 
         # caller 没传 provider_id → 入队时主动派生一次，让 claim 走 SQL 池过滤快路径；
-        # 派生失败留 NULL，走 IS NULL 兜底，由 worker claim 后 _extract_provider 二次校验。
+        # 派生失败留 NULL，走 IS NULL 兜底，由 worker claim 后 _extract_provider 推算。
         # 派生成功只把 provider_id 作为 claim/rate-limit advisory；视频 model 不在入队时冻结。
         if provider_id is None:
             derived = await _derive_execution_model_for_enqueue(
@@ -538,7 +548,10 @@ class GenerationQueue:
             batch = await repo.get_batch(project_name=project_name, batch_id=batch_id, user_id=user_id)
         if batch is None:
             raise GenerationBatchNotFound(f"batch '{batch_id}' does not belong to project '{project_name}'")
-        return build_generation_batch_read_model(batch, batch["memberships"], batch["queue_depth"], resolver)
+        # 读模型按产物清单与内容摘要判定成员产物时效，读盘、等清单锁都放进工作线程。
+        return await asyncio.to_thread(
+            build_generation_batch_read_model, batch, batch["memberships"], batch["queue_depth"], resolver
+        )
 
     async def delete_fresh_generation_batch(
         self,
@@ -640,14 +653,9 @@ class GenerationQueue:
         media_type: str,
         *,
         pool_full_providers: frozenset[str] | None = None,
-        exclude_task_ids: frozenset[str] | None = None,
     ) -> dict[str, Any] | None:
         async with self._task_repo() as repo:
-            task = await repo.claim_next(
-                media_type,
-                pool_full_providers=pool_full_providers,
-                exclude_task_ids=exclude_task_ids,
-            )
+            task = await repo.claim_next(media_type, pool_full_providers=pool_full_providers)
         if task:
             logger.debug("任务被领取 task_id=%s", task["task_id"])
         return task

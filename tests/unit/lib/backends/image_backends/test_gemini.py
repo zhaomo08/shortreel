@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -100,7 +101,7 @@ class TestProperties:
         backend = GeminiImageBackend(
             backend_type="aistudio", api_key="fake-key", rate_limiter=fake_rate_limiter, image_model=model
         )
-        assert backend.max_reference_images == 14
+        assert asyncio.run(backend.reference_image_limit()) == 14
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,10 @@ class TestGenerate:
         assert result.image_path == output_file
         assert result.provider == "gemini"
         assert output_file.exists()
+        # 没发 image_size：只报输出张数，不报分辨率（按价目表默认档计）
+        assert result.usage is not None
+        assert result.usage.quantities == {"output_images": 1}
+        assert result.usage.dimensions == {}
 
     async def test_generate_with_reference_images(self, backend_aistudio, tmp_path):
         """参考图按顺序作为图片内容送入 SDK，prompt 置于末尾，中间不夹任何名称标签。"""
@@ -172,7 +177,7 @@ class TestGenerate:
         assert contents[1] == "draw character"
 
     async def test_generate_truncates_references_over_the_declared_limit(self, backend_aistudio, tmp_path):
-        """编排层未裁剪时的兜底：只把前 max_reference_images 张送入 SDK，prompt 仍在末尾。"""
+        """编排层未裁剪时的兜底：只把前 reference_image_limit() 张送入 SDK，prompt 仍在末尾。"""
         refs = []
         for index in range(16):
             ref_path = tmp_path / f"ref{index}.png"
@@ -190,7 +195,7 @@ class TestGenerate:
         )
 
         contents = backend_aistudio._client.aio.models.generate_content.call_args.kwargs["contents"]
-        assert len(contents) == backend_aistudio.max_reference_images + 1 == 15
+        assert len(contents) == (await backend_aistudio.reference_image_limit()) + 1 == 15
         assert contents[-1] == "merge"
 
     async def test_generate_raises_on_empty_response(self, backend_aistudio, tmp_path):

@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -52,7 +52,7 @@ jobs:
     # zizmor 只审 GitHub 实际执行的输入；.agents/skills/ 下 vendored skill 自带的上游 CI 不在本仓库运行。
     needs: changes
     if: needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,7 +62,7 @@ jobs:
       - name: Workflow syntax & shell check (actionlint)
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -72,14 +72,14 @@ jobs:
   backend-static:
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -114,6 +114,10 @@ jobs:
         working-directory: packages/arcreel-market-core
         run: uv run deptry src tests
 
+      - name: Dependency hygiene (deptry, arcreel-catalog-core)
+        working-directory: packages/arcreel-catalog-core
+        run: uv run deptry src tests
+
       - name: Agent Runtime Profile integrity
         run: uv run python scripts/lint_agent_runtime_profile.py
 
@@ -121,14 +125,14 @@ jobs:
     # 仓库约定闸门：scripts/audit_conventions.py --check（规范索引与 CodeRabbit 映射、
     # Dependabot 分组、工具版本同步、豁免注释的行内理由）。涉及的文件横跨各域，其中
     # docs/standards/ 等不属于任何域，所以不按域裁剪。
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -148,7 +152,7 @@ jobs:
     # 只挂 backend 域会让 frontend-only PR 绕过前端段。
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -166,25 +170,30 @@ jobs:
     name: Backend tests (${{ matrix.suite }})
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         include:
+          # 豁免清单的每一条都由 tests/unit 触发：unit job 声明这一点，过期条目在 CI 报出；
+          # integration 单独跑只触发其中一部分，不带。
           - suite: unit
             path: tests/unit
+            extra_args: --blocking-guard-expect-all-exemptions
           - suite: integration
             path: tests/integration
           # workspace 子包的测试目录自带 pytest 配置，与应用测试分开收集
           - suite: market-core
             path: packages/arcreel-market-core/tests
+          - suite: catalog-core
+            path: packages/arcreel-catalog-core/tests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -205,8 +214,8 @@ jobs:
         # （PROJECT_ROOT 下 mkdir/rmdir、module 级 autouse fixture）要求同文件用例
         # 留在同一 worker。
         run: >-
-          uv run python -m pytest ${{ matrix.path }} -n 4 --dist loadfile
-          --cov=lib --cov=server --cov=arcreel_market_core --cov-report=term-missing
+          uv run python -m pytest ${{ matrix.path }} ${{ matrix.extra_args }} -n 4 --dist loadfile
+          --cov=lib --cov=server --cov=arcreel_market_core --cov=arcreel_catalog_core --cov-report=term-missing
           --cov-report=xml:coverage-${{ matrix.suite }}.xml
 
       - name: Upload backend coverage
@@ -225,7 +234,7 @@ jobs:
     # 不限于 alembic/ 目录。
     needs: changes
     if: needs.changes.outputs.backend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:
@@ -248,7 +257,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -287,7 +296,7 @@ jobs:
   frontend-static:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -298,7 +307,7 @@ jobs:
         with:
           version: 10
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: "pnpm"
@@ -323,7 +332,7 @@ jobs:
   frontend-tests:
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -334,7 +343,7 @@ jobs:
         with:
           version: 10
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: "pnpm"
@@ -362,7 +371,7 @@ jobs:
     name: frontend-e2e (${{ matrix.shard }}/3)
     needs: changes
     if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 单 worker 跑完整套截图场景已超过 25 分钟，按用例分三片；每片仍是单 worker，截图渲染条件不变
     timeout-minutes: 25
     strategy:
@@ -381,7 +390,7 @@ jobs:
         with:
           version: 10
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: "pnpm"
@@ -400,7 +409,7 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: playwright-report-${{ matrix.shard }}
           path: frontend/playwright-report/
@@ -415,7 +424,7 @@ jobs:
     # fail → 缺译/滞后清单写 step summary，不阻断。
     needs: changes
     if: needs.changes.outputs.website == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -428,7 +437,7 @@ jobs:
           # 该输入必须显式指定——默认值是仓库根的 package.json，本仓库根目录没有这个文件
           package_json_file: website/package.json
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: website/.node-version
           cache: "pnpm"
@@ -551,7 +560,7 @@ jobs:
     # 发布 PR（release-please--* 分支）的完整性校验；其余情形 skip（聚合口径视为通过）。
     # 发布 PR 同时跑全量 CI：它是即将被打 tag 发布的 commit，不因分支名前缀跳过测试。
     if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-please--')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -559,7 +568,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -589,7 +598,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          allow='^(CHANGELOG\.md|pyproject\.toml|uv\.lock|frontend/package\.json|\.release-please-manifest\.json)$'
+          allow='^(CHANGELOG\.md|pyproject\.toml|uv\.lock|frontend/package\.json|\.release-please-manifest\.json|lib/catalog/snapshot/(catalog|manifest)\.json)$'
           bad=$(echo "$changed" | grep -vE "$allow" || true)
           if [ -n "$bad" ]; then
             echo "发布 PR 含版本产物白名单外的文件，请检查 release-please 配置："
@@ -616,7 +625,7 @@ jobs:
         website-checks,
         release-integrity,
       ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Verify required jobs
         run: |

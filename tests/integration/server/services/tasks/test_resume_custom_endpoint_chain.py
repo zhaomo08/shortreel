@@ -21,6 +21,7 @@ import pytest
 from lib.artifacts.artifact_manifest import ArtifactBasis, compose_video_artifact_basis
 from lib.artifacts.video_artifact_facts import VideoArtifactCurrencyFacts
 from lib.custom_provider import make_endpoint_key, make_provider_id
+from lib.custom_provider.path_overrides import endpoint_guard
 from lib.db.models.task import Task
 from lib.db.repositories.custom_endpoint_repo import CustomEndpointRepository
 from lib.db.repositories.custom_provider_repo import CustomProviderRepository
@@ -35,7 +36,7 @@ from server.services.tasks import generation_context
 from server.services.tasks.generation_tasks import execute_generation_task
 from server.services.tasks.resume_executor import execute_resume_video_task
 from tests.factories import custom_endpoint_definition
-from tests.fakes import bind_safe_session_factory
+from tests.fakes import bind_safe_session_factory, bind_session_factory, use_video_thumbnail_extractor
 from tests.http_capture import capture_http
 
 
@@ -47,11 +48,9 @@ def clean_backend_cache():
     前一个测试触发过竞争的 ``asyncio.Lock`` 会永久绑定在已关闭的旧循环上，
     后续测试再次竞争即抛 ``RuntimeError``。清空 locks 不影响被测生产行为。
     """
-    generation_context.invalidate_backend_cache()
-    generation_context._backend_cache._locks.clear()
+    generation_context.reset_backend_cache_for_tests()
     yield
-    generation_context.invalidate_backend_cache()
-    generation_context._backend_cache._locks.clear()
+    generation_context.reset_backend_cache_for_tests()
 
 
 @pytest.fixture
@@ -69,7 +68,7 @@ async def chain_project(session_factory, tmp_path: Path, monkeypatch) -> Path:
       ProjectManager——resolver 等在模块顶部绑定了该名字，只 patch 定义处不生效。
     - 缩略图抽取走 ffmpeg 子进程，替换为 no-op 保持测试封闭。
     """
-    monkeypatch.setattr("lib.db.async_session_factory", session_factory)
+    bind_session_factory(monkeypatch, session_factory)
     bind_safe_session_factory(monkeypatch, session_factory)
     monkeypatch.setattr("lib.db.engine.async_session_factory", session_factory)
     monkeypatch.setenv("ARCREEL_DATA_DIR", str(tmp_path / "appdata"))
@@ -106,16 +105,22 @@ async def chain_project(session_factory, tmp_path: Path, monkeypatch) -> Path:
     async def _no_thumbnail(*_args: Any, **_kwargs: Any) -> bool:
         return False
 
-    monkeypatch.setattr("server.services.tasks.generation_tasks.extract_video_thumbnail", _no_thumbnail)
-    monkeypatch.setattr("server.services.tasks.reference_video_tasks.extract_video_thumbnail", _no_thumbnail)
+    use_video_thumbnail_extractor(monkeypatch, _no_thumbnail)
     return project_dir
 
 
-async def _seed_custom_video_rows(session_factory, *, endpoint_count: int = 1, model_endpoint_index: int = 0) -> dict:
+async def _seed_custom_video_rows(
+    session_factory,
+    *,
+    endpoint_count: int = 1,
+    model_endpoint_index: int = 0,
+    path_overrides: dict[str, str] | None = None,
+) -> dict:
     """落自定义供应商三件套：端点定义、供应商、挂端点键的视频模型行。
 
     ``endpoint_count`` > 1 时额外建端点行；``model_endpoint_index`` 决定模型行
     挂哪个端点键——guard 用例据此制造「模型行端点 ≠ checkpoint 冻结端点」。
+    ``path_overrides`` 是模型行当前的路径覆盖。
     """
     async with session_factory() as session:
         endpoint_repo = CustomEndpointRepository(session)
@@ -141,6 +146,7 @@ async def _seed_custom_video_rows(session_factory, *, endpoint_count: int = 1, m
                     "endpoint": endpoint_keys[model_endpoint_index],
                     "is_enabled": True,
                     "is_default": True,
+                    "path_overrides": path_overrides,
                 }
             ],
         )
@@ -345,3 +351,65 @@ async def test_ce_orphan_fails_before_any_http_when_endpoint_rebound(chain_proje
     assert "resume_endpoint_changed" in row.error_message
     # 无产物落盘。
     assert not (chain_project / "versions" / "videos").exists()
+
+
+async def test_ce_orphan_fails_without_resubmitting_when_path_overrides_changed(chain_project: Path, session_factory):
+    """路径覆盖随协议冻结：提交后改了请求地址，续跑与改绑端点同样失败，且不重新提交。"""
+    rows = await _seed_custom_video_rows(session_factory, path_overrides={"poll": "/v2/fetch/{{ task_id }}"})
+    endpoint_key = rows["endpoint_keys"][0]
+    await _seed_running_video_task(
+        session_factory,
+        task_id="T-ce-paths",
+        provider_id=rows["provider_id"],
+        checkpoint_json=_storyboard_checkpoint_json(
+            "T-ce-paths",
+            provider_id=rows["provider_id"],
+            endpoint_guard=endpoint_guard(endpoint_key, {"poll": "/v1/video/fetch/{{ task_id }}"}),
+        ),
+    )
+
+    with capture_http() as router:
+        submit = router.post("https://relay.test/v1/video/create")
+        poll_submitted = router.get("https://relay.test/v1/video/fetch/job-old")
+        poll_current = router.get("https://relay.test/v2/fetch/job-old")
+
+        await _run_orphan_recovery(session_factory)
+
+    assert submit.call_count == 0
+    assert poll_submitted.call_count == 0
+    assert poll_current.call_count == 0
+    row = await _load_task_row(session_factory, "T-ce-paths")
+    assert row.status == "failed"
+    assert row.error_message is not None
+    assert "resume_endpoint_changed" in row.error_message
+
+
+async def test_ce_orphan_resumes_through_unchanged_path_overrides(chain_project: Path, session_factory):
+    """覆盖未改：续跑通过协议比对，并按覆盖后的轮询地址取件。"""
+    overrides = {"poll": "/v2/fetch/{{ task_id }}"}
+    rows = await _seed_custom_video_rows(session_factory, path_overrides=overrides)
+    await _seed_running_video_task(
+        session_factory,
+        task_id="T-ce-paths-kept",
+        provider_id=rows["provider_id"],
+        checkpoint_json=_storyboard_checkpoint_json(
+            "T-ce-paths-kept",
+            provider_id=rows["provider_id"],
+            endpoint_guard=endpoint_guard(rows["endpoint_keys"][0], overrides),
+        ),
+    )
+
+    with capture_http() as router:
+        submit = router.post("https://relay.test/v1/video/create")
+        poll = router.get("https://relay.test/v2/fetch/job-old").mock(
+            return_value=httpx.Response(
+                200, json={"status": "completed", "video_url": "https://relay.test/files/job-old.mp4"}
+            )
+        )
+        router.get("https://relay.test/files/job-old.mp4").mock(return_value=httpx.Response(200, content=b"resumed"))
+
+        await _run_orphan_recovery(session_factory)
+
+    assert submit.call_count == 0
+    assert poll.call_count == 1
+    assert (await _load_task_row(session_factory, "T-ce-paths-kept")).status == "succeeded"

@@ -146,6 +146,9 @@ class _VideoPromptCore(BaseModel):
 class VideoPrompt(_VideoPromptCore):
     """narration / ad 视频生成 Prompt：含角色对话 dialogue。
 
+    narration 片段落盘仍按本模型读入，存量带台词的片段由发声准入判为混合；提示词编写的
+    视觉层改用不产台词的 ``NarrationVideoPrompt``。
+
     drama 的有序发声由 ``DramaScene.utterances`` 承载，video_prompt 使用无-dialogue 的
     ``DramaVideoPrompt``（见 ADR 0040）。
     """
@@ -153,6 +156,25 @@ class VideoPrompt(_VideoPromptCore):
     dialogue: Annotated[list[Dialogue], BeforeValidator(_none_to_empty_list)] = Field(
         default_factory=list, description="对话列表，仅当原文有引号对话时填写"
     )
+
+
+def _require_no_dialogue(value: list[Dialogue]) -> list[Dialogue]:
+    if value:
+        raise ValueError("旁白/解说片段不写台词：角色说的话由旁白在正文里转述")
+    return value
+
+
+class NarrationVideoPrompt(_VideoPromptCore):
+    """旁白/解说提示词编写的视频提示词：``dialogue`` 不进 response_schema，恒为空。
+
+    片段正文必填且就是画外音，再带台词即为混合发声（ADR 0089），所以模型不能写台词。
+    漂移通道写出的 ``null`` 或 ``[]`` 归一为空；非空 dialogue 校验即拒。落盘形状与
+    ``VideoPrompt`` 一致（``dialogue: []``）。
+    """
+
+    dialogue: SkipJsonSchema[
+        Annotated[list[Dialogue], BeforeValidator(_none_to_empty_list), AfterValidator(_require_no_dialogue)]
+    ] = Field(default_factory=list, description="恒为空：旁白/解说片段不写台词")
 
 
 class DramaVideoPrompt(_VideoPromptCore):
@@ -400,7 +422,7 @@ class NarrationVisualSegment(BaseModel):
 
     segment_id: str = Field(min_length=1, description="对齐锚：必须取自 script_plan 分镜表，逐一对应、不增不减")
     image_prompt: ImagePrompt = Field(description="分镜图生成提示词")
-    video_prompt: VideoPrompt = Field(description="视频生成提示词")
+    video_prompt: NarrationVideoPrompt = Field(description="视频生成提示词（不含台词）")
 
 
 class NarrationVisualEpisodeScript(BaseModel):
@@ -1043,7 +1065,7 @@ def _coerce_digit_string(value: object) -> object:
     return value
 
 
-def _duration_literal(supported_durations: list[int]) -> object:
+def _duration_literal(supported_durations: list[int]) -> Any:
     """把 supported_durations 去重排序后构造成数字字符串可强转的 ``Literal[...]``。
 
     多值在 ``model_json_schema()`` 里渲染为 JSON-schema ``enum``、单值渲染为 ``const``，两者都是硬约束。
@@ -1055,7 +1077,16 @@ def _duration_literal(supported_durations: list[int]) -> object:
     return Annotated[Literal[values], BeforeValidator(_coerce_digit_string)]
 
 
-def _constrained_duration_item(item_base: type[BaseModel], duration_type: object, description: str) -> type[BaseModel]:
+def _list_of(item: type[BaseModel]) -> Any:
+    """``list[item]``，供 ``create_model`` 字段定义使用。
+
+    pydantic 2.14 起 ``create_model`` 的字段参数标注为 ``TypeForm``，类型检查器会把实参当类型表达式求值，
+    直接写 ``list[<变量>]`` 会报 reportInvalidTypeForm；经此函数返回 ``Any`` 绕开类型表达式求值，运行时行为不变。
+    """
+    return list[item]
+
+
+def _constrained_duration_item(item_base: type[BaseModel], duration_type: Any, description: str) -> type[BaseModel]:
     """在 ``item_base`` 上把 ``duration_seconds`` 收紧为 ``duration_type``（三工厂共用的字段约束骨架）。"""
     return create_model(
         item_base.__name__,
@@ -1090,7 +1121,7 @@ def build_episode_script_model(content_mode: str, supported_durations: list[int]
         return create_model(
             "NarrationEpisodeScript",
             __base__=NarrationEpisodeScript,
-            segments=(list[segment], Field(description="分镜列表")),
+            segments=(_list_of(segment), Field(description="分镜列表")),
         )
     if kind == "shots":
         return _ad_episode_model(duration_type, "分镜时长（秒），必须取 supported_durations 中的值")
@@ -1098,7 +1129,7 @@ def build_episode_script_model(content_mode: str, supported_durations: list[int]
     return create_model(
         "DramaEpisodeScript",
         __base__=DramaEpisodeScript,
-        scenes=(list[scene], Field(description="分镜列表")),
+        scenes=(_list_of(scene), Field(description="分镜列表")),
     )
 
 
@@ -1117,17 +1148,17 @@ def build_drama_normalized_script_model(supported_durations: list[int]) -> type[
     return create_model(
         "DramaNormalizedScript",
         __base__=DramaNormalizedScript,
-        scenes=(list[scene], Field(description="分镜内容列表")),
+        scenes=(_list_of(scene), Field(description="分镜内容列表")),
     )
 
 
-def _ad_episode_model(duration_type: object, description: str) -> type[BaseModel]:
+def _ad_episode_model(duration_type: Any, description: str) -> type[BaseModel]:
     """ad 剧集脚本的动态包装骨架：两条生成路径共用，仅 ``duration_seconds`` 约束类型不同。"""
     shot = _constrained_duration_item(AdShot, duration_type, description)
     return create_model(
         "AdEpisodeScript",
         __base__=AdEpisodeScript,
-        shots=(list[shot], Field(description="分镜列表")),
+        shots=(_list_of(shot), Field(description="分镜列表")),
     )
 
 
@@ -1162,5 +1193,5 @@ def build_reference_units_script_plan_model(supported_durations: list[int]) -> t
     return create_model(
         "ReferenceScriptPlanFlatDraft",
         __base__=ReferenceScriptPlanFlatDraft,
-        units=(list[unit], Field(min_length=1, description="按叙事顺序排列的 unit 列表")),
+        units=(_list_of(unit), Field(min_length=1, description="按叙事顺序排列的 unit 列表")),
     )

@@ -5,9 +5,11 @@ import asyncio
 import pytest
 
 from lib.artifacts.artifact_manifest import ArtifactKey, ProjectArtifactManifestAdapter
+from lib.generation.generation_queue import DispatchProviderChanged
 from lib.infra.api_errors import BadRequestError
 from lib.script.storyboard_sequence import StoryboardImageBindingRequired
-from server.services.tasks import formal_image_commit, generation_tasks
+from server.services.tasks import generation_tasks
+from tests.fakes import use_generation_context, use_project_manager, use_video_thumbnail_extractor
 from tests.integration.server.services.tasks.generation_tasks_support import (
     FakeGenerator,
     _FakePM,
@@ -29,9 +31,8 @@ class TestGenerationTasks:
         emitted_batches = []
 
         resolve_ctx = fake_resolve_ctx(fake_generator)
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", resolve_ctx)
-        monkeypatch.setattr(formal_image_commit, "resolve_generation_context", resolve_ctx)
+        use_project_manager(monkeypatch, fake_pm)
+        use_generation_context(monkeypatch, resolve_ctx)
         monkeypatch.setattr(
             generation_tasks,
             "emit_project_change_batch",
@@ -135,6 +136,45 @@ class TestGenerationTasks:
                 {"task_type": "unknown", "project_name": "demo", "resource_id": "x", "payload": {}}
             )
 
+    @pytest.mark.parametrize(
+        ("task_type", "resource_id", "payload"),
+        [
+            pytest.param("storyboard", "E1S02", {"script_file": "episode_1.json", "prompt": "画面"}, id="storyboard"),
+            pytest.param("character", "Alice", {}, id="character"),
+            pytest.param("scene", "祠堂", {}, id="scene"),
+            pytest.param("prop", "玉佩", {}, id="prop"),
+        ],
+    )
+    @pytest.mark.parametrize(("claimed", "drifted"), [("gemini-aistudio", True), ("openai", False)])
+    async def test_image_provider_changed_since_claim_is_raised_before_the_provider_call(
+        self, tmp_path, monkeypatch, task_type, resource_id, payload, claimed, drifted
+    ):
+        """执行入口解析出的图片供应商与认领槽不一致时，在出图之前抛出，交给 worker 改记录并回队。"""
+        project_path = prepare_files(tmp_path)
+        fake_pm = _FakePM(project_path)
+        register_asset_sheet_claims(fake_pm)
+        seed_current_storyboard(fake_pm)
+        fake_generator = FakeGenerator(project_path)
+        resolve_ctx = fake_resolve_ctx(fake_generator, image_provider=("openai", "gpt-image-2"))
+        use_project_manager(monkeypatch, fake_pm)
+        use_generation_context(monkeypatch, resolve_ctx)
+        task = {
+            "task_id": "task-image",
+            "task_type": task_type,
+            "project_name": "demo",
+            "resource_id": resource_id,
+            "payload": payload,
+        }
+
+        if drifted:
+            with pytest.raises(DispatchProviderChanged) as caught:
+                await generation_tasks.execute_generation_task(task, claimed_provider_id=claimed)
+            assert (caught.value.claimed_provider_id, caught.value.actual_provider_id) == (claimed, "openai")
+            assert fake_generator.image_calls == []
+        else:
+            await generation_tasks.execute_generation_task(task, claimed_provider_id=claimed)
+            assert len(fake_generator.image_calls) == 1
+
     async def test_reused_video_result_emits_the_normal_generation_success_event(self, tmp_path, monkeypatch):
         reused = {
             "version": 3,
@@ -148,7 +188,7 @@ class TestGenerationTasks:
             return reused
 
         emitted: list[dict] = []
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: _FakePM(prepare_files(tmp_path)))
+        use_project_manager(monkeypatch, _FakePM(prepare_files(tmp_path)))
         monkeypatch.setitem(generation_tasks._TASK_EXECUTORS, "video", _executor)
         monkeypatch.setattr(
             generation_tasks,
@@ -188,8 +228,8 @@ class TestGenerationTasks:
             emit_attempts.append(project_name)
             raise failure
 
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", fake_resolve_ctx(fake_generator))
+        use_project_manager(monkeypatch, fake_pm)
+        use_generation_context(monkeypatch, fake_resolve_ctx(fake_generator))
         monkeypatch.setattr(generation_tasks, "emit_project_change_batch", _fail_emit)
         task = {
             "task_id": "storyboard-task",
@@ -218,8 +258,8 @@ class TestGenerationTasks:
     async def test_execute_task_validation_errors(self, tmp_path, monkeypatch):
         project_path = prepare_files(tmp_path)
         fake_pm = _FakePM(project_path)
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", fake_resolve_ctx(FakeGenerator()))
+        use_project_manager(monkeypatch, fake_pm)
+        use_generation_context(monkeypatch, fake_resolve_ctx(FakeGenerator()))
 
         with pytest.raises(ValueError, match=r"script_file is required for storyboard task"):
             await generation_tasks.execute_storyboard_task("demo", "E1S01", {"prompt": "x"})
@@ -254,12 +294,10 @@ class TestGenerationTasks:
         fake_generator = FakeGenerator(project_path)
         seen: list[dict] = []
 
-        monkeypatch.setattr(generation_tasks, "get_project_manager", lambda: fake_pm)
+        use_project_manager(monkeypatch, fake_pm)
         resolve_ctx = fake_resolve_ctx(fake_generator, seen_lane_requests=seen)
-        monkeypatch.setattr(generation_tasks, "resolve_generation_context", resolve_ctx)
-        monkeypatch.setattr(formal_image_commit, "resolve_generation_context", resolve_ctx)
-        monkeypatch.setattr(generation_tasks, "extract_video_thumbnail", async_return(None))
-        monkeypatch.setattr(generation_tasks, "emit_project_change_batch", lambda *a, **kw: None)
+        use_generation_context(monkeypatch, resolve_ctx)
+        use_video_thumbnail_extractor(monkeypatch, async_return(None))
 
         # E1S02 引用角色/场景/道具 sheet → 带参考图 → i2i；character 带 reference_image → i2i
         await generation_tasks.execute_storyboard_task(

@@ -10,11 +10,13 @@ fingerprint 或可执行请求快照；worker 开始处理时必须重新投影�
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from lib.artifacts.video_visual_provenance import resolve_video_aspect_ratio
 from lib.config.resolver import (
     VideoGenerationType,
     video_capability_satisfied,
@@ -493,6 +495,7 @@ _PROBLEM_PRESENTATION: dict[str, tuple[str, tuple[tuple[str | int, ...], ...]]] 
     "video_capability_missing_r2v": ("configure_video_model", (("text",),)),
     "video_capability_missing_t2v": ("configure_video_model", (("text",),)),
     "video_capability_reference_unavailable": ("configure_video_model", (("text",),)),
+    "model_not_in_provider_catalog": ("configure_video_model", (("text",),)),
 }
 
 
@@ -537,8 +540,21 @@ class ReferenceUnitRequestProjector:
         """投影调用瞬间状态；``script`` 显式入参锁定公共缝的完整上下文契约。"""
 
         del script
+        # 资产可用性要读产物清单、对设计图算摘要，整段水合放进工作线程。
+        hydration = await asyncio.to_thread(hydrate_unit_references, project, unit, resolved_assets, self._assets)
+        return await self.project_hydrated(project=project, unit=unit, hydration=hydration, options=options)
+
+    async def project_hydrated(
+        self,
+        *,
+        project: dict,
+        unit: dict,
+        hydration: ReferenceUnitHydration,
+        options: ReferenceRequestOptions | None = None,
+    ) -> ReferenceUnitRequestProjection:
+        """在调用方已完成的水合结论上投影；批量调用方可整批水合，只进一次工作线程。"""
+
         options = options or ReferenceRequestOptions()
-        hydration = hydrate_unit_references(project, unit, resolved_assets, self._assets)
         canonical = hydration.declared_references
         available = hydration.available_assets
         declared_generation_type = hydration.declared_generation_type
@@ -652,6 +668,8 @@ class ReferenceUnitRequestProjector:
                 cost = VideoRequestCostFacts(
                     request_facts=facts,
                     duration_seconds=projected.slot.seconds,
+                    aspect_ratio=resolve_video_aspect_ratio(project),
+                    reference_image_count=len(request_assets),
                 )
 
         return ReferenceUnitRequestProjection(
@@ -679,11 +697,13 @@ async def project_reference_unit_request(
     options: ReferenceRequestOptions | None = None,
     resolver: ConfigResolver | None = None,
     request_facts_lookup: ReferenceRequestFactsLookup | None = None,
+    shared_assets: Callable[[], ReferenceAssetAvailability] | None = None,
 ) -> ReferenceUnitRequestProjection:
     """生产入口：从当前项目文件与配置直接构造一次 advisory 投影。
 
     资产可用性与执行侧同判据（文件存在且产物清单认领），准入、单条入队、提示词预览与限流
-    路由因此不会把执行时落 i2v 的单元判成 r2v。
+    路由因此不会把执行时落 i2v 的单元判成 r2v。批量调用方传入 ``shared_assets``，在工作线程里
+    取整批共用的判定，一批单元在同一份清单快照上判定；不传时按本单元现场构造。
     """
 
     # artifact_selection 依赖本模块，延迟导入避免循环。
@@ -696,14 +716,18 @@ async def project_reference_unit_request(
 
             resolver = ConfigResolver(async_session_factory)
         request_facts_lookup = configured_reference_request_facts(project, resolver)
-    projector = ReferenceUnitRequestProjector(
-        request_facts_lookup,
-        CurrentReferenceAssets(project_path, project),
-    )
+
+    def current_assets() -> tuple[ReferenceAssetAvailability, tuple[ResolvedReferenceAsset, ...]]:
+        # 构造清单感知的可用性判定、展开候选路径都会碰文件系统，放进工作线程。
+        availability = CurrentReferenceAssets(project_path, project) if shared_assets is None else shared_assets()
+        return availability, resolve_reference_assets(project, project_path, unit)
+
+    availability, resolved_assets = await asyncio.to_thread(current_assets)
+    projector = ReferenceUnitRequestProjector(request_facts_lookup, availability)
     return await projector.project_current(
         project=project,
         script=script,
         unit=unit,
-        resolved_assets=resolve_reference_assets(project, project_path, unit),
+        resolved_assets=resolved_assets,
         options=options or ReferenceRequestOptions(),
     )

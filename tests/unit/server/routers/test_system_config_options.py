@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from lib.catalog import query as catalog
 from lib.config.service import ConfigService, ProviderStatus
 from lib.db.repositories.custom_provider_repo import CustomProviderRepository
 from server.routers.system_config import _build_options
@@ -41,8 +42,8 @@ def _make_mock_svc(ready_providers: list[str] | None = None) -> ConfigService:
                 display_name=meta.display_name,
                 description=meta.description,
                 status="ready" if name in ready else "unconfigured",
-                media_types=list(meta.media_types),
-                capabilities=list(meta.capabilities),
+                media_types=catalog.provider_media_types(name),
+                capabilities=catalog.provider_capabilities(name),
                 required_keys=list(meta.required_keys),
                 credential_count=1 if name in ready else 0,
             )
@@ -394,8 +395,13 @@ class TestBuildOptionsLocalizedNames:
 
         assert zh["provider_names"]["ark"] == "火山方舟"
         assert en["provider_names"]["ark"] == "Volcengine Ark"
-        assert zh["model_names"]["ark/doubao-seed-2-0-pro-260215"] == "豆包 Seed 2.0 Pro"
-        assert en["model_names"]["ark/doubao-seed-2-0-pro-260215"] == "Doubao Seed 2.0 Pro"
+        # 模型显示名取目录条目，不分语言；型号从目录取，免得随出厂快照更新失效
+        model_id = catalog.default_model("ark", "text")
+        assert model_id is not None
+        model = catalog.get_model("ark", model_id)
+        assert model is not None
+        assert zh["model_names"][f"ark/{model_id}"] == model.display_name
+        assert en["model_names"][f"ark/{model_id}"] == model.display_name
 
     async def test_model_names_key_every_listed_backend(self, session_with_factory):
         """每个候选都能查到名字——缺键会让下拉退回 model id、译名形同虚设。"""

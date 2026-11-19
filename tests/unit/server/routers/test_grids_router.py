@@ -23,6 +23,7 @@ from server.error_handlers import register_error_handlers
 from server.routers import grids
 from server.routers import versions as versions_router
 from tests.auth_deps import AUTH_DEPENDENCIES
+from tests.fakes import use_project_manager
 
 
 def _narration_script(count: int = 4):
@@ -1409,8 +1410,7 @@ def test_restoring_an_uploaded_grid_version_preserves_its_manifest_claim(monkeyp
     Image.new("RGB", (64, 64), color=(1, 2, 3)).save(target)
     GridManager(project_path).save(grid)
 
-    monkeypatch.setattr(grids, "get_project_manager", lambda: pm)
-    monkeypatch.setattr(versions_router, "get_project_manager", lambda: pm)
+    use_project_manager(monkeypatch, pm)
     monkeypatch.setattr("server.services.tasks.generation_tasks.emit_generation_success_batch", lambda **_kwargs: {})
     app = FastAPI()
     app.dependency_overrides[get_current_user] = lambda: CurrentUserInfo(id="default", sub="testuser", role="admin")
@@ -1592,3 +1592,52 @@ def test_upload_grid_image_rejected_when_switch_off(monkeypatch, tmp_path):
         )
         assert resp.status_code == 400
         assert resp.json()["detail"] == i18n_message("grid_storyboard_not_enabled")
+
+
+async def test_upload_grid_image_cancelled_while_staging_leaves_no_staged_file(monkeypatch, tmp_path):
+    """暂存写盘进行中被取消：等线程写完再传播取消，调用方按登记回收暂存文件。"""
+    import asyncio
+    import threading
+    from io import BytesIO
+
+    from fastapi import UploadFile
+
+    grid = _make_completed_grid(tmp_path)
+    grids_dir = tmp_path / "grids"
+    before = set(grids_dir.iterdir())
+    started = threading.Event()
+    release = threading.Event()
+    staged = threading.Event()
+    original_stage = grids.stage_uploaded_bytes
+
+    def _stage(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        try:
+            return original_stage(*args, **kwargs)
+        finally:
+            staged.set()
+
+    monkeypatch.setattr(grids, "stage_uploaded_bytes", _stage)
+    use_project_manager(monkeypatch, _FakePMRegenerate(tmp_path))
+    content = _png_bytes()
+    task = asyncio.create_task(
+        grids.upload_grid_image(
+            project_name="demo",
+            grid_id=grid.id,
+            user=CurrentUserInfo(id="default", sub="testuser", role="admin"),
+            _t=lambda key, **_kwargs: key,
+            file=UploadFile(file=BytesIO(content), filename="photo.png", size=len(content)),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(staged.wait, 5)
+
+    assert set(grids_dir.iterdir()) == before

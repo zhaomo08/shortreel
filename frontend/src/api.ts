@@ -49,15 +49,32 @@ import type {
   ApiKeyInfo,
   CreateApiKeyResponse,
   ProviderInfo,
+  CatalogEntryHit,
+  CatalogSearchResponse,
+  NewCatalogEntry,
+  NewEntryHints,
+  MediaType,
   ProviderConfigDetail,
   ConnectivityCheckResult,
   ProviderCredential,
+  UsageAgentSessionDetail,
+  UsageAgentSessionPage,
   UsageRecordDetail,
   UsageRecordPage,
   UsageSummary,
   CustomProviderInfo,
   CustomProviderCreateRequest,
   CustomProviderFullUpdateRequest,
+  ProviderMultiplierInfo,
+  ProviderModelItem,
+  ProviderModelsResponse,
+  FetchProviderModelsResponse,
+  AddProviderModelRequest,
+  AddProviderModelResponse,
+  ProviderModelDetail,
+  ProviderModelReferences,
+  ProviderModelSettingsUpdate,
+  CatalogEntryKey,
   DiscoverModelsResponse,
   EndpointDescriptor,
   ComfyuiInferResponse,
@@ -125,7 +142,13 @@ import type {
 } from "@/types/presentation";
 import type { Asset, AssetType, AssetCreatePayload, AssetListPage, AssetUpdatePayload } from "@/types/asset";
 import type { AgentMemoryOverview, AgentMemoryScope } from "@/types/agent-memory";
-import type { EpisodeNextStep, WorkflowPlan, WorkflowPlanRequest, WorkflowStatus } from "@/types/workflow";
+import type {
+  EpisodeNextStep,
+  WorkflowMigrationReport,
+  WorkflowPlan,
+  WorkflowPlanRequest,
+  WorkflowStatus,
+} from "@/types/workflow";
 import type {
   EditTimelinePreviewMedia,
   EditTimelineReadout,
@@ -166,6 +189,7 @@ import type {
 } from "@/types/storyboard-batch";
 import type {
   AgentCredential,
+  AgentCredentialTier,
   CreateAgentCredentialRequest,
   PresetProvidersResponse,
   TestConnectionRequest,
@@ -205,6 +229,7 @@ import type {
   SuccessResponse,
   TaskListFilters,
   UsageRecordsQuery,
+  UsageSessionsQuery,
   UsageSummaryQuery,
   VersionInfo,
   VideoCapabilitiesQuery,
@@ -231,6 +256,7 @@ export type {
   ProjectAssetType,
   ProjectEventStreamOptions,
   UsageRecordsQuery,
+  UsageSessionsQuery,
   UsageSummaryQuery,
   VersionInfo,
   VideoCapabilitiesQuery,
@@ -261,6 +287,11 @@ export const CHARACTER_DERIVATIVE_RESOURCE_TYPE = "character_derivatives";
 /** 衍生的复合资源 id：本体名与衍生名各占一段，与后端的落盘、队列与版本口径一致。 */
 export function derivativeResourceId(characterName: string, derivativeName: string): string {
   return `${characterName}/${derivativeName}`;
+}
+
+/** 路径参数里可能带 `/` 的值（如模型 ID）：逐段编码，保留分隔符，对应服务端的 `{name:path}`。 */
+function encodePath(value: string): string {
+  return value.split("/").map(encodeURIComponent).join("/");
 }
 
 /** 角色衍生子资源的路径前缀；衍生挂在角色条目下，两段名字各自编码。 */
@@ -672,7 +703,10 @@ class API {
     });
   }
 
-  /** 入队渲染成片（最新修订）。组件经 actions/render 调用。 */
+  /**
+   * 入队渲染成片（最新修订）。组件经 actions/render 调用。
+   * @enqueue
+   */
   static async renderFinalCut(
     projectName: string,
     timelineId: string,
@@ -696,7 +730,10 @@ class API {
     });
   }
 
-  /** 入队导出剪映草稿（最新修订，旁白版本省略时按项目默认）。组件经 actions/render 调用。 */
+  /**
+   * 入队导出剪映草稿（最新修订，旁白版本省略时按项目默认）。组件经 actions/render 调用。
+   * @enqueue
+   */
   static async exportJianyingDraft(
     projectName: string,
     timelineId: string,
@@ -747,6 +784,20 @@ class API {
     await throwIfNotOk(response, `HTTP ${response.status}`);
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const filename = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? `${resourceId}_presentation.zip`;
+    return { blob: await response.blob(), filename };
+  }
+
+  /** 一集的 Google Flow 任务包：每个镜头的视频提示词与首尾帧 / 参考图，供在 Flow 网页里出片。 */
+  static async downloadFlowPackage(projectName: string, episode: number): Promise<{ blob: Blob; filename: string }> {
+    const endpoint = `/projects/${encodeURIComponent(projectName)}/episodes/${episode}/flow-package`;
+    const response = await fetch(`${API_BASE}${endpoint}`, withAuth(endpoint));
+    await throwIfNotOk(response, `HTTP ${response.status}`);
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    // 项目名常是中文：Starlette 此时只给 RFC 5987 的 filename*=utf-8''…
+    const encoded = disposition.match(/filename\*=utf-8''([^;]+)/i)?.[1];
+    const filename = encoded
+      ? decodeURIComponent(encoded)
+      : (disposition.match(/filename="?([^";]+)"?/)?.[1] ?? `ep${episode}_flow.zip`);
     return { blob: await response.blob(), filename };
   }
 
@@ -811,13 +862,20 @@ class API {
     return API.postFileUpload(`/projects/${encodeURIComponent(projectName)}/upload/bgm`, file);
   }
 
+  /**
+   * 导入项目 ZIP。导入包升级时有调整或没能带入的内容、且未带 `confirmReport` 时，服务端以 409 拒绝并
+   * 不留下任何项目数据：抛出的错误带 `confirmation_required` 与 `migration_report`，用户确认后带上
+   * `confirmReport` 重新提交。
+   */
   static async importProject(
     file: File,
-    conflictPolicy: ImportConflictPolicy = "prompt"
+    conflictPolicy: ImportConflictPolicy = "prompt",
+    options: { confirmReport?: boolean } = {},
   ): Promise<ImportProjectResponse> {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("conflict_policy", conflictPolicy);
+    if (options.confirmReport) formData.append("confirm_report", "true");
 
     const response = await fetch(
       `${API_BASE}/projects/import`,
@@ -840,6 +898,9 @@ class API {
         errors?: string[];
         warnings?: string[];
         conflict_project_name?: string;
+        confirmation_required?: boolean;
+        migration_report?: WorkflowMigrationReport;
+        migration_report_episodes?: { episode: number; title: string }[];
         diagnostics?: ImportFailureDiagnostics;
       };
       error.status = response.status;
@@ -848,6 +909,13 @@ class API {
       error.warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
       if (typeof payload.conflict_project_name === "string") {
         error.conflict_project_name = payload.conflict_project_name;
+      }
+      if (payload.confirmation_required === true && payload.migration_report) {
+        error.confirmation_required = true;
+        error.migration_report = payload.migration_report as WorkflowMigrationReport;
+        error.migration_report_episodes = Array.isArray(payload.episodes)
+          ? (payload.episodes as { episode: number; title: string }[])
+          : [];
       }
       error.diagnostics = normalizeImportFailureDiagnostics(payload.diagnostics);
       throw error;
@@ -977,6 +1045,7 @@ class API {
 
   /**
    * 提交一次衍生资产图生成。指令由衍生自己的外观变化描述加固定守卫构成，请求体没有 prompt。
+   * @enqueue
    */
   static async generateCharacterDerivative(
     projectName: string,
@@ -1014,7 +1083,10 @@ class API {
     });
   }
 
-  /** 提交一批，立即返回成员任务；整批终态由调用方按任务跟踪。 */
+  /**
+   * 提交一批，立即返回成员任务；整批终态由调用方按任务跟踪。
+   * @enqueue
+   */
   static async submitAssetSheetBatch(
     projectName: string,
     scope: AssetSheetBatchScope
@@ -1038,7 +1110,10 @@ class API {
     );
   }
 
-  /** 提交一集的分镜图或分镜视频批量；分镜视频整批准入未通过时不建任务，返回结论。 */
+  /**
+   * 提交一集的分镜图或分镜视频批量；分镜视频整批准入未通过时不建任务，返回结论。
+   * @enqueue
+   */
   static async submitStoryboardBatch(
     projectName: string,
     episode: number,
@@ -1385,6 +1460,7 @@ class API {
    * 提示词编写（「AI 编写 / AI 重写」），与 Agent 的 generate_episode_script 同一服务命令；提交即返生成批次。
    * 显式重写会覆盖已有内容而未带有效 `overwrite_revision` 时 409，`diagnostic.prompt_overwrite` 带丢失清单。
    * 附加指令随请求按集保存。
+   * @enqueue
    */
   static async authorPrompts(
     projectName: string,
@@ -1412,6 +1488,7 @@ class API {
   /**
    * AI 规划脚本，与 Agent 的 generate_script_plan 同一服务命令；提交即返生成批次。
    * 新的脚本规划整份替换本集现有的规划与草稿，替换前的确认由调用方负责。附加指令随请求按集保存。
+   * @enqueue
    */
   static async planScript(
     projectName: string,
@@ -1427,6 +1504,7 @@ class API {
   /**
    * 广告/短片「AI 生成脚本」，与 Agent 的 generate_episode_script 同一服务命令；提交即返生成批次，结果直接写成正式脚本。
    * 整份重做（`regenerate`）会替换已有正式脚本而未带有效 `overwrite_revision` 时 409，`diagnostic.script_overwrite` 带丢失清单。
+   * @enqueue
    */
   static async generateAdScript(
     projectName: string,
@@ -1517,6 +1595,7 @@ class API {
   /**
    * AI 修复，与 Agent 同一服务命令；以排队文本任务提交，立即返回生成批次。只改违约所在的条目，
    * 修完照常重判，违约清零即采用，否则写回草稿。附加指令不保存。
+   * @enqueue
    */
   static async repairEpisodeDraft(
     projectName: string,
@@ -1895,6 +1974,20 @@ class API {
   }
 
   /**
+   * 记下用户已看过 `migratedAt` 那一份升级报告：之后制作状态不再给出它。没有待确认的报告时同样成功。
+   * 盘上已换成另一份报告时不确认，`acknowledged` 为假。
+   */
+  static async acknowledgeMigrationReport(
+    projectName: string,
+    migratedAt: string,
+  ): Promise<{ success: boolean; acknowledged: boolean }> {
+    return this.request(`/projects/${encodeURIComponent(projectName)}/migration-report/acknowledge`, {
+      method: "POST",
+      body: JSON.stringify({ migrated_at: migratedAt }),
+    });
+  }
+
+  /**
    * 项目文件地址。
    *
    * `cacheBust` 必填：带版本（通常是 assetFingerprints 里的 mtime_ns）的地址按 immutable 长缓存，
@@ -1975,6 +2068,7 @@ class API {
   /**
    * AI 规划分集：从规划起点逐窗规划到整本源文结尾，每一窗是一个排队的文本任务；提交即返首窗的生成批次。
    * 已有进行中的分集规划时 409，没有整本源文等准入不成立时 422。附加指令不写进项目。
+   * @enqueue
    */
   static async planEpisodes(
     projectName: string,
@@ -1998,6 +2092,7 @@ class API {
   /**
    * 从这一集开始重新规划：逐窗生成一份「新的分集方案」，分集账本在采纳前不变；提交即返首窗的生成批次。
    * 已有方案或分集规划在进行时 409。附加指令随方案保存。
+   * @enqueue
    */
   static async startEpisodeReplan(
     projectName: string,
@@ -2013,6 +2108,7 @@ class API {
   /**
    * 接着生成中途停止的新的分集方案：从方案的结尾逐窗生成到整本源文结尾，沿用发起时的附加指令；提交即返首窗的
    * 生成批次。方案已覆盖到结尾或已过时时 409，分集规划在进行时 409。
+   * @enqueue
    */
   static async continueEpisodeReplan(projectName: string, candidateId: string): Promise<EpisodePlanningResponse> {
     return this.request(`/projects/${encodeURIComponent(projectName)}/episode-replan/continue`, {
@@ -2308,6 +2404,7 @@ class API {
    * @param segmentId - 分镜 ID
    * @param prompt - 图片生成 prompt（支持字符串或结构化对象）
    * @param scriptFile - 剧本文件名
+   * @enqueue
    */
   static async generateStoryboard(
     projectName: string,
@@ -2331,6 +2428,7 @@ class API {
    * @param prompt - 视频生成 prompt（支持字符串或结构化对象）
    * @param scriptFile - 剧本文件名
    * @param durationSeconds - 时长（秒）
+   * @enqueue
    */
   static async generateVideo(
     projectName: string,
@@ -2357,6 +2455,7 @@ class API {
    * @param projectName - 项目名称
    * @param segmentId - 分镜 ID
    * @param scriptFile - 剧本文件名
+   * @enqueue
    */
   static async generateNarrationAudio(
     projectName: string,
@@ -2376,6 +2475,7 @@ class API {
    * 批量生成全集旁白配音（只入队缺少旁白且有原文的段）
    * @param projectName - 项目名称
    * @param scriptFile - 剧本文件名
+   * @enqueue
    */
   static async generateEpisodeNarrationAudio(
     projectName: string,
@@ -2422,6 +2522,7 @@ class API {
    * @param charName - 角色名称
    * @param text - 待合成文本
    * @param voice - 音色 id
+   * @enqueue
    */
   static async generateCharacterVoiceSample(
     projectName: string,
@@ -2464,6 +2565,7 @@ class API {
    * @param charName - 角色名称
    *
    * 请求体没有 prompt：描述只取项目里存储的条目。
+   * @enqueue
    */
   static async generateCharacter(
     projectName: string,
@@ -2488,6 +2590,7 @@ class API {
    * @param sceneName - 场景名称
    *
    * 请求体没有 prompt：描述只取项目里存储的条目。
+   * @enqueue
    */
   static async generateProjectScene(
     projectName: string,
@@ -2512,6 +2615,7 @@ class API {
    * @param propName - 道具名称
    *
    * 请求体没有 prompt：描述只取项目里存储的条目。
+   * @enqueue
    */
   static async generateProjectProp(
     projectName: string,
@@ -2536,6 +2640,7 @@ class API {
    * @param productName - 商品名称
    *
    * 请求体没有 prompt：描述只取项目里存储的条目。
+   * @enqueue
    */
   static async generateProjectProduct(
     projectName: string,
@@ -2557,6 +2662,7 @@ class API {
   /**
    * 提交图片指令式编辑任务：以当前图为唯一底图、指令为唯一 prompt 走 i2i，
    * 新图覆盖 current、旧图进版本历史。分镜（resourceType="storyboard"）须带 scriptFile。
+   * @enqueue
    */
   static async editImage(
     projectName: string,
@@ -3025,8 +3131,41 @@ class API {
     if (query.until) params.append("until", query.until);
     if (query.limit !== undefined) params.append("limit", String(query.limit));
     if (query.cursor) params.append("cursor", query.cursor);
+    if (query.view) params.append("view", query.view);
     const search = params.toString();
     return this.request(`/usage/records${search ? "?" + search : ""}`, {
+      signal: options.signal,
+    });
+  }
+
+  /**
+   * 获取 Agent 会话列表的一页（keyset 分页）：按 session_id 聚合，每个会话一行，
+   * 按最近一轮的时间倒序。
+   */
+  static async getUsageSessions(
+    query: UsageSessionsQuery = {},
+    options: { signal?: AbortSignal } = {}
+  ): Promise<UsageAgentSessionPage> {
+    const params = new URLSearchParams();
+    if (query.projectName !== undefined) params.append("project_name", query.projectName);
+    if (query.providers?.length) params.append("provider", query.providers.join(","));
+    if (query.models?.length) params.append("model", query.models.join(","));
+    if (query.since) params.append("since", query.since);
+    if (query.until) params.append("until", query.until);
+    if (query.limit !== undefined) params.append("limit", String(query.limit));
+    if (query.cursor) params.append("cursor", query.cursor);
+    const search = params.toString();
+    return this.request(`/usage/sessions${search ? "?" + search : ""}`, {
+      signal: options.signal,
+    });
+  }
+
+  /** 获取一个 Agent 会话的明细：按时间每条记录一行。 */
+  static async getUsageSession(
+    sessionId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<UsageAgentSessionDetail> {
+    return this.request(`/usage/sessions/${encodeURIComponent(sessionId)}`, {
       signal: options.signal,
     });
   }
@@ -3052,6 +3191,7 @@ class API {
     if (query.since) params.append("since", query.since);
     if (query.until) params.append("until", query.until);
     if (query.tz) params.append("tz", query.tz);
+    if (query.view) params.append("view", query.view);
     const search = params.toString();
     return this.request(`/usage/summary${search ? "?" + search : ""}`, {
       signal: options.signal,
@@ -3076,6 +3216,34 @@ class API {
   /** 删除（吊销）指定 API Key。 */
   static async deleteApiKey(keyId: number): Promise<void> {
     return this.request(`/api-keys/${keyId}`, { method: "DELETE" });
+  }
+
+  // ==================== 模型目录 API ====================
+
+  /** 按名称与媒体类型搜索模型目录中的条目；名称留空列出全部。 */
+  static async searchCatalogEntries(
+    query: { q?: string; mediaType?: MediaType } = {},
+    options: { signal?: AbortSignal } = {}
+  ): Promise<CatalogSearchResponse> {
+    const params = new URLSearchParams();
+    if (query.q) params.set("q", query.q);
+    if (query.mediaType) params.set("media_type", query.mediaType);
+    const qs = params.toString();
+    return this.request(`/catalog/entries${qs ? `?${qs}` : ""}`, { signal: options.signal });
+  }
+
+  /** 手动填写新条目前的提示：目录里是否已有同名模型，以及视频模型按名字预设预填的可选时长。 */
+  static async getNewEntryHints(
+    query: { name: string; mediaType: MediaType },
+    options: { signal?: AbortSignal } = {}
+  ): Promise<NewEntryHints> {
+    const params = new URLSearchParams({ name: query.name, media_type: query.mediaType });
+    return this.request(`/catalog/new-entry-hints?${params}`, { signal: options.signal });
+  }
+
+  /** 目录中找不到的模型，手动填写新建条目并立即写入；Sheet 里的「手动填写」随保存写入，不走这个接口。 */
+  static async createCatalogEntry(entry: NewCatalogEntry): Promise<CatalogEntryHit> {
+    return this.request("/catalog/entries", { method: "POST", body: JSON.stringify(entry) });
   }
 
   // ==================== Provider 管理 API ====================
@@ -3104,6 +3272,100 @@ class API {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+  }
+
+  /** 读取供应商倍率。自定义供应商的 id 写作 `custom-<数据库 id>`。 */
+  static async getProviderMultiplier(
+    id: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ProviderMultiplierInfo> {
+    return this.request(`/providers/${encodeURIComponent(id)}/multiplier`, { signal: options.signal });
+  }
+
+  /** 设置供应商倍率；null 表示恢复默认值。只影响之后结算的调用。 */
+  static async setProviderMultiplier(id: string, multiplier: number | null): Promise<ProviderMultiplierInfo> {
+    return this.request(`/providers/${encodeURIComponent(id)}/multiplier`, {
+      method: "PUT",
+      body: JSON.stringify({ multiplier }),
+    });
+  }
+
+  /** 供应商的全部供应商模型，带启用状态、状态标记与价格摘要；内置与自定义供应商共用。 */
+  static async listProviderModels(
+    id: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ProviderModelsResponse> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models`, { signal: options.signal });
+  }
+
+  /** 获取模型：调用供应商的模型列表接口，返回全部模型与对应结果；已添加的模型由界面排除。 */
+  static async discoverProviderModels(
+    id: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<FetchProviderModelsResponse> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models/discover`, {
+      method: "POST",
+      signal: options.signal,
+    });
+  }
+
+  /** 按 ID 添加模型：内置供应商对上官方收录的模型即启用它，对不上的作为用户添加的模型。 */
+  static async addProviderModel(id: string, body: AddProviderModelRequest): Promise<AddProviderModelResponse> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** 启用或停用一个供应商模型，立即生效；停用时同时取消默认。 */
+  static async setProviderModelEnabled(id: string, modelId: string, enabled: boolean): Promise<ProviderModelItem> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models/enabled`, {
+      method: "PUT",
+      body: JSON.stringify({ model_id: modelId, enabled }),
+    });
+  }
+
+  /** 读取单个供应商模型：列表行、供应商设置、对应条目与「这个供应商支持的参数」。 */
+  static async getProviderModel(
+    id: string,
+    modelId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ProviderModelDetail> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models/${encodePath(modelId)}`, {
+      signal: options.signal,
+    });
+  }
+
+  /** 保存供应商模型 Sheet 的供应商设置，返回保存后的 Sheet 内容。 */
+  static async updateProviderModel(
+    id: string,
+    modelId: string,
+    settings: ProviderModelSettingsUpdate
+  ): Promise<ProviderModelDetail> {
+    return this.request(`/providers/${encodeURIComponent(id)}/models/${encodePath(modelId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(settings),
+    });
+  }
+
+  /** 恢复官方数据：丢弃模型信息的用户修改，所有使用这个模型的供应商一起生效，不能撤销。 */
+  static async restoreCatalogEntry(key: CatalogEntryKey): Promise<void> {
+    await this.request("/catalog/entries/restore-official", { method: "POST", body: JSON.stringify(key) });
+  }
+
+  /** 从供应商移除用户负责的模型。 */
+  static async removeProviderModel(id: string, modelId: string): Promise<void> {
+    await this.request(`/providers/${encodeURIComponent(id)}/models/${encodePath(modelId)}`, { method: "DELETE" });
+  }
+
+  /** 引用这个供应商模型的全局设置项与项目，移除前提示用。 */
+  static async getProviderModelReferences(
+    id: string,
+    modelId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ProviderModelReferences> {
+    const params = new URLSearchParams({ model_id: modelId });
+    return this.request(`/providers/${encodeURIComponent(id)}/model-references?${params}`, { signal: options.signal });
   }
 
   /** 测试指定 provider 的连接。 */
@@ -3196,6 +3458,23 @@ class API {
     });
   }
 
+  /** 为单个档位选择模型条目（`entryBinding` 为「模型厂商/官方模型名」）；返回更新后的凭证。 */
+  static async bindAgentCredentialTier(
+    id: number,
+    tier: AgentCredentialTier,
+    entryBinding: string,
+  ): Promise<AgentCredential> {
+    return this.request(`/agent/credentials/${id}/tiers/${tier}/binding`, {
+      method: "PUT",
+      body: JSON.stringify({ entry_binding: entryBinding }),
+    });
+  }
+
+  /** 解除单个档位的绑定，回到按模型名自动对应；返回更新后的凭证。 */
+  static async unbindAgentCredentialTier(id: number, tier: AgentCredentialTier): Promise<AgentCredential> {
+    return this.request(`/agent/credentials/${id}/tiers/${tier}/binding`, { method: "DELETE" });
+  }
+
   static async deleteAgentCredential(id: number): Promise<void> {
     return this.request(`/agent/credentials/${id}`, { method: "DELETE" });
   }
@@ -3249,12 +3528,15 @@ class API {
     return this.request(`/custom-providers/${id}`, { method: "DELETE" });
   }
 
-  static async discoverModels(data: { discovery_format: string; base_url: string; api_key: string }): Promise<DiscoverModelsResponse> {
-    return this.request("/custom-providers/discover", { method: "POST", body: JSON.stringify(data) });
-  }
-
-  static async discoverModelsForProvider(id: number): Promise<DiscoverModelsResponse> {
-    return this.request(`/custom-providers/${id}/discover`, { method: "POST" });
+  static async discoverModels(
+    data: { discovery_format: string; base_url: string; api_key: string },
+    options: { signal?: AbortSignal } = {}
+  ): Promise<DiscoverModelsResponse> {
+    return this.request("/custom-providers/discover", {
+      method: "POST",
+      body: JSON.stringify(data),
+      signal: options.signal,
+    });
   }
 
   static async checkCustomConnectivity(data: { discovery_format: string; base_url: string; api_key: string }): Promise<{ success: boolean; message: string }> {
@@ -3556,12 +3838,9 @@ class API {
    */
   static async getCostEstimate(
     projectName: string,
-    options: { referenceUnitId?: string; signal?: AbortSignal } = {}
+    options: { signal?: AbortSignal } = {}
   ): Promise<CostEstimateResponse> {
-    const suffix = options.referenceUnitId
-      ? `?${new URLSearchParams({ reference_unit_id: options.referenceUnitId }).toString()}`
-      : "";
-    return this.request(`/projects/${encodeURIComponent(projectName)}/cost-estimate${suffix}`, {
+    return this.request(`/projects/${encodeURIComponent(projectName)}/cost-estimate`, {
       signal: options.signal,
     });
   }
@@ -3574,6 +3853,7 @@ class API {
    * @param episode - 剧集编号
    * @param scriptFile - 剧本文件名
    * @param sceneIds - 可选，指定场景 ID 列表
+   * @enqueue
    */
   static async generateGrid(
     projectName: string,
@@ -3642,6 +3922,7 @@ class API {
    * 重新生成 Grid 图像
    * @param projectName - 项目名称
    * @param gridId - Grid ID
+   * @enqueue
    */
   static async regenerateGrid(
     projectName: string,
@@ -3912,7 +4193,10 @@ class API {
     );
   }
 
-  /** Enqueue generation; returns 202 with task_id. */
+  /**
+   * Enqueue generation; returns 202 with task_id.
+   * @enqueue
+   */
   static async generateReferenceVideoUnit(
     projectName: string,
     episode: number,
@@ -3930,6 +4214,7 @@ class API {
    *
    * 恒返回 200——`decision` 携带结局，只有 `admitted` 建了任务；
    * `confirmation_required` 与 `blocked` 一个任务也没建，须按结论再决定下一步。
+   * @enqueue
    */
   static async generateReferenceVideoBatch(
     projectName: string,

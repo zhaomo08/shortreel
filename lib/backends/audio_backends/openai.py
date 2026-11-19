@@ -20,6 +20,8 @@ from lib.backends.audio_backends.base import (
 )
 from lib.backends.openai_shared import OPENAI_RETRYABLE_ERRORS, create_openai_client
 from lib.backends.providers import PROVIDER_OPENAI
+from lib.backends.transport_layer import TransportLayer
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.retry import with_retry_async
 
 logger = logging.getLogger(__name__)
@@ -72,11 +74,14 @@ class OpenAIAudioBackend:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
+        transport_layer: TransportLayer | None = None,
         model: str,
         provider_name: str = PROVIDER_OPENAI,
     ) -> None:
         # 禁用 SDK 内置重试，由本层 synthesize() 统一管理重试策略
-        self._client = create_openai_client(api_key=api_key, base_url=base_url, max_retries=0)
+        self._client = create_openai_client(
+            api_key=api_key, base_url=base_url, max_retries=0, transport_layer=transport_layer
+        )
         self._model = model
         # 复用 OpenAI 兼容协议的 provider（自定义供应商包装层覆盖 name）须用真实 provider 记账
         self._provider_name = provider_name
@@ -105,14 +110,14 @@ class OpenAIAudioBackend:
         # language_type 是 DashScope 特有字段，/v1/audio/speech 无对应参数（语种随输入文本），不发送。
         # 计费调用与写盘分离：重试只包 API 调用，写盘瞬态失败绝不回头重跑会再次计费的合成请求。
         audio_bytes = await self._request_speech(request)
-        request.output_path.write_bytes(audio_bytes)
+        await run_sync_transaction(request.output_path.write_bytes, audio_bytes)
 
         logger.info("OpenAI 兼容语音合成完成: %s", request.output_path)
 
         return AudioSynthesisResult(
             provider=self._provider_name,
             model=self._model,
-            characters=len(request.text),
+            text=request.text,
             output_path=request.output_path,
         )
 

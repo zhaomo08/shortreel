@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -55,23 +54,23 @@ from server.tool_runtime import (
     get_prompt_preview,
     retry_project_migration,
 )
+from tests.fakes import use_project_manager
 from tests.integration.lib.project.project_migrations.test_project_migration_v7_v8 import _project
+
+_ORIGINAL_SCRIPTS: dict[Path, bytes] = {}
 
 
 def _break_episode_script(project_dir: Path) -> None:
-    """Drop the identity off one item — a violation the activation preflight names."""
+    """Truncate the script into invalid JSON — a script that cannot be read still rejects the project."""
 
     script_path = project_dir / "scripts" / "episode_1.json"
-    script = json.loads(script_path.read_text(encoding="utf-8"))
-    del script["segments"][0]["segment_id"]
-    script_path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
+    _ORIGINAL_SCRIPTS[script_path] = script_path.read_bytes()
+    script_path.write_text('{"episode": 1, "segments": [', encoding="utf-8")
 
 
 def _repair_episode_script(project_dir: Path) -> None:
     script_path = project_dir / "scripts" / "episode_1.json"
-    script = json.loads(script_path.read_text(encoding="utf-8"))
-    script["segments"][0]["segment_id"] = "E1S01"
-    script_path.write_text(json.dumps(script, ensure_ascii=False), encoding="utf-8")
+    script_path.write_bytes(_ORIGINAL_SCRIPTS.pop(script_path))
 
 
 def test_failed_migration_records_the_offending_episode_and_file(tmp_path: Path) -> None:
@@ -85,7 +84,7 @@ def test_failed_migration_records_the_offending_episode_and_file(tmp_path: Path)
     assert failure.schema_version == ARTIFACT_MANIFEST_SCHEMA_VERSION - 1
     assert failure.reason
     assert [(d.episode, d.file) for d in failure.details] == [(1, "scripts/episode_1.json")]
-    assert "identity" in failure.details[0].violation
+    assert "not valid UTF-8 JSON" in failure.details[0].violation
     assert (project_dir / MIGRATION_FAILURE_FILENAME).exists()
 
 
@@ -166,7 +165,7 @@ def test_generation_entries_refuse_while_the_project_is_blocked(tmp_path: Path, 
     assert migrate_project_with_verdict(project_dir) is not None
 
     pm = ProjectManager(str(tmp_path))
-    monkeypatch.setattr(guard, "get_project_manager", lambda: pm)
+    use_project_manager(monkeypatch, pm)
 
     with pytest.raises(ConflictError) as excinfo:
         guard.assert_project_migration_ok("demo")
@@ -229,7 +228,7 @@ def test_web_retry_reports_the_reason_then_unblocks_once_repaired(tmp_path: Path
     assert refused.status_code == 422
     diagnostic = refused.json()["diagnostic"]
     # 失败原文经 Web 呈现边界改写集指称，其余原样。
-    assert "item 0 has no identity" in diagnostic["reason"]
+    assert "not valid UTF-8 JSON" in diagnostic["reason"]
     assert diagnostic["details"][0]["file"] == "scripts/episode_1.json"
 
     _repair_episode_script(project_dir)
@@ -421,7 +420,6 @@ _DRAFT = {"episode_id": 1, "doc_type": "drama_script_plan"}
 async def test_mcp_guard_reads_the_session_projects_root_not_the_global_one(tmp_path: Path, monkeypatch) -> None:
     """声明入口的裁决必须取自会话的项目根：会话可能绑定另一个 projects_root，同名项目不是同一个项目。"""
 
-    import lib.project.project_migration_guard as guard
     from server.agent_toolset.script_authoring import DISCARD_DRAFT
     from tests.integration.server.agent_tool_support import ToolHarness, run_declared_tool
 
@@ -436,7 +434,7 @@ async def test_mcp_guard_reads_the_session_projects_root_not_the_global_one(tmp_
     _break_episode_script(global_dir)
     assert migrate_project_with_verdict(global_dir) is not None
 
-    monkeypatch.setattr(guard, "get_project_manager", lambda: ProjectManager(str(global_root)))
+    use_project_manager(monkeypatch, ProjectManager(str(global_root)))
     ctx = ToolHarness(project_name="demo", data_root=session_root, pm=ProjectManager(str(session_root)))
     ran = False
 
@@ -520,14 +518,13 @@ def _guarded_app() -> FastAPI:
 
 
 def test_rest_guard_refuses_writes_but_keeps_reads_open(tmp_path: Path, monkeypatch) -> None:
-    import lib.project.project_migration_guard as guard
 
     projects_root = tmp_path / "projects"
     projects_root.mkdir()
     project_dir, *_ = _project(tmp_path)
     _break_episode_script(project_dir)
     assert migrate_project_with_verdict(project_dir) is not None
-    monkeypatch.setattr(guard, "get_project_manager", lambda: ProjectManager(str(tmp_path)))
+    use_project_manager(monkeypatch, ProjectManager(str(tmp_path)))
 
     client = TestClient(_guarded_app())
 

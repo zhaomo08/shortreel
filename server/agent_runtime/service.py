@@ -34,6 +34,7 @@ from lib.agent.agent_profile import agent_profile_dir
 from lib.agent.profile_frontmatter import FrontmatterError, parse_profile_metadata
 from lib.agent.profile_manifest import VALID_CONTENT_MODES
 from lib.i18n import DEFAULT_LOCALE
+from lib.infra.async_thread import run_sync_transaction
 from lib.infra.data_root_layout import DataRootLayout
 from lib.project.project_manager import ProjectManager
 from server.agent_runtime.event_log import (
@@ -238,7 +239,7 @@ class AssistantService:
                 )
         elif sdk_delete_session is not None:
             try:
-                await asyncio.to_thread(sdk_delete_session, session_id)
+                await run_sync_transaction(sdk_delete_session, session_id)
             except Exception:
                 logger.warning("sdk delete_session failed for %s", session_id, exc_info=True)
 
@@ -289,7 +290,7 @@ class AssistantService:
         （``entry``）。已被改写取代的会话不再受理消息（``SessionSupersededError``）。新会话：首条消息
         写入日志后才返回，响应携带权威条目。前端不渲染任何本地合成消息。
         """
-        self.pm.get_project_path(project_name)  # Validate project
+        await asyncio.to_thread(self.pm.get_project_path, project_name)  # Validate project
 
         if session_id:
             # Existing session
@@ -305,7 +306,9 @@ class AssistantService:
                     )
                 prompt = self._prepare_content(content, images)
                 # 旧会话懒生成先行：保证本条消息排在重放重建的历史之后。
-                await self.event_log.ensure_backfilled(session_id, self._resolve_project_cwd_safe(meta.project_name))
+                await self.event_log.ensure_backfilled(
+                    session_id, await self._aresolve_project_cwd_safe(meta.project_name)
+                )
                 accepted = await self.session_manager.send_message(
                     session_id,
                     prompt,
@@ -457,7 +460,7 @@ class AssistantService:
         响应与发送端点同构：``client_key`` 为请求侧幂等键，重试不产生第二个分支
         会话；改写后的消息在新会话里先是排队消息（``queued_message``），被接纳后落进新会话的日志。
         """
-        self.pm.get_project_path(project_name)  # Validate project
+        await asyncio.to_thread(self.pm.get_project_path, project_name)  # Validate project
         if not client_key:
             return await self._rewrite_message_once(
                 project_name,
@@ -510,7 +513,7 @@ class AssistantService:
         # 内容校验先于任何有副作用的步骤：空消息不该中断运行中的轮次。
         prompt = self._prepare_content(content, images)
 
-        project_cwd = self._resolve_project_cwd_safe(meta.project_name)
+        project_cwd = await self._aresolve_project_cwd_safe(meta.project_name)
         anchor = await self.event_log.resolve_user_message_anchor(session_id, anchor_entry_uuid, project_cwd)
         if anchor is None:
             raise RewriteAnchorError(f"anchor {anchor_entry_uuid} is not a user message of session {session_id}")
@@ -728,7 +731,7 @@ class AssistantService:
             if meta is None:
                 raise FileNotFoundError(f"session not found: {session_id}")
         status = await self.session_manager.get_status(session_id) or meta.status
-        project_cwd = self._resolve_project_cwd_safe(meta.project_name)
+        project_cwd = await self._aresolve_project_cwd_safe(meta.project_name)
         entries = await self.event_log.list_entries(session_id, project_cwd, after_seq=after_seq)
         draft_state = (
             self.session_manager.get_draft_state(session_id) if status == "running" else {"draft": None, "rev": 0}
@@ -754,7 +757,7 @@ class AssistantService:
         生命周期跟随会话面板：开场依次下发 ``entry``×N（cursor 之后的存量）、
         ``draft``（流式累积态 + rev 过滤门槛）、``queue``（排队消息快照）、``question``×N
         （未决问题）和当前 ``status``，之后直播 entry / delta / 排队消息变化（``queue_upsert`` /
-        ``queue_remove``）/ question / status。``status`` 只更新
+        ``queue_remove``，立即发送重排托盘时再发一次 ``queue``）/ question / status。``status`` 只更新
         状态、不关流；流只在客户端离开（或订阅者被溢出移除，即重连信号）时结束。
         会话不常驻时同样建流等待，之后由发送复活的会话照常推送。
         """
@@ -763,7 +766,7 @@ class AssistantService:
             if meta is None:
                 raise FileNotFoundError(f"session not found: {session_id}")
 
-        project_cwd = self._resolve_project_cwd_safe(meta.project_name)
+        project_cwd = await self._aresolve_project_cwd_safe(meta.project_name)
         last_seq = after_seq
         async with self.session_manager.stream_messages(
             session_id, idle_timeout=self.stream_heartbeat_seconds
@@ -842,6 +845,9 @@ class AssistantService:
                         # 按用户撤回移出时带上意图（``withdrawn``）与编辑时退回输入框的内容（``message``）
                         removed = {k: v for k, v in message.items() if k in ("id", "withdrawn", "message")}
                         yield self._sse_event("queue_remove", {"session_id": session_id, **removed})
+                    elif message.get("op") == "reorder":
+                        # 立即发送把消息排到最前：重播整份快照，客户端按它重排托盘
+                        yield self._sse_event("queue", {"session_id": session_id, "messages": message.get("messages")})
                     else:
                         yield self._sse_event(
                             "queue_upsert", {"session_id": session_id, "message": message.get("message")}
@@ -932,6 +938,10 @@ class AssistantService:
             return self.pm.get_project_path(project_name)
         except (FileNotFoundError, ValueError):
             return None
+
+    async def _aresolve_project_cwd_safe(self, project_name: str) -> Path | None:
+        """``_resolve_project_cwd_safe`` 的异步入口：项目目录探测会 stat，卸到线程。"""
+        return await asyncio.to_thread(self._resolve_project_cwd_safe, project_name)
 
     @staticmethod
     def _build_status_event_payload(
